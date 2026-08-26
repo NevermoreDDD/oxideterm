@@ -747,7 +747,7 @@ fn model_context_window_info_matches_tauri_priority() {
 }
 
 #[test]
-fn model_selector_probe_matches_tauri_rules() {
+fn model_selector_probe_keeps_openai_compatible_discovery_optional() {
     assert_eq!(
         resolve_model_selector_provider_probe(&provider(
             "disabled",
@@ -775,9 +775,7 @@ fn model_selector_probe_matches_tauri_rules() {
             "http://192.168.1.20:1234/v1",
             true,
         )),
-        ModelSelectorProviderProbe::ImplicitKey {
-            endpoint: Some("/models"),
-        }
+        ModelSelectorProviderProbe::StoredKey
     );
     assert_eq!(
         resolve_model_selector_provider_probe(&provider(

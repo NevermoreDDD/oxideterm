@@ -49,11 +49,6 @@ pub fn resolve_model_selector_provider_probe(
             endpoint: Some("/api/tags"),
         };
     }
-    if provider.provider_type == "openai_compatible" && is_local_provider_url(&provider.base_url) {
-        return ModelSelectorProviderProbe::ImplicitKey {
-            endpoint: Some("/models"),
-        };
-    }
     ModelSelectorProviderProbe::StoredKey
 }
 
