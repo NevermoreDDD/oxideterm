@@ -732,6 +732,7 @@ fn terminal_options(options: &PublicTerminalOptions) -> ConnectionTerminalOption
         }),
         semantic_scheme: None,
         highlight_rule_set: None,
+        timestamps_enabled: options.timestamps_enabled,
         session_log_policy: match options.session_log_policy {
             PublicTerminalSessionLogPolicy::Inherit => ConnectionTerminalSessionLogPolicy::Inherit,
             PublicTerminalSessionLogPolicy::Automatic => {
@@ -1236,6 +1237,7 @@ pub(super) fn terminal_options_projection(options: &ConnectionTerminalOptions) -
             ConnectionTerminalDeleteSequence::ControlH => "control_h",
         }),
         "semantic_scheme": options.semantic_scheme,
+        "timestamps_enabled": options.timestamps_enabled,
     })
 }
 

@@ -382,6 +382,7 @@ mod tests {
                 delete_sequence: Some(ConnectionTerminalDeleteSequence::Delete),
                 semantic_scheme: Some("conservative".to_string()),
                 highlight_rule_set: Some("network-devices".to_string()),
+                timestamps_enabled: true,
                 session_log_policy: ConnectionTerminalSessionLogPolicy::Automatic,
             },
             ..ConnectionOptions::default()
@@ -395,6 +396,7 @@ mod tests {
             serialized["terminal"]["highlightRuleSet"],
             "network-devices"
         );
+        assert_eq!(serialized["terminal"]["timestampsEnabled"], true);
         assert_eq!(serialized["terminal"]["sessionLogPolicy"], "automatic");
         assert_eq!(serialized["dedicated_new_terminal_connection"], true);
         assert_eq!(
@@ -416,6 +418,7 @@ mod tests {
             DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
         );
         assert!(legacy.terminal.inherits_application_defaults());
+        assert!(!legacy.terminal.timestamps_enabled);
         assert!(!legacy.dedicated_new_terminal_connection);
         assert_eq!(
             legacy.x11_forwarding,
@@ -427,6 +430,119 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(custom_timeout.effective_connect_timeout_seconds(), 120);
+    }
+
+    #[test]
+    fn terminal_defaults_update_only_the_qualified_saved_profile() {
+        let path = temp_store_path("terminal-profile-defaults");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store
+            .upsert(request("shared-id", SavedAuth::Agent))
+            .expect("SSH connection saved");
+        store
+            .upsert_serial_profile(SaveSerialProfileRequest {
+                id: Some("shared-id".to_string()),
+                name: "Serial".to_string(),
+                port_path: "/dev/ttyUSB0".to_string(),
+                ..SaveSerialProfileRequest::default()
+            })
+            .expect("serial profile saved");
+        store
+            .upsert_telnet_profile(SaveTelnetProfileRequest {
+                id: Some("shared-id".to_string()),
+                name: "Telnet".to_string(),
+                host: "telnet.example.com".to_string(),
+                port: 23,
+                ..SaveTelnetProfileRequest::default()
+            })
+            .expect("Telnet profile saved");
+        store
+            .upsert_mosh_profile(mosh_request("shared-id", SavedAuth::Agent))
+            .expect("Mosh profile saved");
+
+        let kinds = [
+            ConnectionTerminalProfileKind::Ssh,
+            ConnectionTerminalProfileKind::Serial,
+            ConnectionTerminalProfileKind::Telnet,
+            ConnectionTerminalProfileKind::Mosh,
+        ];
+        for kind in kinds {
+            store
+                .set_terminal_session_log_policy(
+                    kind,
+                    "shared-id",
+                    ConnectionTerminalSessionLogPolicy::Manual,
+                )
+                .unwrap();
+        }
+
+        for kind in kinds {
+            assert!(
+                store
+                    .set_terminal_timestamps_enabled(kind, "shared-id", true)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .set_terminal_session_log_policy(
+                        kind,
+                        "shared-id",
+                        ConnectionTerminalSessionLogPolicy::Automatic,
+                    )
+                    .unwrap()
+            );
+
+            for candidate in kinds {
+                let terminal = store
+                    .terminal_options_for_profile(candidate, "shared-id")
+                    .unwrap();
+                assert_eq!(terminal.timestamps_enabled, candidate == kind);
+                assert_eq!(
+                    terminal.session_log_policy,
+                    if candidate == kind {
+                        ConnectionTerminalSessionLogPolicy::Automatic
+                    } else {
+                        ConnectionTerminalSessionLogPolicy::Manual
+                    }
+                );
+            }
+
+            assert!(
+                store
+                    .set_terminal_timestamps_enabled(kind, "shared-id", false)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .set_terminal_session_log_policy(
+                        kind,
+                        "shared-id",
+                        ConnectionTerminalSessionLogPolicy::Manual,
+                    )
+                    .unwrap()
+            );
+        }
+
+        assert!(
+            store
+                .set_terminal_timestamps_enabled(
+                    ConnectionTerminalProfileKind::Serial,
+                    "shared-id",
+                    true,
+                )
+                .unwrap()
+        );
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert!(
+            reloaded
+                .terminal_options_for_profile(
+                    ConnectionTerminalProfileKind::Serial,
+                    "shared-id",
+                )
+                .unwrap()
+                .timestamps_enabled
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -2252,7 +2368,11 @@ mod tests {
             },
             dedicated_new_terminal_connection: true,
             post_connect_command: Some("uname -a".to_string()),
-            terminal: ConnectionTerminalOptions::default(),
+            terminal: ConnectionTerminalOptions {
+                timestamps_enabled: true,
+                session_log_policy: ConnectionTerminalSessionLogPolicy::Automatic,
+                ..ConnectionTerminalOptions::default()
+            },
         };
         source.save().unwrap();
 
@@ -2290,6 +2410,11 @@ mod tests {
             }
         );
         assert!(imported.options.dedicated_new_terminal_connection);
+        assert!(imported.options.terminal.timestamps_enabled);
+        assert_eq!(
+            imported.options.terminal.session_log_policy,
+            ConnectionTerminalSessionLogPolicy::Automatic
+        );
         assert_eq!(
             imported.options.post_connect_command.as_deref(),
             Some("uname -a")
@@ -2447,6 +2572,7 @@ mod tests {
                 delete_sequence: Some(ConnectionTerminalDeleteSequence::ControlH),
                 semantic_scheme: None,
                 highlight_rule_set: None,
+                timestamps_enabled: false,
                 session_log_policy: ConnectionTerminalSessionLogPolicy::Disabled,
             },
             connect_on_open: true,

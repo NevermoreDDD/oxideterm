@@ -1256,6 +1256,7 @@ impl WorkspaceApp {
                 confirm: self.i18n.t("terminal.tmux.confirm"),
                 cancel: self.i18n.t("terminal.tmux.cancel"),
             },
+            terminal_timestamps_enabled: false,
             session_log_options: Some(TerminalSessionLogOptions {
                 directory: session_log_directory,
                 include_control_sequences: session_log_settings.include_control_sequences,
@@ -1474,6 +1475,7 @@ pub(in crate::workspace) fn terminal_preference_overrides(
         highlight_rule_set_id,
         semantic_shell: None,
         local_shell_id: None,
+        terminal_timestamps_enabled: Some(options.timestamps_enabled),
         session_log_available: match options.session_log_policy {
             ConnectionTerminalSessionLogPolicy::Disabled => Some(false),
             ConnectionTerminalSessionLogPolicy::Automatic
@@ -1630,6 +1632,15 @@ mod semantic_scheme_tests {
             terminal_preference_overrides(ConnectionTerminalOptions::default(), &terminal);
         assert_eq!(inherited.session_log_available, None);
         assert_eq!(inherited.session_log_automatic, None);
+
+        let timestamps = terminal_preference_overrides(
+            ConnectionTerminalOptions {
+                timestamps_enabled: true,
+                ..ConnectionTerminalOptions::default()
+            },
+            &terminal,
+        );
+        assert_eq!(timestamps.terminal_timestamps_enabled, Some(true));
     }
 }
 

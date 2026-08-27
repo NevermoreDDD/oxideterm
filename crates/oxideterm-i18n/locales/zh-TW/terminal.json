@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "工作階段日誌",
+      "automatic_for_connection": "自動儲存此連線的工作階段日誌",
+      "profile_preferences_save_failed": "無法儲存此連線的終端機預設設定",
       "started": "工作階段日誌已開始",
       "start_failed": "無法開始工作階段日誌",
       "write_failed": "無法寫入檔案，工作階段日誌已停止",

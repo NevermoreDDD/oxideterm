@@ -113,6 +113,7 @@ pub struct TerminalUiPreferences {
     pub trzsz_labels: TerminalTrzszLabels,
     pub serial_control_labels: TerminalSerialControlLabels,
     pub tmux_labels: TerminalTmuxLabels,
+    pub terminal_timestamps_enabled: bool,
     pub session_log_options: Option<TerminalSessionLogOptions>,
     pub session_log_automatic: bool,
     pub session_log_labels: TerminalSessionLogLabels,
@@ -133,6 +134,7 @@ pub struct TerminalUiPreferenceOverrides {
     pub semantic_shell: Option<SemanticShellDialect>,
     // Retain the local shell identity so settings refreshes can resolve its Scheme again.
     pub local_shell_id: Option<String>,
+    pub terminal_timestamps_enabled: Option<bool>,
     pub session_log_available: Option<bool>,
     pub session_log_automatic: Option<bool>,
     pub session_log_context: Option<TerminalSessionLogContext>,
@@ -160,6 +162,9 @@ impl TerminalUiPreferenceOverrides {
         }
         if let Some(semantic_shell) = self.semantic_shell {
             preferences.semantic_shell = semantic_shell;
+        }
+        if let Some(enabled) = self.terminal_timestamps_enabled {
+            preferences.terminal_timestamps_enabled = enabled;
         }
         if self.session_log_available == Some(false) {
             preferences.session_log_options = None;
@@ -227,6 +232,7 @@ impl Default for TerminalUiPreferences {
             trzsz_labels: TerminalTrzszLabels::default(),
             serial_control_labels: TerminalSerialControlLabels::default(),
             tmux_labels: TerminalTmuxLabels::default(),
+            terminal_timestamps_enabled: false,
             session_log_options: None,
             session_log_automatic: false,
             session_log_labels: TerminalSessionLogLabels::default(),
@@ -1013,6 +1019,7 @@ mod tests {
             terminal_encoding: Some(TerminalEncoding::Gb18030),
             backspace_sequence: Some(TerminalBackspaceSequence::ControlH),
             delete_sequence: Some(TerminalDeleteSequence::Delete),
+            terminal_timestamps_enabled: Some(true),
             ..TerminalUiPreferenceOverrides::default()
         }
         .apply_to(&mut preferences);
@@ -1023,6 +1030,7 @@ mod tests {
             TerminalBackspaceSequence::ControlH
         );
         assert_eq!(preferences.delete_sequence, TerminalDeleteSequence::Delete);
+        assert!(preferences.terminal_timestamps_enabled);
         assert_eq!(preferences.font_family, original_font_family);
     }
 }

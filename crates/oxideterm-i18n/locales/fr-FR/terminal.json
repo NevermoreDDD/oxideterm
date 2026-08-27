@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "Journal de session",
+      "automatic_for_connection": "Enregistrer automatiquement les journaux de session pour cette connexion",
+      "profile_preferences_save_failed": "Impossible d’enregistrer les paramètres de terminal par défaut de cette connexion",
       "started": "Journal de session démarré",
       "start_failed": "Impossible de démarrer le journal de session",
       "write_failed": "Le journal de session a été arrêté car le fichier ne pouvait pas être écrit",

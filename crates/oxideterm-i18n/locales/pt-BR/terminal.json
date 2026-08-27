@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "Registro de sessão",
+      "automatic_for_connection": "Salvar automaticamente os registros de sessão desta conexão",
+      "profile_preferences_save_failed": "Não foi possível salvar os padrões do terminal desta conexão",
       "started": "Registro de sessão iniciado",
       "start_failed": "Não foi possível iniciar o registro de sessão",
       "write_failed": "O registro de sessão foi interrompido porque o arquivo não pôde ser gravado",

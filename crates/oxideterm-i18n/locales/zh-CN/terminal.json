@@ -206,6 +206,8 @@
     },
     "session_log": {
       "title": "会话日志",
+      "automatic_for_connection": "为此连接自动保存会话日志",
+      "profile_preferences_save_failed": "无法保存此连接的终端默认设置",
       "started": "会话日志已开始",
       "start_failed": "无法开始会话日志",
       "write_failed": "无法写入文件，会话日志已停止",

@@ -150,8 +150,8 @@ use oxideterm_connection_monitor::{
     visible_tmux_session_rows,
 };
 use oxideterm_connections::{
-    ConnectionStore, ConnectionTerminalOptions, ConnectionTerminalSessionLogPolicy,
-    MoshIpFamily as SavedMoshIpFamily, MoshPredictionMode,
+    ConnectionStore, ConnectionTerminalOptions, ConnectionTerminalProfileKind,
+    ConnectionTerminalSessionLogPolicy, MoshIpFamily as SavedMoshIpFamily, MoshPredictionMode,
     MoshUdpPortSelection as SavedMoshUdpPortSelection, PrivilegeCredentialKind,
     SaveConnectionRequest, SavedPrivilegeCredential, SshConfigSyncService,
 };

@@ -206,6 +206,8 @@
     },
     "session_log": {
       "title": "Session log",
+      "automatic_for_connection": "Auto-save session logs for this connection",
+      "profile_preferences_save_failed": "Could not save this connection's terminal defaults",
       "started": "Session logging started",
       "start_failed": "Could not start session logging",
       "write_failed": "Session logging stopped because the file could not be written",

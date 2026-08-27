@@ -22,6 +22,23 @@ fn adjusted_terminal_font_size(current: i64, delta: i64) -> Option<i64> {
     (next != current).then_some(next)
 }
 
+fn connection_terminal_profile_kind(
+    kind: oxideterm_terminal_triggers::SavedConnectionKind,
+) -> ConnectionTerminalProfileKind {
+    match kind {
+        oxideterm_terminal_triggers::SavedConnectionKind::Ssh => ConnectionTerminalProfileKind::Ssh,
+        oxideterm_terminal_triggers::SavedConnectionKind::Serial => {
+            ConnectionTerminalProfileKind::Serial
+        }
+        oxideterm_terminal_triggers::SavedConnectionKind::Telnet => {
+            ConnectionTerminalProfileKind::Telnet
+        }
+        oxideterm_terminal_triggers::SavedConnectionKind::Mosh => {
+            ConnectionTerminalProfileKind::Mosh
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum TerminalBroadcastMenuPlacement {
     Bottom(f32),
@@ -1968,6 +1985,54 @@ impl WorkspaceApp {
             .is_some_and(|pane| pane.read(cx).session_log_available())
     }
 
+    pub(super) fn active_terminal_session_log_automatic_default(&self, cx: &App) -> Option<bool> {
+        let saved = self.active_terminal_saved_connection(cx)?;
+        let terminal = self.connection_store.terminal_options_for_profile(
+            connection_terminal_profile_kind(saved.kind),
+            &saved.id,
+        )?;
+        Some(match terminal.session_log_policy {
+            ConnectionTerminalSessionLogPolicy::Automatic => true,
+            ConnectionTerminalSessionLogPolicy::Inherit => {
+                self.settings_store
+                    .settings()
+                    .terminal
+                    .session_log
+                    .automatic
+            }
+            ConnectionTerminalSessionLogPolicy::Manual
+            | ConnectionTerminalSessionLogPolicy::Disabled => false,
+        })
+    }
+
+    pub(super) fn toggle_active_terminal_session_log_automatic_default(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_terminal_recording_menu();
+        let Some(saved) = self.active_terminal_saved_connection(cx) else {
+            return;
+        };
+        let Some(current) = self.active_terminal_session_log_automatic_default(cx) else {
+            return;
+        };
+        let policy = if current {
+            ConnectionTerminalSessionLogPolicy::Manual
+        } else {
+            ConnectionTerminalSessionLogPolicy::Automatic
+        };
+        match self.connection_store.set_terminal_session_log_policy(
+            connection_terminal_profile_kind(saved.kind),
+            &saved.id,
+            policy,
+        ) {
+            Ok(true) => self.queue_cloud_sync_dirty_refresh(cx),
+            Ok(false) => {}
+            Err(_) => self.push_terminal_profile_preferences_save_failed(cx),
+        }
+        cx.notify();
+    }
+
     pub(super) fn start_active_terminal_session_log(&mut self, cx: &mut Context<Self>) {
         self.dismiss_terminal_recording_menu();
         let Some(pane) = self.active_pane(cx) else {
@@ -2125,10 +2190,54 @@ impl WorkspaceApp {
     }
 
     pub(super) fn toggle_active_terminal_timestamps(&mut self, cx: &mut Context<Self>) {
-        if let Some(pane) = self.active_pane(cx) {
-            let _ = pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+        let Some(pane) = self.active_pane(cx) else {
+            return;
+        };
+        let enabled = !pane.read(cx).terminal_timestamps_enabled();
+        let Some(saved) = self.active_terminal_saved_connection(cx) else {
+            pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+            return;
+        };
+        match self.connection_store.set_terminal_timestamps_enabled(
+            connection_terminal_profile_kind(saved.kind),
+            &saved.id,
+            enabled,
+        ) {
+            Ok(true) => {
+                pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+                self.queue_cloud_sync_dirty_refresh(cx);
+            }
+            Ok(false) => {
+                pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+            }
+            Err(_) => self.push_terminal_profile_preferences_save_failed(cx),
         }
         cx.notify();
+    }
+
+    fn active_terminal_saved_connection(
+        &self,
+        cx: &App,
+    ) -> Option<oxideterm_terminal_triggers::SavedConnectionRef> {
+        let session_id = self.active_terminal_session_id(cx)?;
+        self.terminal_saved_connection_refs
+            .get(&session_id)
+            .cloned()
+    }
+
+    fn push_terminal_profile_preferences_save_failed(&mut self, cx: &mut Context<Self>) {
+        self.push_workspace_notice(
+            TerminalNotice {
+                title: self
+                    .i18n
+                    .t("terminal.session_log.profile_preferences_save_failed"),
+                description: None,
+                status_text: None,
+                progress: None,
+                variant: TerminalNoticeVariant::Error,
+            },
+            cx,
+        );
     }
 
     pub(super) fn start_active_terminal_recording(&mut self, cx: &mut Context<Self>) {

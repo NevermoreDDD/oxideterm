@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "세션 로그",
+      "automatic_for_connection": "이 연결의 세션 로그 자동 저장",
+      "profile_preferences_save_failed": "이 연결의 터미널 기본값을 저장하지 못했습니다",
       "started": "세션 로그를 시작했습니다",
       "start_failed": "세션 로그를 시작할 수 없습니다",
       "write_failed": "파일에 쓸 수 없어 세션 로그가 중지되었습니다",

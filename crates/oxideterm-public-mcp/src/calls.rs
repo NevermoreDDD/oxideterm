@@ -139,6 +139,8 @@ pub struct PublicTerminalOptions {
     #[serde(default)]
     pub delete_sequence: Option<PublicTerminalDeleteSequence>,
     #[serde(default)]
+    pub timestamps_enabled: bool,
+    #[serde(default)]
     pub session_log_policy: PublicTerminalSessionLogPolicy,
 }
 

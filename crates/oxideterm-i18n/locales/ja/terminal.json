@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "セッションログ",
+      "automatic_for_connection": "この接続のセッションログを自動保存",
+      "profile_preferences_save_failed": "この接続のターミナル既定値を保存できませんでした",
       "started": "セッションログを開始しました",
       "start_failed": "セッションログを開始できませんでした",
       "write_failed": "ファイルに書き込めないため、セッションログを停止しました",

@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "Registro de sesión",
+      "automatic_for_connection": "Guardar automáticamente los registros de sesión de esta conexión",
+      "profile_preferences_save_failed": "No se pudieron guardar los valores predeterminados del terminal de esta conexión",
       "started": "Registro de sesión iniciado",
       "start_failed": "No se pudo iniciar el registro de sesión",
       "write_failed": "El registro de sesión se detuvo porque no se pudo escribir el archivo",

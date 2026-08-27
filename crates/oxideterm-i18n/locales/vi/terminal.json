@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "Nhật ký phiên",
+      "automatic_for_connection": "Tự động lưu nhật ký phiên cho kết nối này",
+      "profile_preferences_save_failed": "Không thể lưu giá trị mặc định của terminal cho kết nối này",
       "started": "Đã bắt đầu nhật ký phiên",
       "start_failed": "Không thể bắt đầu nhật ký phiên",
       "write_failed": "Nhật ký phiên đã dừng vì không thể ghi tệp",

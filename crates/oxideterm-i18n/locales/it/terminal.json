@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "Registro della sessione",
+      "automatic_for_connection": "Salva automaticamente i registri di sessione per questa connessione",
+      "profile_preferences_save_failed": "Impossibile salvare le impostazioni predefinite del terminale per questa connessione",
       "started": "Registrazione della sessione avviata",
       "start_failed": "Impossibile avviare il registro della sessione",
       "write_failed": "Il registro della sessione è stato arrestato perché il file non può essere scritto",

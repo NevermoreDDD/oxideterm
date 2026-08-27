@@ -127,6 +127,8 @@
     },
     "session_log": {
       "title": "Sitzungsprotokoll",
+      "automatic_for_connection": "Sitzungsprotokolle für diese Verbindung automatisch speichern",
+      "profile_preferences_save_failed": "Terminal-Standardwerte dieser Verbindung konnten nicht gespeichert werden",
       "started": "Sitzungsprotokollierung gestartet",
       "start_failed": "Sitzungsprotokollierung konnte nicht gestartet werden",
       "write_failed": "Sitzungsprotokollierung wurde wegen eines Schreibfehlers beendet",

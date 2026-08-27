@@ -1059,7 +1059,7 @@ impl TerminalPane {
             snapshot_dirty: false,
             snapshot_generation: 1,
             next_snapshot_line_id,
-            terminal_timestamps_enabled: false,
+            terminal_timestamps_enabled: preferences.terminal_timestamps_enabled,
             row_timestamps: Arc::new(HashMap::new()),
             row_timestamp_retained_min_line: None,
             metrics,

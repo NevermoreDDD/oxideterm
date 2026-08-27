@@ -860,6 +860,144 @@ impl ConnectionStore {
         Ok(true)
     }
 
+    pub fn terminal_options_for_profile(
+        &self,
+        kind: ConnectionTerminalProfileKind,
+        id: &str,
+    ) -> Option<&ConnectionTerminalOptions> {
+        match kind {
+            ConnectionTerminalProfileKind::Ssh => self
+                .data
+                .connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .map(|connection| &connection.options.terminal),
+            ConnectionTerminalProfileKind::Serial => self
+                .data
+                .serial_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .map(|profile| &profile.terminal),
+            ConnectionTerminalProfileKind::Telnet => self
+                .data
+                .telnet_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .map(|profile| &profile.terminal),
+            ConnectionTerminalProfileKind::Mosh => self
+                .data
+                .mosh_profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .map(|profile| &profile.terminal),
+        }
+    }
+
+    pub fn set_terminal_timestamps_enabled(
+        &mut self,
+        kind: ConnectionTerminalProfileKind,
+        id: &str,
+        enabled: bool,
+    ) -> Result<bool> {
+        self.update_terminal_options(kind, id, |terminal| {
+            if terminal.timestamps_enabled == enabled {
+                return false;
+            }
+            terminal.timestamps_enabled = enabled;
+            true
+        })
+    }
+
+    pub fn set_terminal_session_log_policy(
+        &mut self,
+        kind: ConnectionTerminalProfileKind,
+        id: &str,
+        policy: ConnectionTerminalSessionLogPolicy,
+    ) -> Result<bool> {
+        self.update_terminal_options(kind, id, |terminal| {
+            if terminal.session_log_policy == policy {
+                return false;
+            }
+            terminal.session_log_policy = policy;
+            true
+        })
+    }
+
+    fn update_terminal_options(
+        &mut self,
+        kind: ConnectionTerminalProfileKind,
+        id: &str,
+        mut update: impl FnMut(&mut ConnectionTerminalOptions) -> bool,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let changed = match kind {
+            ConnectionTerminalProfileKind::Ssh => {
+                let Some(connection) = self
+                    .data
+                    .connections
+                    .iter_mut()
+                    .find(|connection| connection.id == id)
+                else {
+                    return Ok(false);
+                };
+                let changed = update(&mut connection.options.terminal);
+                if changed {
+                    connection.updated_at = Some(now);
+                }
+                changed
+            }
+            ConnectionTerminalProfileKind::Serial => {
+                let Some(profile) = self
+                    .data
+                    .serial_profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == id)
+                else {
+                    return Ok(false);
+                };
+                let changed = update(&mut profile.terminal);
+                if changed {
+                    profile.updated_at = now;
+                }
+                changed
+            }
+            ConnectionTerminalProfileKind::Telnet => {
+                let Some(profile) = self
+                    .data
+                    .telnet_profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == id)
+                else {
+                    return Ok(false);
+                };
+                let changed = update(&mut profile.terminal);
+                if changed {
+                    profile.updated_at = now;
+                }
+                changed
+            }
+            ConnectionTerminalProfileKind::Mosh => {
+                let Some(profile) = self
+                    .data
+                    .mosh_profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == id)
+                else {
+                    return Ok(false);
+                };
+                let changed = update(&mut profile.terminal);
+                if changed {
+                    profile.updated_at = now;
+                }
+                changed
+            }
+        };
+        if changed {
+            self.save()?;
+        }
+        Ok(true)
+    }
+
     pub fn upsert_serial_profile(
         &mut self,
         request: SaveSerialProfileRequest,

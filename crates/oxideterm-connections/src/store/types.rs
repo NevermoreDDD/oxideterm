@@ -209,6 +209,8 @@ pub struct ConnectionTerminalOptions {
     pub semantic_scheme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight_rule_set: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub timestamps_enabled: bool,
     #[serde(
         default,
         skip_serializing_if = "ConnectionTerminalSessionLogPolicy::is_inherit"
@@ -223,8 +225,17 @@ impl ConnectionTerminalOptions {
             && self.delete_sequence.is_none()
             && self.semantic_scheme.is_none()
             && self.highlight_rule_set.is_none()
+            && !self.timestamps_enabled
             && self.session_log_policy == ConnectionTerminalSessionLogPolicy::Inherit
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionTerminalProfileKind {
+    Ssh,
+    Serial,
+    Telnet,
+    Mosh,
 }
 
 pub const DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS: u32 = 20 * 60;

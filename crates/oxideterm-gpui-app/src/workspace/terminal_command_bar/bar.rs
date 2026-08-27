@@ -734,6 +734,7 @@ impl WorkspaceApp {
     fn render_terminal_recording_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let session_log_status = self.active_terminal_session_log_status(cx);
         let session_log_available = self.active_terminal_session_log_available(cx);
+        let session_log_automatic = self.active_terminal_session_log_automatic_default(cx);
         let menu = context_menu_event_boundary(
             dropdown_menu_content(&self.tokens)
                 .absolute()
@@ -781,6 +782,27 @@ impl WorkspaceApp {
                 },
                 |this, _event, window, cx| {
                     this.open_terminal_cast_file(window, cx);
+                },
+                cx,
+            ))
+            .child(dropdown_menu_separator(&self.tokens));
+
+        let automatic_item = dropdown_menu_item(
+            &self.tokens,
+            self.i18n.t("terminal.session_log.automatic_for_connection"),
+            DropdownMenuItemKind::Checkbox(session_log_automatic.unwrap_or(false)),
+            false,
+            session_log_automatic.is_none(),
+        );
+        let menu = menu
+            .child(self.workspace_context_menu_styled_action(
+                automatic_item,
+                session_log_automatic.is_none(),
+                false,
+                ContextMenuActionableStyle::default(),
+                |this| this.terminal_recording_menu_open = false,
+                |this, _event, _window, cx| {
+                    this.toggle_active_terminal_session_log_automatic_default(cx)
                 },
                 cx,
             ))

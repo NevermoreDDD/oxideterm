@@ -43,7 +43,7 @@ pub use store::{
     CONFIG_VERSION, ConnectionCredentialSlot, ConnectionInfo, ConnectionOptions, ConnectionStore,
     ConnectionStoreCheckpoint, ConnectionStoreData, ConnectionTerminalBackspaceSequence,
     ConnectionTerminalDeleteSequence, ConnectionTerminalEncoding, ConnectionTerminalOptions,
-    ConnectionTerminalSessionLogPolicy, ConnectionX11ForwardingMode,
+    ConnectionTerminalProfileKind, ConnectionTerminalSessionLogPolicy, ConnectionX11ForwardingMode,
     ConnectionX11ForwardingOptions, DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS, DeletedConnectionTombstone,
     GLOBAL_UPSTREAM_PROXY_PASSWORD_KEYCHAIN_ID, LOCAL_SHELL_PRIVILEGE_CONNECTION_ID,
