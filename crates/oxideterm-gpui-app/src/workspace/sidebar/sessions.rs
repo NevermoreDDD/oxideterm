@@ -34,6 +34,33 @@ struct StandaloneActiveSession {
     target: StandaloneActiveSessionTarget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StandaloneSessionConnectionAction {
+    Disconnect,
+    Reconnect,
+}
+
+fn standalone_session_connection_action(
+    kind: StandaloneActiveSessionKind,
+    readiness: ActiveSessionReadiness,
+) -> Option<StandaloneSessionConnectionAction> {
+    match kind {
+        StandaloneActiveSessionKind::Serial | StandaloneActiveSessionKind::Telnet => {
+            match readiness {
+                ActiveSessionReadiness::Ready | ActiveSessionReadiness::Connecting => {
+                    Some(StandaloneSessionConnectionAction::Disconnect)
+                }
+                ActiveSessionReadiness::Error | ActiveSessionReadiness::Disconnected => {
+                    Some(StandaloneSessionConnectionAction::Reconnect)
+                }
+            }
+        }
+        StandaloneActiveSessionKind::Mosh
+        | StandaloneActiveSessionKind::Rdp
+        | StandaloneActiveSessionKind::Vnc => None,
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::workspace) struct ActiveSessionSidebarRow {
     node_id: NodeId,
@@ -118,6 +145,59 @@ impl WorkspaceApp {
             color,
             cx,
         )
+    }
+
+    fn apply_standalone_session_connection_action(
+        &mut self,
+        session: StandaloneActiveSession,
+        action: StandaloneSessionConnectionAction,
+        cx: &mut Context<Self>,
+    ) {
+        let StandaloneActiveSessionTarget::Terminal(session_id) = session.target else {
+            return;
+        };
+        let pane = {
+            let tab_host = self.tab_host.read(cx);
+            let location = tab_host.terminal_location(session_id);
+            location.and_then(|location| tab_host.panes().get(&location.pane_id).cloned())
+        };
+        let Some(pane) = pane else {
+            return;
+        };
+
+        let result = pane.update(cx, |pane, cx| match (session.kind, action) {
+            (
+                StandaloneActiveSessionKind::Serial,
+                StandaloneSessionConnectionAction::Disconnect,
+            ) => pane.apply_serial_action(
+                oxideterm_gpui_terminal::TerminalSerialAction::Disconnect,
+                cx,
+            ),
+            (StandaloneActiveSessionKind::Serial, StandaloneSessionConnectionAction::Reconnect) => {
+                pane.apply_serial_action(
+                    oxideterm_gpui_terminal::TerminalSerialAction::Reconnect,
+                    cx,
+                )
+            }
+            (
+                StandaloneActiveSessionKind::Telnet,
+                StandaloneSessionConnectionAction::Disconnect,
+            ) => pane.apply_telnet_action(
+                oxideterm_gpui_terminal::TerminalTelnetAction::Disconnect,
+                cx,
+            ),
+            (StandaloneActiveSessionKind::Telnet, StandaloneSessionConnectionAction::Reconnect) => {
+                pane.reconnect_telnet(cx)
+                    .then_some(())
+                    .ok_or_else(|| "The Telnet session is not ready to reconnect.".to_string())
+            }
+            (StandaloneActiveSessionKind::Mosh, _)
+            | (StandaloneActiveSessionKind::Rdp, _)
+            | (StandaloneActiveSessionKind::Vnc, _) => Ok(()),
+        });
+        if result.is_ok() {
+            cx.notify();
+        }
     }
 
     fn queue_ssh_terminal_tab_for_sidebar_node(
@@ -1530,6 +1610,8 @@ impl WorkspaceApp {
             }
         };
         let status = self.session_node_status(row.node_view.status());
+        let connection_action =
+            standalone_session_connection_action(session.kind, row.node_view.readiness.clone());
         let background = if active {
             rgba((theme.accent << 8) | SESSION_FOCUS_TERMINAL_ACTIVE_BG_ALPHA)
         } else {
@@ -1561,6 +1643,68 @@ impl WorkspaceApp {
                     .text_size(px(SESSION_TREE_TEXT_SIZE))
                     .text_color(rgb(status.text_color))
                     .child(row.title),
+            )
+            .when_some(connection_action, |row, action| {
+                let (icon, color) = match action {
+                    StandaloneSessionConnectionAction::Disconnect => {
+                        (LucideIcon::WifiOff, theme.error)
+                    }
+                    StandaloneSessionConnectionAction::Reconnect => {
+                        (LucideIcon::RefreshCw, theme.accent)
+                    }
+                };
+                row.child(self.workspace_icon_action_button(
+                    icon,
+                    13.0,
+                    rgb(color),
+                    oxideterm_gpui_ui::button::IconButtonOptions {
+                        has_background: true,
+                        background: Some(rgba((color << 8) | SESSION_FOCUS_ACTION_BG_ALPHA)),
+                        hover_background: Some(rgba(
+                            (color << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA,
+                        )),
+                        ..oxideterm_gpui_ui::button::IconButtonOptions::opaque_toolbar(
+                            22.0,
+                            oxideterm_gpui_ui::button::ButtonRadius::Md,
+                        )
+                    },
+                    move |this, _event, _window, cx| {
+                        this.apply_standalone_session_connection_action(session, action, cx);
+                        cx.stop_propagation();
+                    },
+                    cx,
+                ))
+            })
+            .when(
+                matches!(
+                    session.kind,
+                    StandaloneActiveSessionKind::Serial | StandaloneActiveSessionKind::Telnet
+                ),
+                |row| {
+                    row.child(self.workspace_icon_action_button(
+                        LucideIcon::Plus,
+                        13.0,
+                        rgb(theme.accent),
+                        oxideterm_gpui_ui::button::IconButtonOptions {
+                            has_background: true,
+                            background: Some(rgba(
+                                (theme.accent << 8) | SESSION_FOCUS_ACTION_BG_ALPHA,
+                            )),
+                            hover_background: Some(rgba(
+                                (theme.accent << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA,
+                            )),
+                            ..oxideterm_gpui_ui::button::IconButtonOptions::opaque_toolbar(
+                                22.0,
+                                oxideterm_gpui_ui::button::ButtonRadius::Md,
+                            )
+                        },
+                        |this, _event, window, cx| {
+                            this.open_new_connection_form(window, cx);
+                            cx.stop_propagation();
+                        },
+                        cx,
+                    ))
+                },
             )
             .child(
                 div()
@@ -2008,5 +2152,28 @@ impl WorkspaceApp {
                 ring: false,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_serial_and_telnet_show_lifecycle_actions_for_their_state() {
+        assert_eq!(
+            standalone_session_connection_action(
+                StandaloneActiveSessionKind::Serial,
+                ActiveSessionReadiness::Ready,
+            ),
+            Some(StandaloneSessionConnectionAction::Disconnect)
+        );
+        assert_eq!(
+            standalone_session_connection_action(
+                StandaloneActiveSessionKind::Telnet,
+                ActiveSessionReadiness::Disconnected,
+            ),
+            Some(StandaloneSessionConnectionAction::Reconnect)
+        );
     }
 }

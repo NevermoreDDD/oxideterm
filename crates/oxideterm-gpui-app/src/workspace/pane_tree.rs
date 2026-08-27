@@ -273,15 +273,30 @@ impl WorkspaceApp {
             .update(cx, |tab_host, _cx| tab_host.remove_terminal_pane(*pane_id))
     }
 
+    fn terminal_session_keeps_tab_after_exit(
+        &self,
+        session_id: TerminalSessionId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.serial_terminal_configs.contains_key(&session_id) {
+            return true;
+        }
+        let pane = {
+            let tab_host = self.tab_host.read(cx);
+            let location = tab_host.terminal_location(session_id);
+            location.and_then(|location| tab_host.panes().get(&location.pane_id).cloned())
+        };
+        pane.is_some_and(|pane| {
+            pane.read(cx).session_kind() == oxideterm_terminal::TerminalSessionKind::Telnet
+        })
+    }
+
     pub(super) fn queue_auto_close_terminal_session(
         &mut self,
         session_id: TerminalSessionId,
         cx: &mut Context<Self>,
     ) {
-        // Serial sessions report port failures through the same terminal event;
-        // keep local transport panes visible so users can inspect the error
-        // text and reconnect without recreating the whole tab.
-        if self.serial_terminal_configs.contains_key(&session_id) {
+        if self.terminal_session_keeps_tab_after_exit(session_id, cx) {
             return;
         }
         if self.pending_auto_close_terminal_sessions.insert(session_id) {
@@ -316,7 +331,7 @@ impl WorkspaceApp {
     ) {
         let session_ids: Vec<_> = self.pending_auto_close_terminal_sessions.drain().collect();
         for session_id in session_ids {
-            if self.serial_terminal_configs.contains_key(&session_id) {
+            if self.terminal_session_keeps_tab_after_exit(session_id, cx) {
                 continue;
             }
             self.close_terminal_session(session_id, window, cx);

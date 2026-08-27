@@ -58,6 +58,7 @@ use oxideterm_terminal_recording::{
 mod image_cache;
 mod ime;
 mod interactions;
+mod reconnect;
 mod render;
 mod scrollbar;
 
@@ -257,6 +258,7 @@ pub struct TerminalSerialStatus {
 /// A serial operation requested by another application-owned surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalSerialAction {
+    Disconnect,
     RefreshPortPresence,
     Reconnect,
     SendBreak,
@@ -389,6 +391,7 @@ pub struct TerminalPane {
     // The backend kind is immutable for a pane, including serial reconnects.
     session_kind: TerminalSessionKind,
     serial_reconnect_config: Option<SerialSessionConfig>,
+    telnet_reconnect_config: Option<TelnetSessionConfig>,
     serial_port_available: Option<bool>,
     focus_handle: FocusHandle,
     preference_overrides: TerminalUiPreferenceOverrides,
@@ -814,6 +817,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
+        let reconnect_config = config.clone();
         let terminal = Arc::new(Mutex::new(TerminalSession::telnet_with_login_and_encoding(
             config,
             login,
@@ -823,7 +827,9 @@ impl TerminalPane {
             preferences.terminal_encoding,
             preferences.scrollback_lines,
         )));
-        Self::from_session(terminal, preferences, window, cx)
+        let mut pane = Self::from_session(terminal, preferences, window, cx)?;
+        pane.telnet_reconnect_config = Some(reconnect_config);
+        Ok(pane)
     }
 
     pub fn new_mosh_with_preferences(
@@ -1039,6 +1045,7 @@ impl TerminalPane {
             terminal,
             session_kind,
             serial_reconnect_config: None,
+            telnet_reconnect_config: None,
             serial_port_available: None,
             focus_handle,
             preference_overrides: TerminalUiPreferenceOverrides::default(),
@@ -1788,6 +1795,13 @@ impl TerminalPane {
             return Err("The selected terminal is not a serial session.".to_string());
         }
         match action {
+            TerminalSerialAction::Disconnect => {
+                self.terminal.lock().shutdown();
+                self.terminal_exited = true;
+                self.input_locked = true;
+                cx.emit(TerminalPaneEvent::Exited { exit_code: None });
+                cx.notify();
+            }
             TerminalSerialAction::RefreshPortPresence => {
                 self.refresh_serial_port_presence(cx);
             }
@@ -1897,97 +1911,6 @@ impl TerminalPane {
         }
         cx.notify();
         Ok(())
-    }
-
-    fn can_reconnect_serial(&self) -> bool {
-        self.serial_reconnect_config.is_some() && self.terminal_exited
-    }
-
-    fn reconnect_serial(&mut self, cx: &mut Context<Self>) {
-        if !self.can_reconnect_serial() {
-            return;
-        }
-        let Some(config) = self.serial_reconnect_config.clone() else {
-            return;
-        };
-
-        let resize = self
-            .last_pty_resize
-            .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS, 0, 0));
-        let runtime_options = self
-            .terminal
-            .lock()
-            .serial_runtime_options()
-            .unwrap_or_default();
-        self.terminal.lock().shutdown();
-
-        let mut terminal = match TerminalSession::serial_with_graphics_and_encoding(
-            config.clone(),
-            resize.0,
-            resize.1,
-            graphics_options_from_preferences(&self.preferences),
-            self.preferences.terminal_encoding,
-            self.preferences.scrollback_lines,
-        ) {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                self.title = SharedString::from(format!(
-                    "{}: {error}",
-                    self.preferences.serial_control_labels.reconnect_failed
-                ));
-                cx.notify();
-                return;
-            }
-        };
-        let _ = terminal.set_serial_runtime_options(runtime_options);
-        if resize.2 > 0 && resize.3 > 0 {
-            let _ = terminal.resize_with_cell_size(resize.0, resize.1, resize.2, resize.3);
-        }
-        let _ = terminal.set_focused(self.focused);
-        let snapshot = terminal.snapshot();
-
-        // Preserve the pane identity while replacing the transport-owned serial handle.
-        self.terminal = Arc::new(Mutex::new(terminal));
-        self.serial_reconnect_config = Some(config);
-        self.serial_port_available = Some(true);
-        self.snapshot = self.stamp_snapshot(snapshot);
-        self.mark_terminal_content_changed(cx);
-        self.terminal_exited = false;
-        self.input_locked = false;
-        self.title = SharedString::from("OxideTerm");
-        self.selection = None;
-        self.pending_paste = None;
-        self.context_menu = None;
-        self.context_action_requested = None;
-        self.marked_text = None;
-        self.privilege_prompt_inline_hint = None;
-        self.privilege_prompt_submit_requested = false;
-        self.search_query = None;
-        self.search_cache = None;
-        self.selected_search_match = None;
-        self.hovered_link = None;
-        self.hovered_command_mark_id = None;
-        self.selecting = false;
-        self.last_mouse_report_point = None;
-        self.command_marks.clear();
-        self.command_marks_render_cache_dirty = true;
-        self.selected_command_mark_id = None;
-        self.command_mark_id_aliases.clear();
-        self.input_tracker.reset();
-        self.privilege_prompt_tracker = PrivilegePromptTracker::default();
-        self.privilege_prompt_expiry_generation =
-            self.privilege_prompt_expiry_generation.wrapping_add(1);
-        self.privilege_prompt_expiry_task = None;
-        self.sync_terminal_output_events_enabled();
-        cx.emit(TerminalPaneEvent::PrivilegePromptStateChanged);
-        self.command_fact_ledger = CommandFactLedger::default();
-        self.last_pty_resize = Some(resize);
-        self.pending_pty_resize = None;
-        self.last_drain_budget_exhausted = false;
-        self.clear_smooth_scroll_remainder();
-        self.reset_cursor_blink();
-        self.wake_terminal_scheduler();
-        cx.notify();
     }
 
     fn refresh_serial_port_presence(&mut self, cx: &mut Context<Self>) {
