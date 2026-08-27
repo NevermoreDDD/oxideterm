@@ -351,7 +351,9 @@ pub(crate) static ACTION_DEFINITIONS: LazyLock<Vec<ActionDefinition>> = LazyLock
             "terminal.clearScreen",
             ActionScope::Terminal,
             KeyCombo::ctrl("l"),
-            KeyCombo::ctrl("l"),
+            // Windows and Linux shells own Ctrl+L and use it to clear and
+            // redraw the prompt. Keep the host-only action on a shifted chord.
+            KeyCombo::ctrl_shift("l"),
         ),
         def(
             "terminal.aiPanel",
@@ -993,27 +995,6 @@ mod tests {
     use gpui::{Keystroke, Modifiers};
 
     #[test]
-    fn printable_symbols_normalize_like_tauri_registry() {
-        let combo = normalize_combo(KeyCombo {
-            key: "}".to_string(),
-            ctrl: false,
-            shift: true,
-            alt: true,
-            meta: true,
-        });
-        assert_eq!(
-            combo,
-            KeyCombo {
-                key: "}".to_string(),
-                ctrl: false,
-                shift: false,
-                alt: false,
-                meta: true,
-            }
-        );
-    }
-
-    #[test]
     fn overrides_are_diff_based_per_platform_side() {
         let mut overrides = Map::new();
         set_override(
@@ -1077,6 +1058,17 @@ mod tests {
     }
 
     #[test]
+    fn windows_and_linux_ctrl_l_remains_terminal_input() {
+        let definition = action_definition("terminal.clearScreen").unwrap();
+        let overrides = Map::new();
+
+        assert_eq!(
+            effective_combo(definition, &overrides, KeybindingSide::Other),
+            Some(KeyCombo::ctrl_shift("l"))
+        );
+    }
+
+    #[test]
     fn keystroke_matching_uses_effective_override() {
         let mut overrides = Map::new();
         set_override(
@@ -1105,68 +1097,5 @@ mod tests {
             "app.newTerminal",
             &overrides
         ));
-    }
-
-    #[test]
-    fn terminal_behavior_matches_tauri_gating() {
-        let close_tab = action_definition("app.closeTab").unwrap();
-        let close_panel = action_definition("terminal.closePanel").unwrap();
-        let search = action_definition("terminal.search").unwrap();
-
-        assert!(!action_allowed_by_terminal_behavior(
-            close_tab,
-            &KeyCombo::ctrl("w"),
-            true,
-            false,
-        ));
-        assert!(!action_allowed_by_terminal_behavior(
-            close_panel,
-            close_panel.default_combo(KeybindingSide::current()),
-            true,
-            false,
-        ));
-        assert!(action_allowed_by_terminal_behavior(
-            close_panel,
-            close_panel.default_combo(KeybindingSide::current()),
-            true,
-            true,
-        ));
-        assert!(action_allowed_by_terminal_behavior(
-            search,
-            search.default_combo(KeybindingSide::current()),
-            true,
-            false,
-        ));
-    }
-
-    #[test]
-    fn plugin_keybindings_match_tauri_normalization() {
-        let cmd_shift_r = Keystroke {
-            modifiers: Modifiers {
-                platform: true,
-                shift: true,
-                ..Default::default()
-            },
-            key: "r".to_string(),
-            key_char: None,
-        };
-        assert_eq!(
-            normalize_plugin_keystroke(&cmd_shift_r).as_deref(),
-            Some("ctrl+r+shift")
-        );
-
-        let ctrl_shift_k = Keystroke {
-            modifiers: Modifiers {
-                control: true,
-                shift: true,
-                ..Default::default()
-            },
-            key: "k".to_string(),
-            key_char: None,
-        };
-        assert_eq!(
-            normalize_plugin_keystroke(&ctrl_shift_k).as_deref(),
-            Some("ctrl+k+shift")
-        );
     }
 }

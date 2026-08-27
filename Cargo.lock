@@ -7905,7 +7905,6 @@ dependencies = [
  "oxideterm-i18n",
  "oxideterm-ide-core",
  "oxideterm-ide-fs",
- "oxideterm-launcher",
  "oxideterm-local-files",
  "oxideterm-mosh",
  "oxideterm-network-proxy",
@@ -8076,8 +8075,10 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "criterion 0.5.1",
  "futures",
  "gpui",
+ "gpui_platform",
  "image",
  "oxideterm-gpui-ui",
  "oxideterm-modem-transfer",
@@ -8143,14 +8144,6 @@ dependencies = [
  "tokio",
  "tracing",
  "zstd",
-]
-
-[[package]]
-name = "oxideterm-launcher"
-version = "2.0.24"
-dependencies = [
- "oxideterm-settings",
- "oxideterm-wsl-graphics",
 ]
 
 [[package]]
@@ -8297,6 +8290,7 @@ dependencies = [
  "chacha20poly1305",
  "fs2",
  "oxideterm-atomic-file",
+ "oxideterm-secret-store",
  "parking_lot",
  "rand 0.8.6",
  "rmp-serde",

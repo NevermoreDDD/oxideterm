@@ -20,6 +20,8 @@ impl WorkspaceApp {
                 workspace.enqueue_window_intent(intent, cx);
             },
         );
+        let window_button_layout_subscription =
+            cx.observe_button_layout_changed(window, |_workspace, _window, cx| cx.notify());
         let mut settings_store = SettingsStore::load_default()?;
         settings_store.settings_mut().sidebar_ui.zen_mode = false;
         if let Err(error) = ensure_bundled_workspace_backgrounds(settings_store.path()) {
@@ -199,33 +201,6 @@ impl WorkspaceApp {
         );
         let terminal_triggers =
             settings::TerminalTriggersSettingsState::load(settings_store.path());
-        let launcher = cx.new(|cx| LauncherWorkspaceEntity::new(settings.launcher.enabled, cx));
-        let launcher_observation = cx.observe(&launcher, |_workspace, _launcher, cx| {
-            // Entity-owned scans and input transitions repaint every mounted launcher surface.
-            cx.notify();
-        });
-        let launcher_subscription = cx.subscribe(
-            &launcher,
-            |workspace, _launcher, event: &LauncherWorkspaceEvent, cx| match event {
-                LauncherWorkspaceEvent::EnabledChanged(enabled) => {
-                    workspace.settings_store.settings_mut().launcher.enabled = *enabled;
-                    let _ = workspace.settings_store.save();
-                    workspace.settings_workspace.update(cx, |settings, _cx| {
-                        settings.acknowledge_external_store_state()
-                    });
-                    if !enabled {
-                        workspace.ime_marked_text = None;
-                    }
-                    cx.notify();
-                }
-                LauncherWorkspaceEvent::TooltipRequested { id, label, x, y } => {
-                    workspace.queue_workspace_tooltip(id, label, *x, *y, cx);
-                }
-                LauncherWorkspaceEvent::TooltipCleared { id } => {
-                    workspace.clear_workspace_tooltip(id, cx);
-                }
-            },
-        );
         let file_manager = cx.new(|cx| FileManagerState::load(settings_store.path(), cx));
         let file_manager_observation =
             cx.observe(&file_manager, |_workspace, _file_manager, cx| {
@@ -785,6 +760,7 @@ impl WorkspaceApp {
             settings_legal_notice_scroll: MarkdownVirtualListScrollHandle::new(),
             _window_intents: window_intents,
             _window_intent_subscription: window_intent_subscription,
+            _window_button_layout_subscription: window_button_layout_subscription,
             window_registry,
             window_effect_delivery_scheduled: false,
             connection_flow,
@@ -831,9 +807,6 @@ impl WorkspaceApp {
             sftp_view,
             _sftp_observation: sftp_observation,
             _sftp_subscription: sftp_subscription,
-            launcher,
-            _launcher_observation: launcher_observation,
-            _launcher_subscription: launcher_subscription,
             graphics,
             _graphics_observation: graphics_observation,
             _graphics_subscription: graphics_subscription,
