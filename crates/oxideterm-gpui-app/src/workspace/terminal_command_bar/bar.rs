@@ -56,7 +56,11 @@ impl WorkspaceApp {
         let target_indicator_is_local =
             is_local_terminal && target_label == self.i18n.t("terminal.command_bar.local_shell");
         let can_split = self.active_tab(cx).is_some_and(|tab| {
-            tab.kind == TabKind::LocalTerminal
+            (tab.kind == TabKind::LocalTerminal
+                || (tab.kind == TabKind::SshTerminal
+                    && self
+                        .active_ssh_terminal_node_id(cx)
+                        .is_some_and(|node_id| self.node_is_ready_for_terminal(&node_id))))
                 && !self.active_tab_has_serial_terminal(cx)
                 && tab
                     .root_pane

@@ -1176,7 +1176,7 @@ impl WorkspaceApp {
         }
     }
 
-    pub(super) fn create_ssh_terminal_pane_for_existing_node(
+    pub(in crate::workspace) fn create_ssh_terminal_pane_for_existing_node(
         &mut self,
         node_id: &NodeId,
         post_connect_command: Option<String>,
