@@ -76,6 +76,7 @@ oxideterm-topology = { path = "../oxideterm-topology" }
 oxideterm-update = { path = "../oxideterm-update" }
 oxideterm-workspace = { path = "../oxideterm-workspace" }
 oxideterm-wsl-graphics = { path = "../oxideterm-wsl-graphics" }
+oxideterm-x11-forwarding = { path = "../oxideterm-x11-forwarding" }
 parking_lot.workspace = true
 regex.workspace = true
 redb = "2.1"

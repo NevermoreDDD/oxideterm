@@ -61,7 +61,7 @@ class ArtifactNameTests(unittest.TestCase):
 
 class PortableArchiveTests(unittest.TestCase):
     def required_entries(self, root: str, executable: str) -> list[str]:
-        return [
+        entries = [
             f"{root}/{executable}",
             f"{root}/portable",
             f"{root}/VERSION",
@@ -74,6 +74,12 @@ class PortableArchiveTests(unittest.TestCase):
             ),
             *(f"{root}/{name}" for name in verify_native_package.REQUIRED_DOCUMENTS),
         ]
+        if executable.endswith(".exe"):
+            entries.extend(
+                f"{root}/{suffix}"
+                for suffix in verify_native_package.WINDOWS_X11_RUNTIME_SUFFIXES
+            )
+        return entries
 
     def entry_bytes(self, name: str, executable: str) -> bytes:
         if name.endswith("VERSION"):
@@ -94,6 +100,16 @@ class PortableArchiveTests(unittest.TestCase):
                 '"portable-update.json"]'
                 "}"
             ).encode()
+        if name.endswith("VCXSRV-RUNTIME.json"):
+            return (
+                "{"
+                f'"version":"{verify_native_package.WINDOWS_X11_RUNTIME_VERSION}",'
+                '"releaseAsset":{'
+                f'"sha256":"{verify_native_package.WINDOWS_X11_RELEASE_SHA256}"'
+                "},"
+                '"source":{"commit":"pinned"}'
+                "}"
+            ).encode()
         return b"data"
 
     def test_windows_portable_archive_has_required_entries(self) -> None:
@@ -107,6 +123,22 @@ class PortableArchiveTests(unittest.TestCase):
             verify_native_package.verify_portable_archive(
                 path, "x86_64-pc-windows-msvc", "2.0.0"
             )
+
+    def test_windows_portable_archive_rejects_missing_managed_x11_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "portable.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                for name in self.required_entries("OxideTerm", "oxideterm-native.exe"):
+                    if "/resources/x11/vcxsrv/" in name:
+                        continue
+                    archive.writestr(
+                        name, self.entry_bytes(name, "oxideterm-native.exe")
+                    )
+
+            with self.assertRaisesRegex(RuntimeError, "vcxsrv.exe"):
+                verify_native_package.verify_portable_archive(
+                    path, "x86_64-pc-windows-msvc", "2.0.0"
+                )
 
     def test_linux_portable_archive_rejects_missing_agent_notice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

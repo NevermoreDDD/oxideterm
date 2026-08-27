@@ -15,6 +15,7 @@ mod display;
 mod endpoint;
 mod error;
 mod local_auth;
+mod managed;
 mod plan;
 mod policy;
 mod prepare;
@@ -35,6 +36,8 @@ pub use display::{X11Display, X11DisplayTransport};
 pub use endpoint::X11LocalEndpoint;
 pub use error::{X11ForwardingError, X11Result};
 pub use local_auth::X11LocalAuthorityResolver;
+#[cfg(windows)]
+pub use managed::{ManagedWindowsX11Runtime, install_managed_windows_x11_runtime};
 pub use plan::X11ForwardPlan;
 pub use policy::{
     DEFAULT_X11_UNTRUSTED_TIMEOUT_MILLIS, X11AuthFallbackMode, X11ForwardPolicy, X11ForwardTrust,

@@ -7934,6 +7934,7 @@ dependencies = [
  "oxideterm-update",
  "oxideterm-workspace",
  "oxideterm-wsl-graphics",
+ "oxideterm-x11-forwarding",
  "parking_lot",
  "raw-window-handle",
  "redb",
@@ -8752,6 +8753,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "windows 0.61.3",
  "zeroize",
 ]
 

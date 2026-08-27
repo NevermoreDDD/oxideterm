@@ -1,0 +1,23 @@
+{
+  "name": "VcXsrv",
+  "version": "21.1.16.1",
+  "architecture": "x86_64",
+  "windowsTargets": [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc"
+  ],
+  "releaseAsset": {
+    "url": "https://github.com/marchaesen/vcxsrv/releases/download/21.1.16.1/vcxsrv-64.21.1.16.1.installer.exe",
+    "sha256": "df7fed8f49665d0592528ab6be9d07111ea73c6848283d128b77690e05b8f90b"
+  },
+  "license": {
+    "spdx": "GPL-3.0-or-later",
+    "url": "https://raw.githubusercontent.com/marchaesen/vcxsrv/b1c7712a2584b263f44fa24e8c493f4f59c472ea/COPYING",
+    "sha256": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b"
+  },
+  "source": {
+    "repository": "https://github.com/marchaesen/vcxsrv",
+    "commit": "b1c7712a2584b263f44fa24e8c493f4f59c472ea",
+    "url": "https://github.com/marchaesen/vcxsrv/tree/b1c7712a2584b263f44fa24e8c493f4f59c472ea"
+  }
+}

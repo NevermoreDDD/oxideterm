@@ -173,6 +173,8 @@ fn main() {
             None
         }
     };
+    #[cfg(target_os = "windows")]
+    let managed_x11_runtime_owner = oxideterm_x11_forwarding::install_managed_windows_x11_runtime();
 
     let application = oxideterm_gpui_platform::application().with_assets(NativeAssets);
     let url_event_receiver = single_instance_rx.clone();
@@ -288,6 +290,8 @@ fn main() {
             eprintln!("failed to confirm the applied update: {error}");
         }
     });
+    #[cfg(target_os = "windows")]
+    drop(managed_x11_runtime_owner);
 }
 
 fn confirm_update_after_initial_workspace() -> std::io::Result<()> {

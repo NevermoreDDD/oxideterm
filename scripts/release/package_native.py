@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import plistlib
@@ -12,10 +13,12 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -60,6 +63,41 @@ PORTABLE_UPDATE_MANIFEST_FORMAT = 1
 PACKAGE_VERSION_FILENAME = "VERSION"
 LINUX_PACKAGE_KIND_FILENAME = "PACKAGE_KIND"
 THIRD_PARTY_LICENSE_DIR = ROOT_DIR / "licenses" / "third-party"
+WINDOWS_X11_MANIFEST = Path("x11") / "vcxsrv-runtime.json"
+WINDOWS_X11_RUNTIME_DIR = Path("x11") / "vcxsrv"
+WINDOWS_X11_PROVENANCE_FILENAME = "VCXSRV-RUNTIME.json"
+WINDOWS_X11_EXCLUDED_ENTRIES = {
+    "$PLUGINSDIR",
+    ".Xdefaults",
+    "X0.hosts",
+    "XCalc",
+    "XCalc-color",
+    "XClock",
+    "XClock-color",
+    "bitmaps",
+    "plink.exe",
+    "uninstall.exe",
+    "xcalc.exe",
+    "xclock.exe",
+    "xhost.exe",
+    "xlaunch.exe",
+    "xrdb.exe",
+    "xwininfo.exe",
+}
+WINDOWS_X11_REQUIRED_FILES = {
+    "freetype.dll",
+    "libX11.dll",
+    "libcrypto-3-x64.dll",
+    "libgcc_s_sjlj-1.dll",
+    "libwinpthread-1.dll",
+    "swrast_dri.dll",
+    "swrastwgl_dri.dll",
+    "vcxsrv.exe",
+    "xauth.exe",
+    "xkbcomp.exe",
+    "fonts/fonts.conf",
+    "xkbdata/rules/base",
+}
 LINUX_DEB_GRAPHICS_RECOMMENDS = ("libegl1", "libvulkan1")
 LINUX_RPM_GRAPHICS_RECOMMENDS = ("libglvnd-egl", "vulkan-loader")
 LINUX_APPIMAGE_SYSTEM_LIBRARY_PREFIXES = (
@@ -396,6 +434,161 @@ def copy_agent_resources(dst: Path, *, encode_binaries: bool) -> None:
             shutil.copy2(source, dst / source.name)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def windows_x11_download(manifest: dict[str, object], key: str) -> tuple[str, str]:
+    section = manifest.get(key)
+    if not isinstance(section, dict):
+        raise RuntimeError(f"VcXsrv manifest is missing {key}")
+    url = section.get("url")
+    checksum = section.get("sha256")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise RuntimeError(f"VcXsrv manifest {key} URL is invalid")
+    if (
+        not isinstance(checksum, str)
+        or len(checksum) != 64
+        or any(character not in "0123456789abcdef" for character in checksum)
+    ):
+        raise RuntimeError(f"VcXsrv manifest {key} SHA-256 is invalid")
+    return url, checksum
+
+
+def load_windows_x11_manifest(target: str) -> dict[str, object]:
+    path = RESOURCE_DIR / WINDOWS_X11_MANIFEST
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise RuntimeError("VcXsrv manifest root must be an object")
+    targets = manifest.get("windowsTargets")
+    if not isinstance(targets, list) or target not in targets:
+        raise RuntimeError(f"VcXsrv runtime does not support release target {target}")
+    windows_x11_download(manifest, "releaseAsset")
+    windows_x11_download(manifest, "license")
+    return manifest
+
+
+def verified_windows_x11_download(
+    url: str,
+    checksum: str,
+    cache_name: str,
+    override_environment: str,
+) -> Path:
+    override = os.environ.get(override_environment)
+    if override:
+        path = Path(override).expanduser().resolve()
+    else:
+        cache_dir = ROOT_DIR / "target" / "release-assets"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / cache_name
+        if path.is_file() and sha256_file(path) == checksum:
+            return path
+        path.unlink(missing_ok=True)
+        temporary_path = path.with_name(f"{path.name}.download")
+        temporary_path.unlink(missing_ok=True)
+        curl = shutil.which("curl.exe" if os.name == "nt" else "curl")
+        if not curl:
+            raise RuntimeError("curl is required to download the VcXsrv runtime")
+        run(
+            [
+                curl,
+                "--fail",
+                "--location",
+                "--retry",
+                "3",
+                "--retry-all-errors",
+                "--output",
+                str(temporary_path),
+                url,
+            ]
+        )
+        temporary_path.replace(path)
+
+    if not path.is_file():
+        raise FileNotFoundError(f"VcXsrv release input not found: {path}")
+    actual_checksum = sha256_file(path)
+    if actual_checksum != checksum:
+        raise RuntimeError(
+            f"VcXsrv release input checksum mismatch: {actual_checksum}"
+        )
+    return path
+
+
+def find_seven_zip() -> str:
+    override = os.environ.get("OXIDETERM_7ZIP")
+    if override and Path(override).is_file():
+        return str(Path(override).resolve())
+    found = next(
+        (shutil.which(name) for name in ("7z", "7zz", "7za") if shutil.which(name)),
+        None,
+    )
+    if not found:
+        raise RuntimeError("7-Zip is required to extract the VcXsrv runtime")
+    return found
+
+
+def copy_extracted_windows_x11_runtime(
+    extracted: Path,
+    destination: Path,
+    manifest: dict[str, object],
+    license_path: Path,
+) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    for source in sorted(extracted.iterdir()):
+        if source.name in WINDOWS_X11_EXCLUDED_ENTRIES:
+            continue
+        target = destination / source.name
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+    shutil.copy2(license_path, destination / "COPYING")
+    (destination / WINDOWS_X11_PROVENANCE_FILENAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    missing = sorted(
+        relative
+        for relative in WINDOWS_X11_REQUIRED_FILES
+        if not (destination / relative).is_file()
+    )
+    if missing:
+        raise RuntimeError(f"extracted VcXsrv runtime is incomplete: {', '.join(missing)}")
+
+
+def stage_windows_x11_runtime(destination: Path, target: str) -> None:
+    manifest = load_windows_x11_manifest(target)
+    asset_url, asset_checksum = windows_x11_download(manifest, "releaseAsset")
+    license_url, license_checksum = windows_x11_download(manifest, "license")
+    installer = verified_windows_x11_download(
+        asset_url,
+        asset_checksum,
+        Path(urlsplit(asset_url).path).name,
+        "OXIDETERM_VCXSRV_INSTALLER",
+    )
+    license_path = verified_windows_x11_download(
+        license_url,
+        license_checksum,
+        f"vcxsrv-{manifest['version']}-COPYING",
+        "OXIDETERM_VCXSRV_LICENSE",
+    )
+    with tempfile.TemporaryDirectory(prefix="oxideterm-vcxsrv-") as directory:
+        extracted = Path(directory) / "extracted"
+        run([find_seven_zip(), "x", "-y", f"-o{extracted}", str(installer)])
+        copy_extracted_windows_x11_runtime(
+            extracted,
+            destination,
+            manifest,
+            license_path,
+        )
+
+
 def copy_runtime_resources(dst: Path, target: str, *, encode_agent_binaries: bool = False) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     # Keep the app bundle layout aligned with Tauri's resource contract: agents
@@ -416,6 +609,8 @@ def copy_runtime_resources(dst: Path, target: str, *, encode_agent_binaries: boo
     if not helper_source.exists():
         raise FileNotFoundError(f"target helper resource directory not found: {helper_source}")
     copy_tree(helper_source, dst / HELPER_RESOURCE_DIR / target)
+    if "windows" in target:
+        stage_windows_x11_runtime(dst / WINDOWS_X11_RUNTIME_DIR, target)
 
 
 def nsis_path(path: Path) -> str:
