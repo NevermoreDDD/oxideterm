@@ -1,64 +1,23 @@
 use super::*;
-use oxideterm_remote_desktop::{RemoteDesktopProtocol, RemoteDesktopSessionStatus};
-use oxideterm_terminal::TerminalSessionKind;
+use oxideterm_remote_desktop::RemoteDesktopSessionStatus;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum StandaloneActiveSessionKind {
-    Mosh,
-    Telnet,
-    Serial,
-    Rdp,
-    Vnc,
-}
-
-impl StandaloneActiveSessionKind {
+impl standalone_connections::StandaloneConnectionKind {
     fn icon(self) -> LucideIcon {
         match self {
-            Self::Mosh => LucideIcon::Wifi,
-            Self::Telnet => LucideIcon::Terminal,
-            Self::Serial => LucideIcon::Cable,
-            Self::Rdp | Self::Vnc => LucideIcon::Monitor,
+            standalone_connections::StandaloneConnectionKind::Mosh => LucideIcon::Wifi,
+            standalone_connections::StandaloneConnectionKind::Telnet => LucideIcon::Terminal,
+            standalone_connections::StandaloneConnectionKind::Serial => LucideIcon::Cable,
+            standalone_connections::StandaloneConnectionKind::Rdp
+            | standalone_connections::StandaloneConnectionKind::Vnc => LucideIcon::Monitor,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum StandaloneActiveSessionTarget {
-    Terminal(TerminalSessionId),
-    RemoteDesktop(TabId),
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StandaloneActiveSession {
-    kind: StandaloneActiveSessionKind,
-    target: StandaloneActiveSessionTarget,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StandaloneSessionConnectionAction {
-    Disconnect,
-    Reconnect,
-}
-
-fn standalone_session_connection_action(
-    kind: StandaloneActiveSessionKind,
-    readiness: ActiveSessionReadiness,
-) -> Option<StandaloneSessionConnectionAction> {
-    match kind {
-        StandaloneActiveSessionKind::Serial | StandaloneActiveSessionKind::Telnet => {
-            match readiness {
-                ActiveSessionReadiness::Ready | ActiveSessionReadiness::Connecting => {
-                    Some(StandaloneSessionConnectionAction::Disconnect)
-                }
-                ActiveSessionReadiness::Error | ActiveSessionReadiness::Disconnected => {
-                    Some(StandaloneSessionConnectionAction::Reconnect)
-                }
-            }
-        }
-        StandaloneActiveSessionKind::Mosh
-        | StandaloneActiveSessionKind::Rdp
-        | StandaloneActiveSessionKind::Vnc => None,
-    }
+    connection_id: String,
+    kind: standalone_connections::StandaloneConnectionKind,
+    target: Option<standalone_connections::StandaloneConnectionSurface>,
 }
 
 #[derive(Clone)]
@@ -75,22 +34,6 @@ pub(in crate::workspace) struct ActiveSessionSidebarRow {
     is_last: bool,
     has_children: bool,
     standalone_session: Option<StandaloneActiveSession>,
-}
-
-fn standalone_terminal_kind(kind: TerminalSessionKind) -> Option<StandaloneActiveSessionKind> {
-    match kind {
-        TerminalSessionKind::Mosh => Some(StandaloneActiveSessionKind::Mosh),
-        TerminalSessionKind::Telnet => Some(StandaloneActiveSessionKind::Telnet),
-        TerminalSessionKind::Serial => Some(StandaloneActiveSessionKind::Serial),
-        TerminalSessionKind::LocalPty | TerminalSessionKind::SshPty => None,
-    }
-}
-
-fn standalone_remote_desktop_kind(protocol: RemoteDesktopProtocol) -> StandaloneActiveSessionKind {
-    match protocol {
-        RemoteDesktopProtocol::Rdp => StandaloneActiveSessionKind::Rdp,
-        RemoteDesktopProtocol::Vnc => StandaloneActiveSessionKind::Vnc,
-    }
 }
 
 fn terminal_lifecycle_readiness(lifecycle: &TerminalLifecycle) -> ActiveSessionReadiness {
@@ -145,59 +88,6 @@ impl WorkspaceApp {
             color,
             cx,
         )
-    }
-
-    fn apply_standalone_session_connection_action(
-        &mut self,
-        session: StandaloneActiveSession,
-        action: StandaloneSessionConnectionAction,
-        cx: &mut Context<Self>,
-    ) {
-        let StandaloneActiveSessionTarget::Terminal(session_id) = session.target else {
-            return;
-        };
-        let pane = {
-            let tab_host = self.tab_host.read(cx);
-            let location = tab_host.terminal_location(session_id);
-            location.and_then(|location| tab_host.panes().get(&location.pane_id).cloned())
-        };
-        let Some(pane) = pane else {
-            return;
-        };
-
-        let result = pane.update(cx, |pane, cx| match (session.kind, action) {
-            (
-                StandaloneActiveSessionKind::Serial,
-                StandaloneSessionConnectionAction::Disconnect,
-            ) => pane.apply_serial_action(
-                oxideterm_gpui_terminal::TerminalSerialAction::Disconnect,
-                cx,
-            ),
-            (StandaloneActiveSessionKind::Serial, StandaloneSessionConnectionAction::Reconnect) => {
-                pane.apply_serial_action(
-                    oxideterm_gpui_terminal::TerminalSerialAction::Reconnect,
-                    cx,
-                )
-            }
-            (
-                StandaloneActiveSessionKind::Telnet,
-                StandaloneSessionConnectionAction::Disconnect,
-            ) => pane.apply_telnet_action(
-                oxideterm_gpui_terminal::TerminalTelnetAction::Disconnect,
-                cx,
-            ),
-            (StandaloneActiveSessionKind::Telnet, StandaloneSessionConnectionAction::Reconnect) => {
-                pane.reconnect_telnet(cx)
-                    .then_some(())
-                    .ok_or_else(|| "The Telnet session is not ready to reconnect.".to_string())
-            }
-            (StandaloneActiveSessionKind::Mosh, _)
-            | (StandaloneActiveSessionKind::Rdp, _)
-            | (StandaloneActiveSessionKind::Vnc, _) => Ok(()),
-        });
-        if result.is_ok() {
-            cx.notify();
-        }
     }
 
     fn queue_ssh_terminal_tab_for_sidebar_node(
@@ -369,41 +259,34 @@ impl WorkspaceApp {
             })
             .collect::<Vec<_>>();
 
-        // Standalone protocols own one connection row and never expose SSH capabilities.
+        // Standalone records remain visible after their current surface is closed.
         rows.extend(
-            self.tabs(cx)
+            self.standalone_connections
+                .records()
                 .iter()
-                .filter_map(|tab| self.standalone_active_session_sidebar_row(tab, cx)),
+                .map(|record| self.standalone_active_session_sidebar_row(record, cx)),
         );
         rows
     }
 
     fn standalone_active_session_sidebar_row(
         &self,
-        tab: &Tab,
+        record: &standalone_connections::StandaloneConnectionRecord,
         cx: &App,
-    ) -> Option<ActiveSessionSidebarRow> {
-        let (standalone_session, readiness, terminal_ids, row_id) =
-            if tab.kind == TabKind::RemoteDesktop {
-                let session = self.remote_desktop.read(cx).session(tab.id)?;
+    ) -> ActiveSessionSidebarRow {
+        let (readiness, terminal_ids) = match record.surface {
+            Some(standalone_connections::StandaloneConnectionSurface::RemoteDesktop(tab_id)) => {
+                let Some(session) = self.remote_desktop.read(cx).session(tab_id) else {
+                    return self.disconnected_standalone_sidebar_row(record);
+                };
                 let session = session.read(cx);
-                let protocol = session.active_session_protocol();
                 (
-                    StandaloneActiveSession {
-                        kind: standalone_remote_desktop_kind(protocol),
-                        target: StandaloneActiveSessionTarget::RemoteDesktop(tab.id),
-                    },
                     remote_desktop_readiness(session.active_session_status()),
                     Vec::new(),
-                    format!("remote-desktop-session-{}", tab.id.0),
                 )
-            } else {
-                let session_id = tab.active_pane_id.and_then(|pane_id| {
-                    tab.root_pane
-                        .as_ref()
-                        .and_then(|root| root.session_id_for_pane(pane_id))
-                })?;
-                let shared_session = self
+            }
+            Some(standalone_connections::StandaloneConnectionSurface::Terminal(session_id)) => {
+                let Some(shared_session) = self
                     .tab_host
                     .read(cx)
                     .terminal_location(session_id)
@@ -413,50 +296,47 @@ impl WorkspaceApp {
                             .panes()
                             .get(&location.pane_id)
                             .map(|pane| pane.read(cx).shared_session())
-                    })?;
-                let terminal = shared_session.lock();
-                let kind = standalone_terminal_kind(terminal.kind())?;
-                let readiness = if kind == StandaloneActiveSessionKind::Mosh {
-                    terminal
-                        .mosh_connection_status()
-                        .map(|status| match status {
-                            oxideterm_terminal::MoshConnectionStatus::Connecting => {
-                                ActiveSessionReadiness::Connecting
-                            }
-                            oxideterm_terminal::MoshConnectionStatus::Connected => {
-                                ActiveSessionReadiness::Ready
-                            }
-                            oxideterm_terminal::MoshConnectionStatus::Interrupted => {
-                                ActiveSessionReadiness::Error
-                            }
-                        })
-                        .unwrap_or(ActiveSessionReadiness::Connecting)
-                } else {
-                    terminal_lifecycle_readiness(&terminal.lifecycle())
+                    })
+                else {
+                    return self.disconnected_standalone_sidebar_row(record);
                 };
-                (
-                    StandaloneActiveSession {
-                        kind,
-                        target: StandaloneActiveSessionTarget::Terminal(session_id),
-                    },
-                    readiness,
-                    vec![session_id],
-                    format!("standalone-terminal-session-{}", session_id.0),
-                )
-            };
+                let terminal = shared_session.lock();
+                let readiness =
+                    if record.kind == standalone_connections::StandaloneConnectionKind::Mosh {
+                        terminal
+                            .mosh_connection_status()
+                            .map(|status| match status {
+                                oxideterm_terminal::MoshConnectionStatus::Connecting => {
+                                    ActiveSessionReadiness::Connecting
+                                }
+                                oxideterm_terminal::MoshConnectionStatus::Connected => {
+                                    ActiveSessionReadiness::Ready
+                                }
+                                oxideterm_terminal::MoshConnectionStatus::Interrupted => {
+                                    ActiveSessionReadiness::Error
+                                }
+                            })
+                            .unwrap_or(ActiveSessionReadiness::Connecting)
+                    } else {
+                        terminal_lifecycle_readiness(&terminal.lifecycle())
+                    };
+                (readiness, vec![session_id])
+            }
+            None => (record.readiness.clone(), Vec::new()),
+        };
 
-        let node_id = NodeId::new(row_id.clone());
-        Some(ActiveSessionSidebarRow {
-            node_id,
+        let row_id = format!("standalone-connection-{}", record.id);
+        ActiveSessionSidebarRow {
+            node_id: NodeId::new(row_id.clone()),
             parent_id: None,
             saved_connection_id: None,
-            title: tab.title.clone(),
+            title: record.title.clone(),
             host: String::new(),
             username: String::new(),
             port: 0,
             node_view: ActiveSessionNode {
                 id: row_id,
-                title: tab.title.clone(),
+                title: record.title.clone(),
                 port: 0,
                 terminal_ids,
                 readiness,
@@ -464,8 +344,43 @@ impl WorkspaceApp {
             depth: 0,
             is_last: true,
             has_children: false,
-            standalone_session: Some(standalone_session),
-        })
+            standalone_session: Some(StandaloneActiveSession {
+                connection_id: record.id.clone(),
+                kind: record.kind,
+                target: record.surface,
+            }),
+        }
+    }
+
+    fn disconnected_standalone_sidebar_row(
+        &self,
+        record: &standalone_connections::StandaloneConnectionRecord,
+    ) -> ActiveSessionSidebarRow {
+        let row_id = format!("standalone-connection-{}", record.id);
+        ActiveSessionSidebarRow {
+            node_id: NodeId::new(row_id.clone()),
+            parent_id: None,
+            saved_connection_id: None,
+            title: record.title.clone(),
+            host: String::new(),
+            username: String::new(),
+            port: 0,
+            node_view: ActiveSessionNode {
+                id: row_id,
+                title: record.title.clone(),
+                port: 0,
+                terminal_ids: Vec::new(),
+                readiness: record.readiness.clone(),
+            },
+            depth: 0,
+            is_last: true,
+            has_children: false,
+            standalone_session: Some(StandaloneActiveSession {
+                connection_id: record.id.clone(),
+                kind: record.kind,
+                target: None,
+            }),
+        }
     }
 
     pub(in crate::workspace) fn sync_active_session_sidebar_list_state(
@@ -842,7 +757,7 @@ impl WorkspaceApp {
                     .text_size(px(SESSION_FOCUS_EMPTY_TITLE_TEXT_SIZE))
                     .text_color(rgb(theme.text_muted))
                     .child(self.render_display_text_with_role(
-                        SelectableTextRole::PlainDocument,
+                        SelectableTextRole::NonSelectable,
                         "session-focus-empty-title",
                         title_key,
                         self.i18n.t(title_key),
@@ -859,7 +774,7 @@ impl WorkspaceApp {
                             | (SESSION_FOCUS_EMPTY_SUBTITLE_ALPHA * 255.0).round() as u32,
                     ))
                     .child(self.render_display_text_with_role_and_alpha(
-                        SelectableTextRole::PlainDocument,
+                        SelectableTextRole::NonSelectable,
                         "session-focus-empty-subtitle",
                         subtitle_key,
                         self.i18n.t(subtitle_key),
@@ -1602,16 +1517,30 @@ impl WorkspaceApp {
         };
         let theme = self.tokens.ui;
         let active = match session.target {
-            StandaloneActiveSessionTarget::Terminal(session_id) => {
+            Some(standalone_connections::StandaloneConnectionSurface::Terminal(session_id)) => {
                 self.active_terminal_session_id(cx) == Some(session_id)
             }
-            StandaloneActiveSessionTarget::RemoteDesktop(tab_id) => {
+            Some(standalone_connections::StandaloneConnectionSurface::RemoteDesktop(tab_id)) => {
                 self.active_tab_id(cx) == Some(tab_id)
             }
+            None => false,
         };
         let status = self.session_node_status(row.node_view.status());
-        let connection_action =
-            standalone_session_connection_action(session.kind, row.node_view.readiness.clone());
+        let connected = matches!(
+            row.node_view.status(),
+            ActiveSessionStatus::Active
+                | ActiveSessionStatus::Connected
+                | ActiveSessionStatus::Connecting
+        );
+        let inactive = session_status_can_remove_from_sidebar(row.node_view.status());
+        let primary_action_label = if connected {
+            self.i18n.t("sessions.tree.actions.disconnect")
+        } else {
+            self.i18n.t("sessions.actions.reconnect")
+        };
+        let primary_action_tooltip_tokens = self.tokens;
+        let remove_action_label = self.i18n.t("sessions.tree.actions.remove_session");
+        let remove_action_tooltip_tokens = self.tokens;
         let background = if active {
             rgba((theme.accent << 8) | SESSION_FOCUS_TERMINAL_ACTIVE_BG_ALPHA)
         } else {
@@ -1644,70 +1573,12 @@ impl WorkspaceApp {
                     .text_color(rgb(status.text_color))
                     .child(row.title),
             )
-            .when_some(connection_action, |row, action| {
-                let (icon, color) = match action {
-                    StandaloneSessionConnectionAction::Disconnect => {
-                        (LucideIcon::WifiOff, theme.error)
-                    }
-                    StandaloneSessionConnectionAction::Reconnect => {
-                        (LucideIcon::RefreshCw, theme.accent)
-                    }
-                };
-                row.child(self.workspace_icon_action_button(
-                    icon,
-                    13.0,
-                    rgb(color),
-                    oxideterm_gpui_ui::button::IconButtonOptions {
-                        has_background: true,
-                        background: Some(rgba((color << 8) | SESSION_FOCUS_ACTION_BG_ALPHA)),
-                        hover_background: Some(rgba(
-                            (color << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA,
-                        )),
-                        ..oxideterm_gpui_ui::button::IconButtonOptions::opaque_toolbar(
-                            22.0,
-                            oxideterm_gpui_ui::button::ButtonRadius::Md,
-                        )
-                    },
-                    move |this, _event, _window, cx| {
-                        this.apply_standalone_session_connection_action(session, action, cx);
-                        cx.stop_propagation();
-                    },
-                    cx,
-                ))
-            })
-            .when(
-                matches!(
-                    session.kind,
-                    StandaloneActiveSessionKind::Serial | StandaloneActiveSessionKind::Telnet
-                ),
-                |row| {
-                    row.child(self.workspace_icon_action_button(
-                        LucideIcon::Plus,
-                        13.0,
-                        rgb(theme.accent),
-                        oxideterm_gpui_ui::button::IconButtonOptions {
-                            has_background: true,
-                            background: Some(rgba(
-                                (theme.accent << 8) | SESSION_FOCUS_ACTION_BG_ALPHA,
-                            )),
-                            hover_background: Some(rgba(
-                                (theme.accent << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA,
-                            )),
-                            ..oxideterm_gpui_ui::button::IconButtonOptions::opaque_toolbar(
-                                22.0,
-                                oxideterm_gpui_ui::button::ButtonRadius::Md,
-                            )
-                        },
-                        |this, _event, window, cx| {
-                            this.open_new_connection_form(window, cx);
-                            cx.stop_propagation();
-                        },
-                        cx,
-                    ))
-                },
-            )
-            .child(
+            .child({
+                let connection_id = session.connection_id.clone();
                 div()
+                    .id(SharedString::from(format!(
+                        "standalone-session-primary-action-{connection_id}"
+                    )))
                     .size(px(22.0))
                     .flex_none()
                     .flex()
@@ -1716,39 +1587,97 @@ impl WorkspaceApp {
                     .rounded(px(self.tokens.radii.md))
                     .cursor_pointer()
                     .hover(move |button| {
-                        button.bg(rgba((theme.error << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA))
+                        let color = if connected { theme.error } else { theme.accent };
+                        button.bg(rgba((color << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA))
                     })
                     .child(Self::render_lucide_icon(
-                        LucideIcon::X,
+                        if connected {
+                            LucideIcon::WifiOff
+                        } else {
+                            LucideIcon::RefreshCw
+                        },
                         13.0,
                         rgb(theme.text_muted),
                     ))
+                    .tooltip(move |_window, cx| {
+                        oxideterm_gpui_ui::tooltip::tooltip_view(
+                            primary_action_tooltip_tokens,
+                            primary_action_label.clone(),
+                            None,
+                            cx,
+                        )
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, window, cx| {
-                            match session.target {
-                                StandaloneActiveSessionTarget::Terminal(session_id) => {
-                                    this.close_terminal_session(session_id, window, cx);
-                                }
-                                StandaloneActiveSessionTarget::RemoteDesktop(tab_id) => {
-                                    this.request_close_tab_by_id(tab_id, window, cx);
-                                }
+                            if connected {
+                                this.disconnect_standalone_connection(&connection_id, window, cx);
+                            } else {
+                                this.reconnect_standalone_connection(&connection_id, window, cx);
                             }
                             cx.stop_propagation();
                         }),
-                    ),
-            )
+                    )
+            })
+            .when(inactive, |row_element| {
+                let connection_id = session.connection_id.clone();
+                row_element.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "standalone-session-remove-{connection_id}"
+                        )))
+                        .size(px(22.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(self.tokens.radii.md))
+                        .cursor_pointer()
+                        .hover(move |button| {
+                            button.bg(rgba((theme.error << 8) | SESSION_FOCUS_ACTION_HOVER_ALPHA))
+                        })
+                        .child(Self::render_lucide_icon(
+                            LucideIcon::Trash2,
+                            13.0,
+                            rgb(theme.text_muted),
+                        ))
+                        .tooltip(move |_window, cx| {
+                            oxideterm_gpui_ui::tooltip::tooltip_view(
+                                remove_action_tooltip_tokens,
+                                remove_action_label.clone(),
+                                None,
+                                cx,
+                            )
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, window, cx| {
+                                this.remove_standalone_connection(&connection_id, window, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
+                )
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if standalone_session_click_should_focus(event.click_count) {
                         match session.target {
-                            StandaloneActiveSessionTarget::Terminal(session_id) => {
+                            Some(
+                                standalone_connections::StandaloneConnectionSurface::Terminal(
+                                    session_id,
+                                ),
+                            ) => {
                                 this.focus_terminal_session(session_id, window, cx);
                             }
-                            StandaloneActiveSessionTarget::RemoteDesktop(tab_id) => {
+                            Some(
+                                standalone_connections::StandaloneConnectionSurface::RemoteDesktop(
+                                    tab_id,
+                                ),
+                            ) => {
                                 this.set_active_tab(tab_id, window, cx);
                             }
+                            None => {}
                         }
                     }
                     cx.stop_propagation();
@@ -2152,28 +2081,5 @@ impl WorkspaceApp {
                 ring: false,
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn standalone_serial_and_telnet_show_lifecycle_actions_for_their_state() {
-        assert_eq!(
-            standalone_session_connection_action(
-                StandaloneActiveSessionKind::Serial,
-                ActiveSessionReadiness::Ready,
-            ),
-            Some(StandaloneSessionConnectionAction::Disconnect)
-        );
-        assert_eq!(
-            standalone_session_connection_action(
-                StandaloneActiveSessionKind::Telnet,
-                ActiveSessionReadiness::Disconnected,
-            ),
-            Some(StandaloneSessionConnectionAction::Reconnect)
-        );
     }
 }

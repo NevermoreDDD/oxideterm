@@ -58,7 +58,7 @@ impl WorkspaceApp {
                 rgb(theme.text_muted),
             ),
             self.render_display_text_with_role(
-                SelectableTextRole::PlainDocument,
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-sidebar-empty",
                 "title",
                 self.i18n.t("plugin.cloud_sync.panel_title"),
@@ -66,7 +66,7 @@ impl WorkspaceApp {
                 cx,
             ),
             self.render_display_text_with_role(
-                SelectableTextRole::PlainDocument,
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-sidebar-empty",
                 "description",
                 self.i18n.t("plugin.cloud_sync.native_description"),
@@ -518,8 +518,10 @@ impl CloudSyncPageRenderer {
                                     .text_size(px(self.tokens.metrics.ui_text_2xl))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(theme.text_heading))
+                                    // Page chrome must not start a text drag that
+                                    // competes with window-level pointer handling.
                                     .child(self.render_display_text_with_role(
-                                        SelectableTextRole::PlainDocument,
+                                        SelectableTextRole::NonSelectable,
                                         "cloud-sync-panel",
                                         "title",
                                         self.i18n.t("plugin.cloud_sync.panel_title"),
@@ -533,7 +535,7 @@ impl CloudSyncPageRenderer {
                                     .text_size(px(self.tokens.metrics.ui_text_base))
                                     .text_color(rgb(theme.text_muted))
                                     .child(self.render_display_text_with_role(
-                                        SelectableTextRole::PlainDocument,
+                                        SelectableTextRole::NonSelectable,
                                         "cloud-sync-panel",
                                         "subtitle",
                                         self.i18n.t("plugin.cloud_sync.native_description"),
@@ -898,7 +900,7 @@ impl CloudSyncPageRenderer {
                     .gap(px(2.0))
                     .child(div().text_color(rgb(theme.text_muted)).child(
                         self.render_display_text_with_role(
-                            SelectableTextRole::PlainDocument,
+                            SelectableTextRole::NonSelectable,
                             "cloud-sync-overview-fact-label",
                             label_key,
                             label,
@@ -939,7 +941,8 @@ impl CloudSyncPageRenderer {
                 let label = self.i18n.t(example.label_key);
                 let value = self.i18n.t(example.value_key);
                 CloudSyncGuideExampleElements {
-                    label: self.render_selectable_text_scoped(
+                    label: self.render_display_text_with_role(
+                        SelectableTextRole::NonSelectable,
                         "cloud-sync-guide-example-label",
                         (&label, &value),
                         format!("{label}:"),
@@ -960,7 +963,8 @@ impl CloudSyncPageRenderer {
             &self.tokens,
             self.cloud_sync_has_background(),
             self.render_cloud_sync_section_title("plugin.cloud_sync.sections.quick_start", cx),
-            self.render_selectable_text_scoped(
+            self.render_display_text_with_role(
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-guide-title",
                 &backend_key,
                 self.i18n.t(guide.title_key),
@@ -976,7 +980,7 @@ impl CloudSyncPageRenderer {
             ),
             self.render_cloud_sync_guide_steps(cx),
             Some(self.render_display_text_with_role(
-                SelectableTextRole::PlainDocument,
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-guide",
                 "example-title",
                 self.i18n.t("plugin.cloud_sync.guide.example_title"),
@@ -1013,7 +1017,8 @@ impl CloudSyncPageRenderer {
                     .flex()
                     .items_start()
                     .gap(px(8.0))
-                    .child(self.render_selectable_text_scoped(
+                    .child(self.render_display_text_with_role(
+                        SelectableTextRole::NonSelectable,
                         "cloud-sync-guide-step-index",
                         key,
                         format!("{}.", index + 1),
@@ -1036,7 +1041,7 @@ impl CloudSyncPageRenderer {
         cloud_sync_section_title(
             &self.tokens,
             self.render_display_text_with_role(
-                SelectableTextRole::PlainDocument,
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-section-title",
                 key,
                 self.i18n.t(key).to_uppercase(),
@@ -1167,7 +1172,7 @@ impl CloudSyncPageRenderer {
         cloud_sync_progress_view(
             &self.tokens,
             self.render_display_text_with_role(
-                SelectableTextRole::PlainDocument,
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-progress",
                 "stage",
                 self.i18n
@@ -1176,7 +1181,7 @@ impl CloudSyncPageRenderer {
                 cx,
             ),
             self.render_display_text_with_role(
-                SelectableTextRole::PlainDocument,
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-progress",
                 "count",
                 format!(
@@ -1222,7 +1227,8 @@ impl CloudSyncPageRenderer {
             )
         });
         let version_rows = cloud_sync_version_info_rows(state, counts);
-        let version_title = self.render_selectable_text_scoped(
+        let version_title = self.render_display_text_with_role(
+            SelectableTextRole::NonSelectable,
             "cloud-sync-version-info",
             "title",
             self.i18n.t("plugin.cloud_sync.sections.version_info"),
@@ -1237,7 +1243,8 @@ impl CloudSyncPageRenderer {
         );
         let mut block = div().flex().flex_col().gap(px(8.0)).child(version_block);
         if let Some(conflict) = cloud_sync_conflict_info(state) {
-            let conflict_title = self.render_selectable_text_scoped(
+            let conflict_title = self.render_display_text_with_role(
+                SelectableTextRole::NonSelectable,
                 "cloud-sync-conflict-info",
                 "title",
                 self.i18n.t("plugin.cloud_sync.conflict.details_title"),

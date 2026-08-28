@@ -6,10 +6,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, CursorStyle, ElementId, Entity, Hsla, InteractiveElement, IntoColor,
-    IntoElement, MouseButton, ParentElement, Pixels, Point, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, StyledText, TextLayout, TextRun, Timer, Window, div, font,
-    prelude::FluentBuilder, px, rgb,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, ElementId, Entity,
+    HitboxBehavior, Hsla, InteractiveElement, IntoColor, IntoElement, MouseButton, ParentElement,
+    Pixels, Point, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledText,
+    TextAlign, TextLayout, TextRun, Timer, Window, canvas, div, font, point,
+    prelude::FluentBuilder, px, rgb, size,
 };
 use oxideterm_gpui_ui::{
     scroll::{ScrollableElement, vertical_scrollbar_layer},
@@ -451,7 +452,7 @@ impl WorkspaceApp {
         event: &gpui::MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         self.blur_text_inputs(cx);
         window.focus(&self.focus_handle, cx);
         self.begin_ime_selection_from_mouse_down(
@@ -459,7 +460,7 @@ impl WorkspaceApp {
             event,
             window,
             cx,
-        );
+        )
     }
 
     pub(super) fn render_selectable_text(
@@ -539,25 +540,27 @@ impl WorkspaceApp {
             .unwrap_or_else(|| vec![run]);
         let styled_text = StyledText::new(text).with_runs(runs);
         let layout = styled_text.layout().clone();
+        let hit_target = selectable_text_hit_target(
+            layout.clone(),
+            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                this.selectable_text_values
+                    .insert(id, value_for_mouse.clone());
+                this.blur_text_inputs(cx);
+                window.focus(&this.focus_handle, cx);
+                if this.begin_ime_selection_from_mouse_down(target, event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }),
+        );
 
         text_input_anchor_probe(
             target.anchor_id(),
             div()
+                .relative()
                 .min_w(px(0.0))
                 .text_color(rgb(color))
-                .cursor(CursorStyle::IBeam)
                 .child(styled_text)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                        this.selectable_text_values
-                            .insert(id, value_for_mouse.clone());
-                        this.blur_text_inputs(cx);
-                        window.focus(&this.focus_handle, cx);
-                        this.begin_ime_selection_from_mouse_down(target, event, window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
+                .child(hit_target)
                 .on_mouse_move(
                     cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                         this.update_ime_selection_drag_from_mouse_move(event, window, cx);
@@ -673,43 +676,41 @@ impl WorkspaceApp {
         let value_for_mouse = value;
         let styled_text = StyledText::new(text).with_runs(display_runs);
         let layout = styled_text.layout().clone();
+        let hit_target = selectable_text_hit_target(
+            layout.clone(),
+            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                if !selectable_text_should_begin_selection(role, event.click_count) {
+                    return;
+                }
+                this.selectable_text_fragments
+                    .entry(fragment_id)
+                    .and_modify(|fragment| fragment.text = value_for_mouse.clone());
+                this.blur_text_inputs(cx);
+                window.focus(&this.focus_handle, cx);
+                let selection_started =
+                    this.begin_ime_selection_from_mouse_down(target, event, window, cx);
+                if selection_started && selectable_text_should_stop_propagation(role) {
+                    cx.stop_propagation();
+                }
+            }),
+        );
 
         text_input_anchor_probe(
             target.anchor_id(),
             div()
+                .relative()
                 .min_w(px(0.0))
                 // RowSafe is reserved for table/tree/breadcrumb cells; Tauri renders these as single-line cells.
                 .when(role == SelectableTextRole::RowSafe, |text| {
                     text.whitespace_nowrap()
                 })
-                .cursor(CursorStyle::IBeam)
                 .child(styled_text)
-                .when(role.is_interactive(), |element| {
-                    element
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                                if !selectable_text_should_begin_selection(role, event.click_count)
-                                {
-                                    return;
-                                }
-                                this.selectable_text_fragments
-                                    .entry(fragment_id)
-                                    .and_modify(|fragment| fragment.text = value_for_mouse.clone());
-                                this.blur_text_inputs(cx);
-                                window.focus(&this.focus_handle, cx);
-                                this.begin_ime_selection_from_mouse_down(target, event, window, cx);
-                                if selectable_text_should_stop_propagation(role) {
-                                    cx.stop_propagation();
-                                }
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(
-                            |this, event: &gpui::MouseMoveEvent, window, cx| {
-                                this.update_ime_selection_drag_from_mouse_move(event, window, cx);
-                            },
-                        ))
-                }),
+                .when(role.is_interactive(), |element| element.child(hit_target))
+                .on_mouse_move(
+                    cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                        this.update_ime_selection_drag_from_mouse_move(event, window, cx);
+                    }),
+                ),
             move |anchor, window: &mut Window, cx| {
                 pending_updates
                     .borrow_mut()
@@ -833,11 +834,13 @@ impl WorkspaceApp {
         Some(text)
     }
 
-    pub(super) fn selectable_text_group_index_for_position(
+    pub(super) fn selectable_text_group_closest_index_for_position(
         &self,
         group_id: u64,
         position: Point<Pixels>,
     ) -> Option<usize> {
+        // Active drags remain continuous between fragments and outside their
+        // glyph bounds by resolving against the nearest rendered fragment.
         let fragments = self.ordered_selectable_text_fragments(group_id);
         let fragment = fragments.iter().copied().min_by(|a, b| {
             let a_distance = distance_from_bounds(position, a.anchor.bounds);
@@ -853,6 +856,25 @@ impl WorkspaceApp {
         let local_utf16 = utf16_offset_for_byte_index(&fragment.text, local_byte_index);
         let global_range = self.selectable_text_fragment_global_range(group_id, fragment)?;
         Some(global_range.start + local_utf16)
+    }
+
+    pub(super) fn selectable_text_group_exact_index_for_position(
+        &self,
+        group_id: u64,
+        position: Point<Pixels>,
+    ) -> Option<usize> {
+        // Starting a selection must hit a shaped fragment; nearest-fragment
+        // fallback is reserved for a drag that already owns the gesture.
+        for fragment in self.ordered_selectable_text_fragments(group_id) {
+            let Ok(local_byte_index) = fragment.layout.index_for_position(position) else {
+                continue;
+            };
+            let local_byte_index = local_byte_index.min(fragment.text.len());
+            let local_utf16 = utf16_offset_for_byte_index(&fragment.text, local_byte_index);
+            let global_range = self.selectable_text_fragment_global_range(group_id, fragment)?;
+            return Some(global_range.start + local_utf16);
+        }
+        None
     }
 
     fn local_range_for_selectable_fragment(
@@ -954,6 +976,78 @@ fn render_non_selectable_styled_text(
         .into_any_element()
 }
 
+fn selectable_text_hit_target(
+    layout: TextLayout,
+    on_mouse_down: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    canvas(
+        move |_bounds, window, _cx| {
+            let layout_bounds = layout.bounds();
+            let line_height = layout.line_height();
+            let text_align = window.text_style().text_align;
+            let mut line_y = layout_bounds.origin.y;
+            let mut hitboxes = Vec::new();
+
+            // TextLayout::bounds can be stretched by its flex parent. Build one
+            // hitbox per visual line from shaped glyph advances instead, matching
+            // the geometry used by GPUI's text painter.
+            for line in layout.line_layouts() {
+                let unwrapped = &line.unwrapped_layout;
+                let mut line_start_x = Pixels::ZERO;
+                let line_end_positions = line
+                    .wrap_boundaries()
+                    .iter()
+                    .map(|boundary| {
+                        unwrapped.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
+                            .position
+                            .x
+                    })
+                    .chain(std::iter::once(unwrapped.width));
+
+                for line_end_x in line_end_positions {
+                    let visual_line_width = (line_end_x - line_start_x).max(Pixels::ZERO);
+                    let aligned_x = match text_align {
+                        TextAlign::Left => layout_bounds.origin.x,
+                        TextAlign::Center => {
+                            layout_bounds.origin.x
+                                + (layout_bounds.size.width - visual_line_width) / 2.0
+                        }
+                        TextAlign::Right => layout_bounds.right() - visual_line_width,
+                    };
+                    if visual_line_width > Pixels::ZERO && line_height > Pixels::ZERO {
+                        hitboxes.push(window.insert_hitbox(
+                            Bounds::new(
+                                point(aligned_x, line_y),
+                                size(visual_line_width, line_height),
+                            ),
+                            HitboxBehavior::Normal,
+                        ));
+                    }
+                    line_y += line_height;
+                    line_start_x = line_end_x;
+                }
+            }
+            hitboxes
+        },
+        move |_bounds, hitboxes, window, _cx| {
+            for hitbox in &hitboxes {
+                window.set_cursor_style(CursorStyle::IBeam, hitbox);
+            }
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Left
+                    && hitboxes.iter().any(|hitbox| hitbox.is_hovered(window))
+                {
+                    on_mouse_down(event, window, cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
+}
+
 impl SelectableTextRenderState {
     pub(super) fn render_display_text_with_role_in_group(
         &self,
@@ -1016,44 +1110,50 @@ impl SelectableTextRenderState {
             .unwrap_or(runs);
         let workspace = self.workspace.clone();
         let workspace_for_mouse = self.workspace.clone();
+        let workspace_for_move = self.workspace.clone();
         let pending_updates = self.pending_updates.clone();
         let flush_scheduled = self.flush_scheduled.clone();
         let value_for_anchor = value.clone();
         let styled_text = StyledText::new(text).with_runs(display_runs);
         let layout = styled_text.layout().clone();
+        let hit_target = selectable_text_hit_target(
+            layout.clone(),
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                if !selectable_text_should_begin_selection(role, event.click_count) {
+                    return;
+                }
+                let selection_started = workspace_for_mouse.update(cx, |this, cx| {
+                    this.selectable_text_fragments
+                        .entry(fragment_id)
+                        .and_modify(|fragment| fragment.text = value.clone());
+                    this.begin_selectable_text_group_from_mouse_down(group_id, event, window, cx)
+                });
+                if selection_started && selectable_text_should_stop_propagation(role) {
+                    // Standalone document text owns a successful selection;
+                    // row-safe cells continue bubbling to their parent row.
+                    cx.stop_propagation();
+                }
+            },
+        );
 
         text_input_anchor_probe(
             target.anchor_id(),
             div()
+                .relative()
                 .min_w(px(0.0))
                 // Virtualized RowSafe cells share the same one-line browser table-cell contract.
                 .when(role == SelectableTextRole::RowSafe, |text| {
                     text.whitespace_nowrap()
                 })
-                .cursor(CursorStyle::IBeam)
                 .child(styled_text)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    move |event: &gpui::MouseDownEvent, window, cx| {
-                        if !selectable_text_should_begin_selection(role, event.click_count) {
-                            return;
-                        }
-                        let _ = workspace_for_mouse.update(cx, |this, cx| {
-                            this.selectable_text_fragments
-                                .entry(fragment_id)
-                                .and_modify(|fragment| fragment.text = value.clone());
-                            this.begin_selectable_text_group_from_mouse_down(
-                                group_id, event, window, cx,
-                            );
-                        });
-                        if selectable_text_should_stop_propagation(role) {
-                            // Virtual rows use the same role contract as normal
-                            // selectable text: standalone document text owns the
-                            // click, while row-safe cells bubble to their row.
-                            cx.stop_propagation();
-                        }
-                    },
-                ),
+                .when(role.is_interactive(), |element| element.child(hit_target))
+                .on_mouse_move(move |event: &gpui::MouseMoveEvent, window, cx| {
+                    // Virtual-list rows observe an active drag without owning
+                    // the cursor or mouse-down hitbox for their empty width.
+                    workspace_for_move.update(cx, |this, cx| {
+                        this.update_ime_selection_drag_from_mouse_move(event, window, cx);
+                    });
+                }),
             move |anchor, window: &mut Window, cx| {
                 pending_updates
                     .borrow_mut()

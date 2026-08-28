@@ -5,6 +5,7 @@ use gpui::{
     Pixels, Point, SharedString, Subscription, Task, UniformListScrollHandle, anchored, deferred,
     prelude::*,
 };
+use oxideterm_connections::SshChannelStrategy;
 use oxideterm_editor_syntax::LanguageId;
 use oxideterm_gpui_editor::{EditorContextMenuLabels, TextEditorView};
 use oxideterm_gpui_markdown::{
@@ -99,6 +100,7 @@ const SFTP_MODIFIED_COL: f32 = 96.0; // Tauri w-24
 const SFTP_DIRECTORY_PROGRESS_SAVE_INTERVAL_MS: u64 = 1_000; // Keep resume progress fresh without writing on every file tick.
 const SFTP_DIRECTORY_SPEED_WINDOW: Duration = Duration::from_secs(2); // Smooth bursts from parallel file workers.
 const SFTP_DIRECTORY_SPEED_SAMPLE_INTERVAL: Duration = Duration::from_millis(100); // Keep rolling history bounded at high event rates.
+const SFTP_DIRECTORY_PROGRESS_DELIVERY_INTERVAL: Duration = Duration::from_millis(100); // Coalesce small-file completion bursts before crossing into GPUI.
 const SFTP_BG_ACTIVE_BG_ALPHA: u32 = 0x66; // [data-bg-active] --color-theme-bg 40%
 const SFTP_BG_ACTIVE_PANEL_ALPHA: u32 = 0x66; // [data-bg-active] --color-theme-bg-panel 40%
 const SFTP_BG_ACTIVE_HOVER_ALPHA: u32 = 0x80; // [data-bg-active] --color-theme-bg-hover 50%
@@ -312,6 +314,9 @@ pub(super) struct StandaloneSftpConsumerLease {
     consumer: ConnectionConsumer,
 }
 
+pub(super) type DedicatedSftpConnectionSlot =
+    Arc<tokio::sync::Mutex<Option<Arc<DedicatedConnectionLease>>>>;
+
 impl Drop for StandaloneSftpConsumerLease {
     fn drop(&mut self) {
         // A background transfer owns this consumer independently from its tab.
@@ -321,26 +326,82 @@ impl Drop for StandaloneSftpConsumerLease {
 
 #[derive(Clone)]
 pub(super) enum SftpRemoteBackend {
-    Node { router: NodeRouter, node_id: NodeId },
-    Standalone { handle: SshConnectionHandle },
+    Node {
+        router: NodeRouter,
+        node_id: NodeId,
+        channel_strategy: SshChannelStrategy,
+        prompt_handler: Arc<dyn SshPromptHandler>,
+        managed_key_resolver: ManagedKeyResolver,
+        dedicated_slot: DedicatedSftpConnectionSlot,
+    },
+    Standalone {
+        handle: SshConnectionHandle,
+    },
 }
 
 impl SftpRemoteBackend {
-    async fn resolve_connection(&self) -> Result<SshConnectionHandle, String> {
-        match self {
-            Self::Node { router, node_id } => router
+    async fn node_connection(&self) -> Result<SshConnectionHandle, String> {
+        let Self::Node {
+            router,
+            node_id,
+            channel_strategy,
+            prompt_handler,
+            managed_key_resolver,
+            dedicated_slot,
+        } = self
+        else {
+            return Err("SFTP backend is not node-backed".to_string());
+        };
+        if !channel_strategy.requires_dedicated_consumers() {
+            return router
                 .resolve_connection(node_id)
                 .await
                 .map(|resolved| resolved.handle)
-                .map_err(|error| error.to_string()),
+                .map_err(|error| error.to_string());
+        }
+
+        let mut slot = dedicated_slot.lock().await;
+        if let Some(lease) = slot.as_ref()
+            && matches!(
+                lease.handle().state(),
+                ConnectionState::Active | ConnectionState::Idle
+            )
+            && lease.handle().has_physical()
+        {
+            return Ok(lease.handle().clone());
+        }
+        *slot = None;
+        let consumer = ConnectionConsumer::Sftp(format!("{}:browse", node_id.0));
+        let lease = router
+            .acquire_dedicated_connection(
+                node_id,
+                consumer,
+                prompt_handler.clone(),
+                managed_key_resolver.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let lease = Arc::new(lease);
+        let handle = lease.handle().clone();
+        // The node-scoped slot owns browsing until explicit disconnect or a
+        // failed transport replaces it; individual SFTP views only borrow it.
+        *slot = Some(lease);
+        Ok(handle)
+    }
+
+    async fn resolve_connection(&self) -> Result<SshConnectionHandle, String> {
+        match self {
+            Self::Node { .. } => self.node_connection().await,
             Self::Standalone { handle } => Ok(handle.clone()),
         }
     }
 
     async fn acquire_sftp(&self) -> Result<Arc<tokio::sync::Mutex<SftpSession>>, String> {
         match self {
-            Self::Node { router, node_id } => router
-                .acquire_sftp(node_id)
+            Self::Node { .. } => self
+                .node_connection()
+                .await?
+                .acquire_sftp()
                 .await
                 .map_err(|error| error.to_string()),
             Self::Standalone { handle } => handle
@@ -352,7 +413,43 @@ impl SftpRemoteBackend {
 
     async fn acquire_transfer_sftp(&self) -> Result<SftpSession, String> {
         match self {
-            Self::Node { router, node_id } => router
+            Self::Node {
+                router,
+                node_id,
+                channel_strategy,
+                prompt_handler,
+                managed_key_resolver,
+                ..
+            } if channel_strategy.requires_dedicated_consumers() => {
+                let consumer = ConnectionConsumer::Sftp(format!(
+                    "{}:transfer:{}",
+                    node_id.0,
+                    uuid::Uuid::new_v4()
+                ));
+                let lease = Arc::new(
+                    router
+                        .acquire_dedicated_connection(
+                            node_id,
+                            consumer,
+                            prompt_handler.clone(),
+                            managed_key_resolver.clone(),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
+                let session = lease
+                    .handle()
+                    .acquire_transfer_sftp()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let owner: Arc<dyn Send + Sync> = lease;
+                Ok(session
+                    .with_connection_owner(owner)
+                    .with_single_channel_transport())
+            }
+            Self::Node {
+                router, node_id, ..
+            } => router
                 .acquire_transfer_sftp(node_id)
                 .await
                 .map_err(|error| error.to_string()),

@@ -1,13 +1,13 @@
 use super::*;
 
-const SPLIT_HANDLE_LINE_ALPHA: u32 = 0x80;
+const SPLIT_HANDLE_LINE_ALPHA: u32 = 0xb3;
 const SPLIT_HANDLE_HOVER_BG_ALPHA: u32 = 0x12;
 const SPLIT_HANDLE_ACTIVE_BG_ALPHA: u32 = 0x1f;
-const SPLIT_HANDLE_ACTIVE_LINE_ALPHA: u32 = 0xcc;
+const SPLIT_HANDLE_HOVER_LINE_ALPHA: u32 = 0xcc;
+const SPLIT_HANDLE_ACTIVE_LINE_ALPHA: u32 = 0xff;
 const SPLIT_HANDLE_LINE_WIDTH: f32 = 1.0;
-const ACTIVE_PANE_BORDER_ALPHA: u32 = 0x66;
-const ACTIVE_PANE_SHADOW_ALPHA: u32 = 0x24;
-const ACTIVE_PANE_SHADOW_BLUR: f32 = 10.0;
+const SPLIT_HANDLE_HOVER_LINE_WIDTH: f32 = 3.0;
+const SPLIT_HANDLE_ACTIVE_LINE_WIDTH: f32 = 4.0;
 
 #[derive(Clone)]
 pub(super) struct SplitDrag {
@@ -23,6 +23,29 @@ pub(super) struct SplitDrag {
 enum TerminalPaneInteraction {
     PrivilegePromptSubmit,
     ContextAction,
+}
+
+struct ActivePaneSplitTarget {
+    tab_id: TabId,
+    active_pane_id: PaneId,
+    source: TerminalSplitSource,
+}
+
+enum TerminalSplitSource {
+    Local,
+    Ssh(NodeId),
+}
+
+fn terminal_split_supported(
+    tab_kind: &TabKind,
+    contains_serial_terminal: bool,
+    ssh_node_ready: bool,
+) -> bool {
+    match tab_kind {
+        TabKind::LocalTerminal => !contains_serial_terminal,
+        TabKind::SshTerminal => ssh_node_ready,
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -353,13 +376,12 @@ impl WorkspaceApp {
             .any(|session_id| self.serial_terminal_configs.contains_key(session_id))
     }
 
-    pub(super) fn split_active_pane(
-        &mut self,
-        direction: SplitDirection,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((tab_id, active_pane_id, pane_count, tab_kind)) =
+    pub(super) fn can_split_active_pane(&self, cx: &App) -> bool {
+        self.active_pane_split_target(cx).is_some()
+    }
+
+    fn active_pane_split_target(&self, cx: &App) -> Option<ActivePaneSplitTarget> {
+        let (tab_id, active_pane_id, pane_count, tab_kind) =
             self.active_tab(cx).and_then(|tab| {
                 Some((
                     tab.id,
@@ -367,18 +389,49 @@ impl WorkspaceApp {
                     tab.root_pane.as_ref()?.pane_count(),
                     tab.kind.clone(),
                 ))
-            })
-        else {
-            return;
-        };
+            })?;
         if pane_count >= MAX_PANES_PER_TAB {
-            return;
+            return None;
         }
 
-        if tab_kind == TabKind::MoshTerminal {
-            return;
+        let ssh_node_id = (tab_kind == TabKind::SshTerminal)
+            .then(|| self.active_ssh_terminal_node_id(cx))
+            .flatten();
+        let ssh_node_ready = ssh_node_id
+            .as_ref()
+            .is_some_and(|node_id| self.node_is_ready_for_terminal(node_id));
+        if !terminal_split_supported(
+            &tab_kind,
+            self.active_tab_has_serial_terminal(cx),
+            ssh_node_ready,
+        ) {
+            return None;
         }
-        if self.active_tab_has_serial_terminal(cx) {
+
+        let source = match tab_kind {
+            TabKind::LocalTerminal => TerminalSplitSource::Local,
+            TabKind::SshTerminal => TerminalSplitSource::Ssh(ssh_node_id?),
+            _ => return None,
+        };
+        Some(ActivePaneSplitTarget {
+            tab_id,
+            active_pane_id,
+            source,
+        })
+    }
+
+    pub(super) fn split_active_pane(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.active_pane_split_target(cx) else {
+            return;
+        };
+        if let TerminalSplitSource::Ssh(node_id) = &target.source {
+            let node_id = node_id.clone();
+            self.split_ssh_terminal_pane(target, node_id, direction, window, cx);
             return;
         }
 
@@ -419,30 +472,27 @@ impl WorkspaceApp {
         let group_id = self.alloc_pane_id(cx);
         let pane_id = self.alloc_pane_id(cx);
         let session_id = self.alloc_session_id(cx);
-        let mut preferences = self.prepare_terminal_preferences_for_tab_kind(&tab_kind, cx);
-        let local_config =
-            (tab_kind == TabKind::LocalTerminal).then(|| self.local_terminal_config());
-        let local_preference_overrides = local_config.as_ref().map(|config| {
-            self.terminal_preference_overrides_for_local_shell(config.shell.as_ref())
-        });
-        if let Some(overrides) = &local_preference_overrides {
-            overrides.apply_to(&mut preferences);
-        }
+        let mut preferences =
+            self.prepare_terminal_preferences_for_tab_kind(&TabKind::LocalTerminal, cx);
+        let local_config = self.local_terminal_config();
+        let local_preference_overrides =
+            self.terminal_preference_overrides_for_local_shell(local_config.shell.as_ref());
+        local_preference_overrides.apply_to(&mut preferences);
         let pane = cx.new(|cx| {
-            if let Some(config) = local_config {
-                TerminalPane::new_local_with_config_and_preferences(config, preferences, window, cx)
-                    .expect("failed to initialize split terminal pane")
-                    .with_preference_overrides(local_preference_overrides.unwrap_or_default())
-            } else {
-                TerminalPane::new_with_preferences(preferences, window, cx)
-                    .expect("failed to initialize split terminal pane")
-            }
+            TerminalPane::new_local_with_config_and_preferences(
+                local_config,
+                preferences,
+                window,
+                cx,
+            )
+            .expect("failed to initialize split terminal pane")
+            .with_preference_overrides(local_preference_overrides)
         });
 
         if self.tab_host.update(cx, |tab_host, _| {
             tab_host.split_pane(
-                tab_id,
-                active_pane_id,
+                target.tab_id,
+                target.active_pane_id,
                 group_id,
                 direction,
                 pane_id,
@@ -450,11 +500,63 @@ impl WorkspaceApp {
             )
         }) {
             self.register_terminal_pane(pane_id, session_id, pane.clone(), window, cx);
-            self.bind_terminal_location(tab_id, pane_id, session_id, cx);
+            self.bind_terminal_location(target.tab_id, pane_id, session_id, cx);
             self.needs_active_pane_focus = true;
             pane.update(cx, |pane, cx| pane.focus(window, cx));
             cx.notify();
         } else {
+            let _ = pane.update(cx, |pane, _cx| pane.shutdown());
+        }
+    }
+
+    fn split_ssh_terminal_pane(
+        &mut self,
+        target: ActivePaneSplitTarget,
+        node_id: NodeId,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group_id = self.alloc_pane_id(cx);
+        let Ok((pane_id, session_id)) =
+            self.create_ssh_terminal_pane_for_existing_node(&node_id, None, true, window, cx)
+        else {
+            return;
+        };
+        let mounted = self.tab_host.update(cx, |tab_host, _| {
+            tab_host.split_pane(
+                target.tab_id,
+                target.active_pane_id,
+                group_id,
+                direction,
+                pane_id,
+                session_id,
+            )
+        });
+        if mounted {
+            self.bind_terminal_location(target.tab_id, pane_id, session_id, cx);
+            self.needs_active_pane_focus = true;
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        } else {
+            self.rollback_unmounted_ssh_terminal_pane(pane_id, session_id, cx);
+        }
+    }
+
+    fn rollback_unmounted_ssh_terminal_pane(
+        &mut self,
+        pane_id: PaneId,
+        session_id: TerminalSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        // The node remains owned by NodeRouter; only the failed pane's projections and consumer
+        // are revoked before its session is shut down.
+        self.pending_auto_close_terminal_sessions
+            .remove(&session_id);
+        self.terminal_saved_connection_refs.remove(&session_id);
+        self.clear_terminal_trigger_session_overrides(session_id);
+        self.unregister_ssh_terminal_session(session_id, cx);
+        if let Some(pane) = self.remove_terminal_pane(&pane_id, cx) {
             let _ = pane.update(cx, |pane, _cx| pane.shutdown());
         }
     }
@@ -479,6 +581,9 @@ impl WorkspaceApp {
         }
 
         if let Some(session_id) = session_id {
+            self.standalone_connections.release_surface(
+                standalone_connections::StandaloneConnectionSurface::Terminal(session_id),
+            );
             self.release_public_mcp_terminal_for_closed_session(session_id, cx);
             self.serial_terminal_configs.remove(&session_id);
             self.telnet_terminal_profile_ids.remove(&session_id);
@@ -531,6 +636,9 @@ impl WorkspaceApp {
             .into_iter()
             .filter(|session_id| *session_id != active_session_id)
         {
+            self.standalone_connections.release_surface(
+                standalone_connections::StandaloneConnectionSurface::Terminal(session_id),
+            );
             self.release_public_mcp_terminal_for_closed_session(session_id, cx);
             self.serial_terminal_configs.remove(&session_id);
             self.telnet_terminal_profile_ids.remove(&session_id);
@@ -642,15 +750,6 @@ impl WorkspaceApp {
         let active_pane_id = tab_id
             .and_then(|tab_id| self.tab_by_id(tab_id, cx))
             .and_then(|tab| tab.active_pane_id);
-        let has_split_panes = if let Some(tab_id) = tab_id {
-            self.tab_by_id(tab_id, cx)
-                .and_then(|tab| tab.root_pane.as_ref())
-                .is_some_and(|root_pane| root_pane.pane_count() > 1)
-        } else {
-            self.active_tab(cx)
-                .and_then(|tab| tab.root_pane.as_ref())
-                .is_some_and(|root_pane| root_pane.pane_count() > 1)
-        };
         match node {
             PaneNode::Leaf { pane_id, .. } => {
                 let active = Some(*pane_id) == active_pane_id;
@@ -704,29 +803,6 @@ impl WorkspaceApp {
                         active && self.ai_entity.read(cx).terminal_inline_panel().open,
                         |pane_frame| pane_frame.child(self.render_terminal_ai_inline_panel(cx)),
                     )
-                    .when(active && has_split_panes, |pane_frame| {
-                        let accent = self.tokens.ui.accent;
-                        let active_shadow = vec![gpui::BoxShadow {
-                            inset: false,
-                            color: rgba((accent << 8) | ACTIVE_PANE_SHADOW_ALPHA).into_color(),
-                            offset: gpui::point(px(0.0), px(0.0)),
-                            blur_radius: px(ACTIVE_PANE_SHADOW_BLUR),
-                            spread_radius: px(0.0),
-                        }];
-                        // This overlay is painted above the terminal content
-                        // without changing pane layout or terminal grid size.
-                        pane_frame.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .border_1()
-                                .border_color(rgba((accent << 8) | ACTIVE_PANE_BORDER_ALPHA))
-                                .shadow(active_shadow),
-                        )
-                    })
                     .into_any_element()
             }
             PaneNode::Group {
@@ -785,37 +861,71 @@ impl WorkspaceApp {
                         } else {
                             rgba((self.tokens.ui.divider << 8) | SPLIT_HANDLE_LINE_ALPHA)
                         };
-                        // Keep the drag target wide while drawing only a
-                        // hairline in the center, matching common terminal and
-                        // editor splitters without making the seam look heavy.
+                        let line_width = if active_drag {
+                            SPLIT_HANDLE_ACTIVE_LINE_WIDTH
+                        } else {
+                            SPLIT_HANDLE_LINE_WIDTH
+                        };
+                        let highlighted_line_width = if active_drag {
+                            SPLIT_HANDLE_ACTIVE_LINE_WIDTH
+                        } else {
+                            SPLIT_HANDLE_HOVER_LINE_WIDTH
+                        };
+                        let highlighted_line_alpha = if active_drag {
+                            SPLIT_HANDLE_ACTIVE_LINE_ALPHA
+                        } else {
+                            SPLIT_HANDLE_HOVER_LINE_ALPHA
+                        };
+                        let highlighted_line_color =
+                            rgba((self.tokens.ui.accent << 8) | highlighted_line_alpha);
+                        let split_handle_size = self.tokens.metrics.split_handle_size;
+                        let handle_group = SharedString::from(format!(
+                            "workspace-split-handle-{}-{index}",
+                            group_id.0
+                        ));
+                        // The full handle remains easy to acquire while only the
+                        // centered visual line grows on hover and during drag.
                         let line = div()
                             .absolute()
                             .bg(line_color)
                             .when(direction == SplitDirection::Horizontal, |line| {
                                 line.top_0()
                                     .bottom_0()
-                                    .left(px((self.tokens.metrics.split_handle_size
-                                        - SPLIT_HANDLE_LINE_WIDTH)
-                                        / 2.0))
-                                    .w(px(SPLIT_HANDLE_LINE_WIDTH))
+                                    .left(px((split_handle_size - line_width) / 2.0))
+                                    .w(px(line_width))
                             })
                             .when(direction == SplitDirection::Vertical, |line| {
                                 line.left_0()
                                     .right_0()
-                                    .top(px((self.tokens.metrics.split_handle_size
-                                        - SPLIT_HANDLE_LINE_WIDTH)
-                                        / 2.0))
-                                    .h(px(SPLIT_HANDLE_LINE_WIDTH))
+                                    .top(px((split_handle_size - line_width) / 2.0))
+                                    .h(px(line_width))
+                            })
+                            .group_hover(handle_group.clone(), move |style| {
+                                let style = style.bg(highlighted_line_color);
+                                match direction {
+                                    SplitDirection::Horizontal => style
+                                        .left(
+                                            px((split_handle_size - highlighted_line_width) / 2.0),
+                                        )
+                                        .w(px(highlighted_line_width)),
+                                    SplitDirection::Vertical => style
+                                        .top(px((split_handle_size - highlighted_line_width) / 2.0))
+                                        .h(px(highlighted_line_width)),
+                                }
                             });
                         let mut handle = div()
                             .flex_none()
                             .relative()
+                            .group(handle_group)
                             .bg(handle_bg)
                             .hover({
                                 let accent = self.tokens.ui.accent;
-                                move |style| {
-                                    style.bg(rgba((accent << 8) | SPLIT_HANDLE_HOVER_BG_ALPHA))
-                                }
+                                let hover_bg_alpha = if active_drag {
+                                    SPLIT_HANDLE_ACTIVE_BG_ALPHA
+                                } else {
+                                    SPLIT_HANDLE_HOVER_BG_ALPHA
+                                };
+                                move |style| style.bg(rgba((accent << 8) | hover_bg_alpha))
                             })
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -853,5 +963,35 @@ impl WorkspaceApp {
                 group.into_any_element()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_split_support_matches_transport_ownership() {
+        assert!(terminal_split_supported(
+            &TabKind::LocalTerminal,
+            false,
+            false
+        ));
+        assert!(!terminal_split_supported(
+            &TabKind::LocalTerminal,
+            true,
+            false
+        ));
+        assert!(terminal_split_supported(&TabKind::SshTerminal, false, true));
+        assert!(!terminal_split_supported(
+            &TabKind::SshTerminal,
+            false,
+            false
+        ));
+        assert!(!terminal_split_supported(
+            &TabKind::MoshTerminal,
+            false,
+            true
+        ));
     }
 }

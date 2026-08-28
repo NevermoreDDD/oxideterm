@@ -47,6 +47,9 @@ impl WorkspaceApp {
         let is_local_terminal = self
             .active_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::LocalTerminal);
+        let split_controls_visible = self
+            .active_tab(cx)
+            .is_some_and(|tab| matches!(tab.kind, TabKind::LocalTerminal | TabKind::SshTerminal));
         let can_configure_remote_integration = self.active_ssh_terminal_node_id(cx).is_some();
         let remote_integration_pending = self.remote_shell_integration_pending(cx);
         let remote_integration_tooltip_id = "terminal-command-configure-directory-tracking";
@@ -55,18 +58,7 @@ impl WorkspaceApp {
             .t("settings_view.connections.shell_integration.toolbar_action");
         let target_indicator_is_local =
             is_local_terminal && target_label == self.i18n.t("terminal.command_bar.local_shell");
-        let can_split = self.active_tab(cx).is_some_and(|tab| {
-            (tab.kind == TabKind::LocalTerminal
-                || (tab.kind == TabKind::SshTerminal
-                    && self
-                        .active_ssh_terminal_node_id(cx)
-                        .is_some_and(|node_id| self.node_is_ready_for_terminal(&node_id))))
-                && !self.active_tab_has_serial_terminal(cx)
-                && tab
-                    .root_pane
-                    .as_ref()
-                    .is_some_and(|root| root.pane_count() < MAX_PANES_PER_TAB)
-        });
+        let can_split = self.can_split_active_pane(cx);
         let broadcast_targets =
             self.terminal_broadcast_target_panes(active_pane_id.unwrap_or(PaneId(0)), cx);
         let (broadcast_enabled, broadcast_targets_empty) = {
@@ -260,7 +252,9 @@ impl WorkspaceApp {
                                     )
                                 },
                             )
-                            .when(is_local_terminal, |actions| {
+                            .when(split_controls_visible, |actions| {
+                                // Transport readiness controls the disabled state; keeping SSH
+                                // actions visible makes their placement match local terminals.
                                 actions
                                     .child(self.terminal_command_action_button(
                                         LucideIcon::SplitSquareHorizontal,

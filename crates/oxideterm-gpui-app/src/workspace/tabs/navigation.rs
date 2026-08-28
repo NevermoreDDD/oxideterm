@@ -533,6 +533,11 @@ impl WorkspaceApp {
             nodes_to_disconnect.push(node_id.clone());
         }
         for affected_node_id in &nodes_to_disconnect {
+            // Dropping the node-scoped slot releases the dedicated browsing
+            // transport without affecting transfers that still own their lease.
+            self.dedicated_sftp_connections
+                .lock()
+                .remove(affected_node_id);
             let _ = self.interrupt_sftp_transfers_by_node(
                 affected_node_id,
                 "Connection closed".to_string(),
@@ -985,6 +990,9 @@ impl WorkspaceApp {
             });
         }
         if tab.kind == TabKind::RemoteDesktop {
+            self.standalone_connections.release_surface(
+                standalone_connections::StandaloneConnectionSurface::RemoteDesktop(tab.id),
+            );
             self.close_remote_desktop_tab(tab.id, window, cx);
         }
         // Tauri keeps node SFTP alive when the SFTP tab is closed; the tab is
@@ -1022,6 +1030,9 @@ impl WorkspaceApp {
             root_pane.collect_session_ids(&mut session_ids);
         }
         for session_id in session_ids {
+            self.standalone_connections.release_surface(
+                standalone_connections::StandaloneConnectionSurface::Terminal(session_id),
+            );
             self.release_public_mcp_terminal_for_closed_session(session_id, cx);
             self.serial_terminal_configs.remove(&session_id);
             self.telnet_terminal_profile_ids.remove(&session_id);

@@ -194,12 +194,16 @@ impl WorkspaceApp {
                 username: username.clone(),
                 auth,
                 timeout_secs: form.connect_timeout_seconds,
-                agent_forwarding: form.agent_forwarding,
+                agent_forwarding: !form.ssh_channel_strategy.requires_dedicated_consumers()
+                    && form.agent_forwarding,
                 identity_agent: identity_agent_from_form(&form.identity_agent),
                 agent_forwarding_socket: form.agent_forwarding_socket.clone(),
                 legacy_ssh_compatibility: form.legacy_ssh_compatibility,
+                ssh_channel_strategy: form.ssh_channel_strategy,
                 ssh_algorithms: form.ssh_algorithms.clone(),
-                x11_forwarding: x11_forward_policy(form.x11_forwarding),
+                x11_forwarding: (!form.ssh_channel_strategy.requires_dedicated_consumers())
+                    .then(|| x11_forward_policy(form.x11_forwarding))
+                    .flatten(),
                 proxy_chain,
                 upstream_proxy,
                 proxy_command,
@@ -880,6 +884,7 @@ impl WorkspaceApp {
                     node.terminal_options = connection_options.terminal;
                     node.dedicated_new_terminal_connection =
                         connection_options.dedicated_new_terminal_connection;
+                    node.ssh_channel_strategy = connection_options.ssh_channel_strategy;
                 }
                 self.update_connection_form_state(cx, ConnectionFormState::clear);
                 let post_connect_command = target_config.post_connect_command.clone();
@@ -900,6 +905,7 @@ impl WorkspaceApp {
                     (
                         connection.options.terminal.clone(),
                         connection.options.dedicated_new_terminal_connection,
+                        connection.options.ssh_channel_strategy,
                     )
                 }) && let Some(node) = self.ssh_nodes.get_mut(&target_node_id)
                 {
@@ -907,6 +913,7 @@ impl WorkspaceApp {
                     // connection policy after its proxy path is materialized.
                     node.terminal_options = connection_options.0;
                     node.dedicated_new_terminal_connection = connection_options.1;
+                    node.ssh_channel_strategy = connection_options.2;
                 }
                 if self.connection_form_state(cx).form.is_some() {
                     self.update_connection_form_state(cx, ConnectionFormState::clear);
@@ -1167,6 +1174,7 @@ impl WorkspaceApp {
                                 node.terminal_options = connection_options.terminal;
                                 node.dedicated_new_terminal_connection =
                                     connection_options.dedicated_new_terminal_connection;
+                                node.ssh_channel_strategy = connection_options.ssh_channel_strategy;
                             }
                             if let Some(target_config) = self
                                 .node_router
@@ -1202,6 +1210,7 @@ impl WorkspaceApp {
                     node.terminal_options = connection_options.terminal;
                     node.dedicated_new_terminal_connection =
                         connection_options.dedicated_new_terminal_connection;
+                    node.ssh_channel_strategy = connection_options.ssh_channel_strategy;
                 }
                 let post_connect_command = config.post_connect_command.clone();
                 let _ = self.queue_ssh_terminal_tab_for_node_with_mark_used(
@@ -1230,10 +1239,25 @@ impl WorkspaceApp {
             }
             SshConnectionIntent::Mosh(options) => {
                 let public_mcp_open_token = options.public_mcp_open_token.clone();
+                let runtime_connection_attempt_id = options.runtime_connection_attempt_id.clone();
+                if runtime_connection_attempt_id
+                    .as_deref()
+                    .is_some_and(|attempt_id| {
+                        !self
+                            .standalone_connections
+                            .is_connecting_attempt(attempt_id)
+                    })
+                {
+                    // The logical connection was cancelled while host-key work was pending.
+                    return;
+                }
                 if public_mcp_open_token
                     .as_deref()
                     .is_some_and(|token| self.cancel_public_mcp_mosh_open_if_request_ended(token))
                 {
+                    if let Some(attempt_id) = runtime_connection_attempt_id.as_deref() {
+                        self.standalone_connections.remove_attempt(attempt_id);
+                    }
                     return;
                 }
                 self.connection_flow.update(cx, |connection_flow, cx| {
@@ -1296,10 +1320,14 @@ impl WorkspaceApp {
                     },
                     task_runtime: self.workspace_runtime.read(cx).task_runtime(),
                 };
-                match self.create_mosh_terminal_tab(
+                let Some(runtime_connection_attempt_id) = runtime_connection_attempt_id else {
+                    return;
+                };
+                match self.create_mosh_terminal_tab_for_connection(
                     terminal_config,
                     options.terminal,
                     title,
+                    runtime_connection_attempt_id.clone(),
                     window,
                     cx,
                 ) {
@@ -1320,6 +1348,8 @@ impl WorkspaceApp {
                         }
                     }
                     Err(error) => {
+                        self.standalone_connections
+                            .mark_attempt_error(&runtime_connection_attempt_id);
                         let error = error.to_string();
                         if let Some(token) = public_mcp_open_token {
                             self.complete_public_mcp_mosh_terminal_open(
@@ -1594,6 +1624,7 @@ impl WorkspaceApp {
                 child_node.terminal_options = terminal_options.terminal;
                 child_node.dedicated_new_terminal_connection =
                     terminal_options.dedicated_new_terminal_connection;
+                child_node.ssh_channel_strategy = terminal_options.ssh_channel_strategy;
                 self.ssh_nodes.insert(child_id.clone(), child_node);
                 if let Some(saved_connection_id) = saved_connection_id {
                     self.saved_ssh_nodes

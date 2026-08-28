@@ -21,11 +21,11 @@ use gpui::{
 };
 use oxideterm_ssh::SshConnectionHandle;
 use oxideterm_terminal::{
-    GraphicsOptions, LocalPtyConfig, SerialControlLine, SerialControlState, SerialDisplayMode,
-    SerialLineEnding, SerialRuntimeOptions, SerialSendMode, SerialSessionConfig,
-    ShellIntegrationLifecycleState, ShellIntegrationStatus, SshSessionConfig, TelnetSessionConfig,
-    TermMode, TerminalCommandMark, TerminalCommandMarkClosedBy, TerminalCommandMarkConfidence,
-    TerminalCommandMarkDetectionSource, TerminalCommandMarkEvent,
+    GraphicsOptions, KittyFileTransmissionControl, LocalPtyConfig, SerialControlLine,
+    SerialControlState, SerialDisplayMode, SerialLineEnding, SerialRuntimeOptions, SerialSendMode,
+    SerialSessionConfig, ShellIntegrationLifecycleState, ShellIntegrationStatus, SshSessionConfig,
+    TelnetSessionConfig, TermMode, TerminalCommandMark, TerminalCommandMarkClosedBy,
+    TerminalCommandMarkConfidence, TerminalCommandMarkDetectionSource, TerminalCommandMarkEvent,
     TerminalCwdIntegrationLaunchState, TerminalDrainBudget, TerminalDrainReport,
     TerminalEditorApplication, TerminalEditorClipboardOperation, TerminalEditorIntegrationEvent,
     TerminalEvent, TerminalLifecycle, TerminalOutputProcessor, TerminalProcessInfo,
@@ -58,7 +58,6 @@ use oxideterm_terminal_recording::{
 mod image_cache;
 mod ime;
 mod interactions;
-mod reconnect;
 mod render;
 mod scrollbar;
 
@@ -258,9 +257,7 @@ pub struct TerminalSerialStatus {
 /// A serial operation requested by another application-owned surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalSerialAction {
-    Disconnect,
     RefreshPortPresence,
-    Reconnect,
     SendBreak,
     SetDataTerminalReady(bool),
     SetRequestToSend(bool),
@@ -274,7 +271,6 @@ pub enum TerminalSerialAction {
 /// Actions that must execute through the entity owning the live Telnet session.
 pub enum TerminalTelnetAction {
     SendControl(oxideterm_terminal::TelnetControlCommand),
-    Disconnect,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -388,10 +384,9 @@ fn terminal_latency_percentiles(samples: &VecDeque<u64>) -> (u64, u64, u64) {
 
 pub struct TerminalPane {
     terminal: Arc<Mutex<TerminalSession>>,
-    // The backend kind is immutable for a pane, including serial reconnects.
+    // The backend kind is immutable for the pane's full lifetime.
     session_kind: TerminalSessionKind,
-    serial_reconnect_config: Option<SerialSessionConfig>,
-    telnet_reconnect_config: Option<TelnetSessionConfig>,
+    serial_session_config: Option<SerialSessionConfig>,
     serial_port_available: Option<bool>,
     focus_handle: FocusHandle,
     preference_overrides: TerminalUiPreferenceOverrides,
@@ -421,6 +416,9 @@ pub struct TerminalPane {
     selection: Option<TerminalSelection>,
     pending_paste: Option<String>,
     pending_paste_prefix: Option<Vec<u8>>,
+    // The pane observes only its session's capability and never stores the sandbox path.
+    kitty_file_transmission: Option<KittyFileTransmissionControl>,
+    kitty_file_transmission_confirm_open: bool,
     // Control-mode prompts stay pane-owned so text never reaches the hosted shell.
     tmux_prompt: Option<TmuxPromptState>,
     dismissed_tmux_message_generation: u64,
@@ -817,7 +815,6 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        let reconnect_config = config.clone();
         let terminal = Arc::new(Mutex::new(TerminalSession::telnet_with_login_and_encoding(
             config,
             login,
@@ -827,9 +824,7 @@ impl TerminalPane {
             preferences.terminal_encoding,
             preferences.scrollback_lines,
         )));
-        let mut pane = Self::from_session(terminal, preferences, window, cx)?;
-        pane.telnet_reconnect_config = Some(reconnect_config);
-        Ok(pane)
+        Self::from_session(terminal, preferences, window, cx)
     }
 
     pub fn new_mosh_with_preferences(
@@ -856,10 +851,10 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        let reconnect_config = config.clone();
+        let session_config = config.clone();
         let terminal = Self::open_serial_session_with_preferences(config, &preferences)?;
         let mut pane = Self::from_session(terminal, preferences, window, cx)?;
-        pane.serial_reconnect_config = Some(reconnect_config);
+        pane.serial_session_config = Some(session_config);
         Ok(pane)
     }
 
@@ -923,6 +918,7 @@ impl TerminalPane {
                 terminal.cwd_integration_launch_state(),
             )
         };
+        let kitty_file_transmission = terminal.lock().kitty_file_transmission_control();
         let mut next_snapshot_line_id = 1;
         assign_initial_snapshot_line_ids(&mut snapshot, &mut next_snapshot_line_id);
         let cwd_shell_integration_status = initial_cwd_shell_integration_status(
@@ -1044,8 +1040,7 @@ impl TerminalPane {
         let mut pane = Self {
             terminal,
             session_kind,
-            serial_reconnect_config: None,
-            telnet_reconnect_config: None,
+            serial_session_config: None,
             serial_port_available: None,
             focus_handle,
             preference_overrides: TerminalUiPreferenceOverrides::default(),
@@ -1067,6 +1062,8 @@ impl TerminalPane {
             selection: None,
             pending_paste: None,
             pending_paste_prefix: None,
+            kitty_file_transmission,
+            kitty_file_transmission_confirm_open: false,
             tmux_prompt: None,
             dismissed_tmux_message_generation: 0,
             context_menu: None,
@@ -1672,10 +1669,10 @@ impl TerminalPane {
         self
     }
 
-    pub fn with_serial_reconnect_config(mut self, config: SerialSessionConfig) -> Self {
+    pub fn with_serial_session_config(mut self, config: SerialSessionConfig) -> Self {
         // A pane built from a pre-opened session still owns the configuration
-        // required by explicit reconnect and serial status controls.
-        self.serial_reconnect_config = Some(config);
+        // required by serial status and device-presence controls.
+        self.serial_session_config = Some(config);
         self
     }
 
@@ -1770,11 +1767,11 @@ impl TerminalPane {
     }
 
     pub fn is_serial_transport(&self) -> bool {
-        self.serial_reconnect_config.is_some()
+        self.serial_session_config.is_some()
     }
 
     pub fn serial_status(&self) -> Option<TerminalSerialStatus> {
-        let config = self.serial_reconnect_config.clone()?;
+        let config = self.serial_session_config.clone()?;
         let terminal = self.terminal.lock();
         Some(TerminalSerialStatus {
             config,
@@ -1782,7 +1779,8 @@ impl TerminalPane {
             control_state: terminal.serial_control_state().unwrap_or_default(),
             runtime_options: terminal.serial_runtime_options().unwrap_or_default(),
             port_available: self.serial_port_available,
-            can_reconnect: self.can_reconnect_serial(),
+            // Reconnect is workspace-owned because it must allocate a fresh tab and pane.
+            can_reconnect: false,
         })
     }
 
@@ -1795,24 +1793,8 @@ impl TerminalPane {
             return Err("The selected terminal is not a serial session.".to_string());
         }
         match action {
-            TerminalSerialAction::Disconnect => {
-                self.terminal.lock().shutdown();
-                self.terminal_exited = true;
-                self.input_locked = true;
-                cx.emit(TerminalPaneEvent::Exited { exit_code: None });
-                cx.notify();
-            }
             TerminalSerialAction::RefreshPortPresence => {
                 self.refresh_serial_port_presence(cx);
-            }
-            TerminalSerialAction::Reconnect => {
-                if !self.can_reconnect_serial() {
-                    return Err("The serial session is not ready to reconnect.".to_string());
-                }
-                self.reconnect_serial(cx);
-                if !self.lifecycle().is_running() {
-                    return Err("The serial session could not be reconnected.".to_string());
-                }
             }
             TerminalSerialAction::SendBreak => {
                 self.terminal
@@ -1907,14 +1889,13 @@ impl TerminalPane {
                     .send_telnet_control(command)
                     .map_err(|error| error.to_string())?;
             }
-            TerminalTelnetAction::Disconnect => self.shutdown(),
         }
         cx.notify();
         Ok(())
     }
 
     fn refresh_serial_port_presence(&mut self, cx: &mut Context<Self>) {
-        let Some(config) = self.serial_reconnect_config.as_ref() else {
+        let Some(config) = self.serial_session_config.as_ref() else {
             return;
         };
         let expected = config.port_path.trim().to_ascii_lowercase();
@@ -2521,6 +2502,61 @@ impl TerminalPane {
         }
     }
 
+    pub(crate) fn confirm_kitty_file_transmission(&mut self, cx: &mut Context<Self>) {
+        self.kitty_file_transmission_confirm_open = false;
+        let labels = &self.preferences.kitty_file_transmission_labels;
+        let result = self
+            .kitty_file_transmission
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Kitty file transmission is unavailable"))
+            .and_then(KittyFileTransmissionControl::authorize_for_session);
+        match result {
+            Ok(sandbox_path) => {
+                // Clipboard export is the explicit user-authorized capability boundary;
+                // the path is never retained by pane state, logs, or persistence.
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    sandbox_path.to_string_lossy().into_owned(),
+                ));
+                self.emit_kitty_file_transmission_notice(
+                    labels.allowed_title.clone(),
+                    labels.allowed_description.clone(),
+                    TerminalNoticeVariant::Success,
+                );
+            }
+            Err(_) => self.emit_kitty_file_transmission_notice(
+                labels.failed_title.clone(),
+                labels.failed_description.clone(),
+                TerminalNoticeVariant::Error,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn deny_kitty_file_transmission(&mut self, cx: &mut Context<Self>) {
+        self.kitty_file_transmission_confirm_open = false;
+        if let Some(control) = &self.kitty_file_transmission {
+            control.deny_for_session();
+        }
+        cx.notify();
+    }
+
+    fn emit_kitty_file_transmission_notice(
+        &self,
+        title: String,
+        description: String,
+        variant: TerminalNoticeVariant,
+    ) {
+        if let Some(sink) = &self.preferences.notice_sink {
+            sink(TerminalNotice {
+                title,
+                description: Some(description),
+                status_text: None,
+                progress: None,
+                variant,
+            });
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let budget = self.next_drain_budget();
@@ -2557,6 +2593,15 @@ impl TerminalPane {
             false
         };
         let mut needs_notify = event_effect.needs_notify || report.changed;
+        if self
+            .kitty_file_transmission
+            .as_ref()
+            .is_some_and(KittyFileTransmissionControl::take_authorization_request)
+            && !self.kitty_file_transmission_confirm_open
+        {
+            self.kitty_file_transmission_confirm_open = true;
+            needs_notify = true;
+        }
         if (self.preferences.show_performance_overlay && render_stats_changed)
             || cleared_command_mark_selection
             || cleared_privilege_prompt_hint
@@ -3668,6 +3713,7 @@ fn graphics_options_from_preferences(preferences: &TerminalUiPreferences) -> Gra
         pixel_limit: graphics.pixel_limit.min(u32::MAX as usize) as u32,
         storage_limit_mb: storage_limit_mb.min(u32::MAX as usize) as u32,
         show_placeholder: graphics.show_placeholders,
+        kitty_file_transmission: KittyFileTransmissionControl::new(),
     }
 }
 
