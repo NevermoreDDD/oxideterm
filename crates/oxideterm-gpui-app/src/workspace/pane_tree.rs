@@ -435,40 +435,6 @@ impl WorkspaceApp {
             return;
         }
 
-        if tab_kind == TabKind::SshTerminal {
-            let Some(node_id) = self.active_ssh_terminal_node_id(cx) else {
-                return;
-            };
-            let group_id = self.alloc_pane_id(cx);
-            let Ok((pane_id, session_id)) =
-                self.create_ssh_terminal_pane_for_existing_node(&node_id, None, true, window, cx)
-            else {
-                return;
-            };
-            let split = self.tab_host.update(cx, |tab_host, _| {
-                tab_host.split_pane(
-                    tab_id,
-                    active_pane_id,
-                    group_id,
-                    direction,
-                    pane_id,
-                    session_id,
-                )
-            });
-            if split {
-                self.bind_terminal_location(tab_id, pane_id, session_id, cx);
-                self.needs_active_pane_focus = true;
-                self.focus_active_pane(window, cx);
-                cx.notify();
-            } else {
-                if let Some(pane) = self.remove_terminal_pane(&pane_id, cx) {
-                    let _ = pane.update(cx, |pane, _cx| pane.shutdown());
-                }
-                self.unregister_ssh_terminal_session(session_id, cx);
-            }
-            return;
-        }
-
         let group_id = self.alloc_pane_id(cx);
         let pane_id = self.alloc_pane_id(cx);
         let session_id = self.alloc_session_id(cx);
