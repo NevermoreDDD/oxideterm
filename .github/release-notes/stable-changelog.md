@@ -7,7 +7,11 @@ section as the detailed changelog attached to the corresponding GitHub Release.
 
 ### English
 
-OxideTerm 2.0.26 adds configurable terminal font weight and multiline Quick Command editing, improves native drag-and-drop and input handling across all three desktop platforms, and repairs macOS Keychain compatibility without reintroducing duplicate startup authentication.
+This community fork is maintained by NevermoreDDD/oxideterm. It combines official OxideTerm 2.0.26 updates with maintained fork-specific workflows and fork-owned release infrastructure.
+
+#### ⬆️ Upstream Changes
+
+The following terminal, desktop, Keychain, and package-compatibility improvements are inherited from official OxideTerm upstream.
 
 #### ✨ Terminal Display and Quick Commands
 
@@ -33,9 +37,18 @@ OxideTerm 2.0.26 adds configurable terminal font weight and multiline Quick Comm
 - Moved Linux arm64 release builds to the Ubuntu 22.04 runner and added an ELF symbol-version check that rejects binaries requiring newer than glibc 2.35, matching the existing Linux compatibility baseline for distributions such as Kylin V11.
 - Added complete Windows installer file properties, including the package version, application description, and copyright metadata.
 
+#### 🧩 Fork-specific Changes
+
+- This fork additionally carries its maintained SSH pane splitting, saved-connection defaults, standalone reconnect controls, managed Windows X server, and optional compatible-provider discovery work.
+- Release assets, support links, and update endpoints are owned by NevermoreDDD/oxideterm.
+
 ### 中文
 
-OxideTerm 2.0.26 新增可配置终端字重和多行快捷命令编辑，改进三个桌面平台的原生拖放与输入处理，并修复 macOS 钥匙串兼容性，同时避免重新引入启动时重复认证。
+这是由 NevermoreDDD/oxideterm 维护的社区分叉版本，整合官方 OxideTerm 2.0.26 更新、持续维护的分叉工作流及归属于本 fork 的发布基础设施。
+
+#### ⬆️ 上游更新
+
+以下终端、桌面、钥匙串与软件包兼容性改进均继承自官方 OxideTerm 上游。
 
 #### ✨ 终端显示与快捷命令
 
@@ -60,6 +73,11 @@ OxideTerm 2.0.26 新增可配置终端字重和多行快捷命令编辑，改进
 
 - 将 Linux arm64 发布构建迁移至 Ubuntu 22.04 runner，并增加 ELF 符号版本检查，拒绝依赖高于 glibc 2.35 的二进制文件，使其与现有 Linux 兼容基线一致并覆盖银河麒麟 V11 等发行版。
 - 补齐 Windows 安装器文件属性，包括软件包版本、应用说明和版权信息。
+
+#### 🧩 Fork 自有更新
+
+- 本 fork 额外包含持续维护的 SSH 窗格分割、已保存连接默认值、独立会话重连控制、受管 Windows X server，以及可选兼容服务商发现功能。
+- 发布资产、支持链接与更新端点均归 NevermoreDDD/oxideterm 所有。
 
 ## 2.0.25
 

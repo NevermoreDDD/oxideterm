@@ -1320,6 +1320,7 @@
       "safety_ai": "OxideSens는 사용자가 선택한 컨텍스트만 구성된 모델 엔드포인트로 보냅니다. 실행 전에 AI 제안과 명령을 검토하고, 개인 키, 비밀번호, 운영 환경 비밀값 또는 규제 대상 데이터를 모델에 보내지 마세요.",
       "license": "OxideTerm은 GNU 일반 공중 사용 허가서 v3.0 (GPL-3.0) 하에 배포되는 오픈 소스 소프트웨어입니다.",
       "copyright": "Copyright © {{year}} {{author}}",
+      "fork_notice": "NevermoreDDD/oxideterm에서 관리하는 커뮤니티 포크입니다.",
       "shortcut_keyboard_shortcuts": "키보드 단축키",
       "check_update": "업데이트 확인",
       "checking": "업데이트 확인 중...",

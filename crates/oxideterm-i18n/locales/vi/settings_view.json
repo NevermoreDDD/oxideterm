@@ -1320,6 +1320,7 @@
       "safety_ai": "OxideSens chỉ gửi ngữ cảnh do người dùng chọn đến endpoint mô hình đã cấu hình. Hãy xem lại gợi ý và lệnh của AI trước khi thực thi, và không gửi khóa riêng, mật khẩu, bí mật sản xuất hoặc dữ liệu chịu quản lý cho mô hình.",
       "license": "OxideTerm là phần mềm tự do được cấp phép theo Giấy phép Công cộng GNU v3.0 (GPL-3.0).",
       "copyright": "Bản quyền © {{year}} {{author}}",
+      "fork_notice": "Bản fork cộng đồng do NevermoreDDD/oxideterm duy trì.",
       "shortcut_keyboard_shortcuts": "Phím tắt bàn phím",
       "check_update": "Kiểm tra cập nhật",
       "checking": "Đang kiểm tra cập nhật...",

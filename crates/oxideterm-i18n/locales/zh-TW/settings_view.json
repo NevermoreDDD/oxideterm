@@ -1320,6 +1320,7 @@
       "safety_ai": "OxideSens 只會將使用者選取的內容傳送至設定的模型端點。執行前請審查 AI 建議與命令，不要把私鑰、密碼、生產秘密或受監管資料傳送給模型。",
       "license": "OxideTerm 是基於 GNU 通用公共授權條款 v3.0 (GPL-3.0) 的開源軟體。",
       "copyright": "版權所有 © {{year}} {{author}}",
+      "fork_notice": "由 NevermoreDDD/oxideterm 維護的社群分叉版本。",
       "shortcut_keyboard_shortcuts": "鍵盤快捷鍵",
       "check_update": "檢查更新",
       "checking": "正在檢查更新...",

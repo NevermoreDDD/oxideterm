@@ -1320,6 +1320,7 @@
       "safety_ai": "OxideSens envia apenas o contexto selecionado pelo usuário ao endpoint de modelo configurado. Revise sugestões e comandos de IA antes da execução e não envie chaves privadas, senhas, segredos de produção ou dados regulados aos modelos.",
       "license": "OxideTerm é software livre sob a Licença Pública Geral GNU v3.0 (GPL-3.0).",
       "copyright": "Copyright © {{year}} {{author}}",
+      "fork_notice": "Fork comunitário mantido por NevermoreDDD/oxideterm.",
       "shortcut_keyboard_shortcuts": "Atalhos de teclado",
       "check_update": "Verificar atualizações",
       "checking": "Verificando atualizações...",
