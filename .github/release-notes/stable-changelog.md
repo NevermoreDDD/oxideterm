@@ -20,10 +20,16 @@ The following terminal, desktop, Keychain, and package-compatibility improvement
 - Limited Quick Command template expansion to the explicit `{{param.*}}` and `{{ctx.*}}` namespaces. Other double-brace syntax, including Docker Go templates such as `{{.LogPath}}`, now remains literal.
 - Added deletion for every custom Quick Command group. A confirmation explains the operation, and commands in the removed group move to the built-in default group instead of being deleted.
 
+#### 🗂️ Session Logging and Shell Discovery
+
+- Added an optional absolute terminal-log folder and a safe relative subfolder template. Logs can now be organized with `{date}`, `{time}`, `{datetime}`, `{session}`, `{host}`, `{username}`, and `{protocol}` components, while nested cleanup preserves the existing retention policy and refuses path traversal or symbolic-link escapes.
+- Deduplicated Linux local-shell discovery when `/bin` and `/usr/bin` resolve to the same executable, while retaining distinct invocation names such as `sh` and `dash`.
+
 #### 🖥️ Desktop Input and Drag Reliability
 
 - Added macOS file and folder drag-and-drop for local terminal panes. Dropped paths are inserted as POSIX-quoted shell words with a trailing space and are never executed automatically; remote and non-terminal sessions do not accept this drop path.
 - Fixed Linux text input for XIM methods that send `COMPOUND_TEXT`; malformed or unsupported input is rejected safely instead of being accepted as invalid text.
+- Normalized the Unicode environment block passed to Windows ConPTY sessions so custom variables override inherited names case-insensitively and entries follow the ordering required by `CreateProcessW`. The temporary block is cleared after process creation because environment values may contain credentials.
 - Fixed a Windows redraw loop that could occur while editing SFTP and local file-manager address fields.
 - Fixed Windows tab dragging that could remain active after the mouse button was released and interfere with later clicks.
 
@@ -57,10 +63,16 @@ The following terminal, desktop, Keychain, and package-compatibility improvement
 - 将快捷命令模板展开限制在明确的 `{{param.*}}` 和 `{{ctx.*}}` 命名空间。其它双花括号语法会保持原文，包括 `{{.LogPath}}` 等 Docker Go 模板。
 - 支持删除所有自定义快捷命令分组。操作前会显示确认说明，被删除分组中的命令会移至内置默认分组，而不会随分组一起删除。
 
+#### 🗂️ 会话日志与 Shell 发现
+
+- 为终端日志新增可选的绝对路径文件夹和安全的相对子文件夹模板。日志现在可使用 `{date}`、`{time}`、`{datetime}`、`{session}`、`{host}`、`{username}` 与 `{protocol}` 分层整理；嵌套清理继续遵循现有保留期限，并拒绝路径穿越或符号链接逃逸。
+- 当 `/bin` 与 `/usr/bin` 指向同一可执行文件时，Linux 本地 Shell 发现不再显示重复项，同时仍保留 `sh`、`dash` 等不同调用名称。
+
 #### 🖥️ 桌面输入与拖放可靠性
 
 - 为 macOS 本地终端窗格新增文件和文件夹拖放。拖入路径会作为经过 POSIX 引用的 Shell 单词插入，并在末尾保留空格，但绝不会自动执行；远程及非终端会话不会接受该拖放路径。
 - 修复使用 `COMPOUND_TEXT` 的 XIM 输入法在 Linux 上的文字输入；格式错误或不支持的输入会被安全拒绝，不再作为无效文字接收。
+- 规范化传入 Windows ConPTY 会话的 Unicode 环境块，使自定义变量按大小写不敏感的名称覆盖继承值，并按 `CreateProcessW` 要求排序。环境值可能包含凭据，因此进程创建完成后会清空临时环境块。
 - 修复 Windows 编辑 SFTP 与本地文件管理器地址栏时可能出现的重绘循环。
 - 修复 Windows 标签拖动在鼠标已经松开后仍可能保持活动并影响后续点击的问题。
 
