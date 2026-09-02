@@ -1,9 +1,10 @@
 use std::{cell::RefCell, collections::HashMap, fmt, ops::Range, rc::Rc, time::Instant};
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, Element, ElementId, Entity, FocusHandle, GlobalElementId,
-    InputHandler, InspectorElementId, IntoColor, Keystroke, LayoutId, Pixels, Point, SharedString,
-    Style, TextRun, Timer, UTF16Selection, Window, font, point, px, rgb,
+    App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, Entity, FocusHandle,
+    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoColor, IntoElement,
+    Keystroke, LayoutId, MouseButton, Pixels, Point, SharedString, Style, Styled, TextRun, Timer,
+    UTF16Selection, Window, font, point, px, rgb,
 };
 use oxideterm_editor_core::utf16::{
     byte_index_for_utf16, control_k_delete_end, floor_char_boundary, line_end_for_utf16_offset,
@@ -23,7 +24,9 @@ use super::new_connection::{
     CONNECTION_NOTES_LINE_HEIGHT, CONNECTION_NOTES_VERTICAL_PADDING, NewConnectionField,
     refresh_connection_timeout_seconds, refresh_identity_agent_availability,
 };
-use super::quick_commands::QuickCommandInput;
+use super::quick_commands::{
+    QUICK_COMMAND_TEXTAREA_LINE_HEIGHT, QUICK_COMMAND_TEXTAREA_VERTICAL_PADDING, QuickCommandInput,
+};
 use super::session_manager::{SessionManagerInput, SessionManagerState};
 use super::sftp::SftpInput;
 use super::terminal_git::TerminalGitPanelSection;
@@ -31,7 +34,8 @@ use oxideterm_gpui_settings_view::SettingsInput;
 use oxideterm_gpui_ui::{
     tauri_ui_font_family,
     text_input::{
-        TextInputAnchor, TextInputAnchorId, TextInputContentAlign, text_input_secret_mask,
+        TextInputAnchor, TextInputAnchorId, TextInputAnchorProbe, TextInputContentAlign,
+        text_input_anchor_probe, text_input_secret_mask,
     },
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -886,6 +890,48 @@ impl WorkspaceApp {
         self.text_input_anchors.update(anchor);
     }
 
+    /// Applies the shared pointer, focus, selection, and anchor behavior for a
+    /// Workspace-owned single-line input without taking ownership of its text.
+    pub(super) fn text_input_with_workspace_ime<E>(
+        &self,
+        target: WorkspaceImeTarget,
+        input: E,
+        prepare_focus: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> TextInputAnchorProbe
+    where
+        E: IntoElement + InteractiveElement + Styled,
+    {
+        let anchors = self.text_input_anchors.clone();
+        text_input_anchor_probe(
+            target.anchor_id(),
+            input
+                .cursor(CursorStyle::IBeam)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        // Domain state must identify the active input before the
+                        // shared IME resolves its text and selection geometry.
+                        prepare_focus(this, cx);
+                        this.ime_marked_text = None;
+                        window.focus(&this.focus_handle, cx);
+                        this.begin_ime_selection_from_mouse_down(target, event, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(
+                    cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                        this.update_ime_selection_drag_from_mouse_move(event, window, cx);
+                    }),
+                ),
+            move |anchor, _window, _cx| {
+                // Geometry is frame-local layout state and does not require a
+                // WorkspaceApp update or an additional render notification.
+                anchors.update(anchor);
+            },
+        )
+    }
+
     pub(super) fn host_tools_plain_text_ime_frame(
         &self,
         input: HostToolsTextInput,
@@ -1628,6 +1674,9 @@ impl WorkspaceApp {
             WorkspaceImeTarget::NewConnection(NewConnectionField::Notes) => {
                 px(CONNECTION_NOTES_LINE_HEIGHT)
             }
+            WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText) => {
+                px(QUICK_COMMAND_TEXTAREA_LINE_HEIGHT)
+            }
             _ if ime_target_is_read_only(target) && line_count > 0 => {
                 let inferred = f32::from(bounds.size.height) / line_count as f32;
                 px(inferred.clamp(16.0, 40.0))
@@ -1663,6 +1712,9 @@ impl WorkspaceApp {
             WorkspaceImeTarget::NewConnection(NewConnectionField::Notes) => {
                 px(CONNECTION_NOTES_VERTICAL_PADDING)
             }
+            WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText) => {
+                px(QUICK_COMMAND_TEXTAREA_VERTICAL_PADDING)
+            }
             _ => px(0.0),
         }
     }
@@ -1671,6 +1723,7 @@ impl WorkspaceApp {
         match target {
             WorkspaceImeTarget::Settings(
                 SettingsInput::TerminalFontSize
+                | SettingsInput::TerminalFontWeight
                 | SettingsInput::TerminalLineHeight
                 | SettingsInput::IdeFontSize
                 | SettingsInput::IdeLineHeight,
@@ -3329,6 +3382,7 @@ fn ime_target_accepts_newline(target: WorkspaceImeTarget) -> bool {
         WorkspaceImeTarget::Settings(input) => input.accepts_newline(),
         WorkspaceImeTarget::AiChatInput | WorkspaceImeTarget::AiMessageEdit => true,
         WorkspaceImeTarget::NewConnection(NewConnectionField::Notes) => true,
+        WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText) => true,
         WorkspaceImeTarget::SessionManager(SessionManagerInput::OxideExportDescription) => true,
         _ => false,
     }
@@ -3583,7 +3637,7 @@ mod tests {
 
     use super::{
         CopyShortcutOwner, FileManagerInput, HostToolsPlainTextImeFrame, HostToolsTextInput,
-        NewConnectionField, PendingPlatformTextCommit, SettingsInput, SftpInput,
+        NewConnectionField, PendingPlatformTextCommit, QuickCommandInput, SettingsInput, SftpInput,
         TextInputAnchorStore, WorkspaceCaretState, WorkspaceCaretVisibility,
         WorkspaceImeMarkedText, WorkspaceImeTarget, active_ime_should_defer_input_key,
         collapsed_copy_shortcut_is_owned_by_target, control_k_delete_end,
@@ -3942,6 +3996,16 @@ mod tests {
             normalized.as_str(),
             "-----BEGIN TEST KEY-----\nfake-material\n-----END TEST KEY-----"
         );
+    }
+
+    #[test]
+    fn quick_command_clipboard_normalization_preserves_command_lines() {
+        let normalized = normalize_clipboard_text_for_ime_target(
+            WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText),
+            "first\r\nsecond\rthird",
+        );
+
+        assert_eq!(normalized.as_str(), "first\nsecond\nthird");
     }
 
     #[test]

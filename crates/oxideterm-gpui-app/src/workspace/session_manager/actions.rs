@@ -2,7 +2,7 @@ use super::*;
 use crate::workspace::new_connection::{
     NewConnectionTransport, form_from_mosh_profile, form_from_remote_desktop_profile,
     form_from_serial_profile, form_from_telnet_profile, terminal_serial_flow_from_profile,
-    terminal_serial_parity_from_profile,
+    terminal_serial_parity_from_profile, terminal_serial_runtime_options_from_profile,
 };
 use oxideterm_remote_desktop::{
     RemoteDesktopConnectionProfile, RemoteDesktopEndpoint, RemoteDesktopSecret,
@@ -471,20 +471,6 @@ impl WorkspaceApp {
         });
     }
 
-    pub(super) fn open_session_group_manager(&mut self, cx: &mut Context<Self>) {
-        self.session_manager.update(cx, |session_manager, cx| {
-            close_session_menu_state(session_manager);
-            session_manager.show_group_manager = true;
-            session_manager.group_editor = None;
-            session_manager.group_name_draft.clear();
-            session_manager.group_editor_error = None;
-            session_manager.group_manager_error = None;
-            session_manager.focused_input = None;
-            session_manager.focused_basic_dialog_footer_action = None;
-            cx.notify();
-        });
-    }
-
     pub(in crate::workspace) fn close_session_group_manager(&mut self, cx: &mut Context<Self>) {
         self.session_manager.update(cx, |session_manager, cx| {
             if session_manager.show_group_manager {
@@ -927,6 +913,7 @@ impl WorkspaceApp {
             stop_bits: profile.stop_bits,
             parity: terminal_serial_parity_from_profile(&profile.parity),
             flow_control: terminal_serial_flow_from_profile(&profile.flow_control),
+            runtime_options: terminal_serial_runtime_options_from_profile(&profile),
         };
         match self.create_serial_terminal_tab(config, profile.terminal.clone(), window, cx) {
             Ok(session_id) => {

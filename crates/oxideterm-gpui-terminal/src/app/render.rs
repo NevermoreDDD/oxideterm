@@ -1,10 +1,10 @@
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use gpui::{
-    Anchor, AnchoredPositionMode, AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable,
-    FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Render,
-    RenderImage, SharedString, StyledImage, Window, anchored, deferred, div, point, prelude::*, px,
-    rgb, rgba,
+    Anchor, AnchoredPositionMode, AnyElement, App, ClipboardItem, Context, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Render, RenderImage, SharedString, StyledImage, Window, anchored, deferred, div,
+    point, prelude::*, px, rgb, rgba,
 };
 use oxideterm_gpui_ui::confirm::{ConfirmDialogVariant, ConfirmDialogView, confirm_dialog};
 use oxideterm_gpui_ui::context_menu::{
@@ -13,6 +13,7 @@ use oxideterm_gpui_ui::context_menu::{
     context_menu_item_with_shortcut, context_menu_separator,
     context_menu_separator_height_estimate, context_menu_sub_content, context_menu_sub_trigger,
 };
+use oxideterm_gpui_ui::menu::{MenuItemKind, menu_content, menu_item, menu_label};
 use oxideterm_gpui_ui::modal::{TAURI_POPOVER_LAYER_PRIORITY, overlay_content_boundary};
 use oxideterm_gpui_ui::progress::progress;
 use oxideterm_gpui_ui::scroll::ScrollableElement;
@@ -50,6 +51,39 @@ const SERIAL_CONTROL_BUTTON_RADIUS: f32 = 999.0;
 // Keep diagnostic chrome away from the prompt and command text at the left edge.
 const TERMINAL_PERFORMANCE_OVERLAY_INSET: f32 = 8.0;
 const TERMINAL_AUTOSUGGEST_MAX_WIDTH: f32 = 520.0;
+
+fn quote_posix_shell_word(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            // Re-enter single quotes after emitting one literal quote outside them.
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(character);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn external_paths_for_local_terminal(paths: &[PathBuf]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut input = String::new();
+    for (index, path) in paths.iter().enumerate() {
+        // Refuse lossy conversion because inserting a different path is worse than ignoring it.
+        let path = path.to_str()?;
+        if index > 0 {
+            input.push(' ');
+        }
+        input.push_str(&quote_posix_shell_word(path));
+    }
+    input.push(' ');
+    Some(input)
+}
 
 fn clamp_terminal_context_menu_position(
     pointer_x: f32,
@@ -347,6 +381,8 @@ impl Render for TerminalPane {
             0.0
         })
         .layout_cache(self.layout_cache.clone());
+        let accepts_external_path_drop =
+            cfg!(target_os = "macos") && self.session_kind() == TerminalSessionKind::LocalPty;
         div()
             .id("terminal-pane")
             .size_full()
@@ -361,6 +397,23 @@ impl Render for TerminalPane {
             .text_size(self.metrics.font_size)
             .line_height(self.metrics.line_height)
             .track_focus(&self.focus_handle)
+            .can_drop(move |drag, _window, _cx| {
+                accepts_external_path_drop && drag.is::<ExternalPaths>()
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if !cfg!(target_os = "macos")
+                    || this.session_kind() != TerminalSessionKind::LocalPty
+                {
+                    return;
+                }
+                let Some(input) = external_paths_for_local_terminal(paths.paths()) else {
+                    return;
+                };
+
+                window.focus(&this.focus_handle, cx);
+                this.paste_text(&input, cx);
+                cx.stop_propagation();
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -491,7 +544,7 @@ impl TerminalPane {
         let popup_gap = tokens.spacing.one;
         let row_height = tokens.metrics.ui_button_sm_height;
         let popup_padding = tokens.metrics.ui_menu_padding;
-        let badge_width = row_height;
+        let header_height = tokens.metrics.ui_text_sm + tokens.metrics.ui_menu_item_padding_y * 2.0;
         let widest_command_cells = candidates
             .iter()
             .map(|candidate| UnicodeWidthStr::width(candidate.command.as_str()))
@@ -499,7 +552,6 @@ impl TerminalPane {
             .unwrap_or_default();
         let available_width = (anchor.container_width - popup_margin * 2.0).max(0.0);
         let desired_width = widest_command_cells as f32 * anchor.char_width
-            + badge_width
             + tokens.metrics.ui_menu_item_padding_x * 2.0
             + popup_padding * 2.0;
         let popup_width = desired_width
@@ -510,7 +562,8 @@ impl TerminalPane {
         let preferred_left = anchor.x - query_width;
         let max_left = (anchor.container_width - popup_width - popup_margin).max(popup_margin);
         let popup_left = preferred_left.max(popup_margin).min(max_left);
-        let popup_height = row_height * candidates.len() as f32 + popup_padding * 2.0;
+        let popup_height =
+            header_height + row_height * candidates.len() as f32 + popup_padding * 2.0;
         let cursor_top = terminal_top + anchor.y;
         let container_height = terminal_top + anchor.container_height;
         let max_top = (container_height - popup_height - popup_margin).max(popup_margin);
@@ -522,65 +575,28 @@ impl TerminalPane {
         let selected_index = self
             .autosuggest_selected_index
             .filter(|index| *index < candidates.len());
-        let history_source_short = self
-            .preferences
-            .autosuggest_labels
-            .history_source
-            .chars()
-            .next()
-            .map(|character| character.to_string())
-            .unwrap_or_default();
-
-        let mut list = div()
+        let mut list = menu_content(tokens)
             .w(px(popup_width))
-            .rounded(px(tokens.radii.md))
-            .border_1()
-            .border_color(rgb(tokens.ui.border_strong))
-            .bg(rgb(tokens.ui.bg_elevated))
-            .p(px(popup_padding))
-            .shadow_lg()
-            .overflow_hidden()
-            .on_scroll_wheel(|_event, _window, cx| cx.stop_propagation());
+            .min_w(px(0.0))
+            .on_scroll_wheel(|_event, _window, cx| cx.stop_propagation())
+            .child(menu_label(
+                tokens,
+                self.preferences.autosuggest_labels.history_source.clone(),
+                false,
+            ));
         for (index, candidate) in candidates.into_iter().enumerate() {
             let command = candidate.command;
             let command_for_click = command.clone();
             list = list.child(
-                div()
+                menu_item(tokens, command, MenuItemKind::Plain, false, false)
                     .id(("terminal-autosuggest-row", index))
                     .h(px(row_height))
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .rounded(px(tokens.radii.sm))
-                    .cursor_pointer()
+                    .truncate()
                     .when(selected_index == Some(index), |row| {
                         row.bg(rgb(tokens.ui.bg_active))
                     })
                     .hover(|row| row.bg(rgb(tokens.ui.bg_hover)))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .px(px(tokens.metrics.ui_menu_item_padding_x))
-                            .truncate()
-                            .text_size(px(tokens.metrics.ui_text_sm))
-                            .text_color(rgb(tokens.ui.text))
-                            .child(command),
-                    )
-                    .child(
-                        div()
-                            .w(px(badge_width))
-                            .h_full()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(rgb(tokens.ui.accent))
-                            .text_size(px(tokens.metrics.ui_text_xs))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(tokens.ui.accent_text))
-                            .child(history_source_short.clone()),
-                    )
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
@@ -1075,6 +1091,11 @@ impl TerminalPane {
             labels.line_ending,
             serial_line_ending_label(status.runtime_options.line_ending, labels)
         );
+        let output_line_ending_label = format!(
+            "{} {}",
+            labels.output_line_ending,
+            serial_line_ending_label(status.runtime_options.output_line_ending, labels)
+        );
         let local_echo_label = format!(
             "{} {}",
             labels.local_echo,
@@ -1154,6 +1175,24 @@ impl TerminalPane {
                         window.prevent_default();
                         cx.stop_propagation();
                         this.cycle_serial_line_ending(cx);
+                    }),
+                ),
+            )
+            .child(
+                self.render_serial_control_button(
+                    output_line_ending_label,
+                    true,
+                    !matches!(
+                        status.runtime_options.output_line_ending,
+                        SerialLineEnding::None
+                    ),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.cycle_serial_output_line_ending(cx);
                     }),
                 ),
             )
@@ -2578,11 +2617,14 @@ fn terminal_background_object_fit(fit: TerminalBackgroundFit) -> ObjectFit {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use oxideterm_terminal::TerminalCursorShape;
 
     use super::{
-        TERMINAL_VISUAL_BELL_OVERLAY_ALPHA, terminal_cursor_shape_for_render,
-        terminal_pane_base_is_transparent, terminal_visual_bell_overlay_color,
+        TERMINAL_VISUAL_BELL_OVERLAY_ALPHA, external_paths_for_local_terminal,
+        terminal_cursor_shape_for_render, terminal_pane_base_is_transparent,
+        terminal_visual_bell_overlay_color,
     };
 
     #[test]
@@ -2604,6 +2646,19 @@ mod tests {
         assert_eq!(
             terminal_cursor_shape_for_render(TerminalCursorShape::Block, TerminalCursorShape::Bar),
             TerminalCursorShape::Bar
+        );
+    }
+
+    #[test]
+    fn external_terminal_paths_are_inserted_as_inert_shell_words() {
+        let input = external_paths_for_local_terminal(&[
+            PathBuf::from("/Applications/Visual Studio Code.app"),
+            PathBuf::from("/tmp/it's ready\nnext"),
+        ]);
+
+        assert_eq!(
+            input.as_deref(),
+            Some("'/Applications/Visual Studio Code.app' '/tmp/it'\\''s ready\nnext' ")
         );
     }
 }

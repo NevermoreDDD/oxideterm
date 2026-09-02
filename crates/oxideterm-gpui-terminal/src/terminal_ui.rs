@@ -30,6 +30,7 @@ pub(crate) const DEFAULT_ROWS: usize = 40;
 pub(crate) const DEFAULT_SCROLLBACK_LINES: usize = 1000;
 pub const TERMINAL_FONT: &str = oxideterm_settings::JETBRAINS_MONO_SUBSET_FAMILY;
 pub(crate) const TERMINAL_FONT_SIZE: f32 = 14.0;
+pub(crate) const TERMINAL_FONT_WEIGHT: f32 = 400.0;
 pub(crate) const TERMINAL_LINE_HEIGHT_RATIO: f32 = 1.2;
 pub(crate) const TERMINAL_CONTENT_PADDING: f32 = 0.0;
 // Command marks no longer reserve a left gutter; column-zero terminal text must
@@ -72,6 +73,7 @@ pub struct TerminalUiPreferences {
     pub cjk_font_family: Option<String>,
     pub font_ligatures: bool,
     pub font_size: f32,
+    pub font_weight: f32,
     pub line_height: f32,
     pub cursor_shape: TerminalCursorShape,
     pub cursor_blink: bool,
@@ -188,6 +190,7 @@ impl Default for TerminalUiPreferences {
             cjk_font_family: None,
             font_ligatures: TERMINAL_FONT_LIGATURES,
             font_size: TERMINAL_FONT_SIZE,
+            font_weight: TERMINAL_FONT_WEIGHT,
             line_height: TERMINAL_LINE_HEIGHT_RATIO,
             cursor_shape: TerminalCursorShape::Block,
             cursor_blink: true,
@@ -461,6 +464,7 @@ pub struct TerminalSerialControlLabels {
     pub send_mode: String,
     pub display_mode: String,
     pub line_ending: String,
+    pub output_line_ending: String,
     pub local_echo: String,
     pub text_mode: String,
     pub hex_mode: String,
@@ -555,7 +559,8 @@ impl Default for TerminalSerialControlLabels {
             flow_hardware: "RTS/CTS".to_string(),
             send_mode: "Send".to_string(),
             display_mode: "Display".to_string(),
-            line_ending: "Line".to_string(),
+            line_ending: "TX line".to_string(),
+            output_line_ending: "RX line".to_string(),
             local_echo: "Echo".to_string(),
             text_mode: "Text".to_string(),
             hex_mode: "Hex".to_string(),
@@ -906,6 +911,7 @@ impl TerminalMetrics {
             &preferences.font_family,
             preferences.cjk_font_family.as_deref(),
             preferences.font_ligatures,
+            preferences.font_weight,
         );
         let font_id = window.text_system().resolve_font(&font);
         let measured_width = window
@@ -962,9 +968,18 @@ pub(crate) fn terminal_font_with_family_and_cjk(
     family: &str,
     cjk_family: Option<&str>,
     font_ligatures: bool,
+    font_weight: f32,
 ) -> Font {
+    let configured_families = oxideterm_gpui_ui::css_font_family_stack(family);
+    let primary_family = configured_families
+        .first()
+        .cloned()
+        .unwrap_or_else(|| SharedString::from(TERMINAL_FONT));
     let mut fallback_families = Vec::new();
-    push_font_fallback(&mut fallback_families, family);
+    // Preserve the user-defined stack before appending built-in recovery fonts.
+    for configured_fallback in configured_families.iter().skip(1) {
+        push_font_fallback(&mut fallback_families, configured_fallback);
+    }
     // A bundled Latin monospace must precede optional CJK and system fallbacks.
     push_font_fallback(
         &mut fallback_families,
@@ -1007,10 +1022,10 @@ pub(crate) fn terminal_font_with_family_and_cjk(
     }
 
     Font {
-        family: SharedString::from(family.to_string()),
+        family: primary_family,
         features: terminal_font_features(font_ligatures),
         fallbacks: Some(FontFallbacks::from_fonts(fallback_families)),
-        weight: FontWeight::default(),
+        weight: FontWeight(font_weight.clamp(100.0, 900.0)),
         style: FontStyle::Normal,
     }
 }
@@ -1035,6 +1050,23 @@ pub(crate) fn terminal_font_features(font_ligatures: bool) -> FontFeatures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_font_stack_uses_first_family_and_preserves_fallback_order() {
+        let font = terminal_font_with_family_and_cjk(
+            "\"Maple Mono\",\"Maple Mono NF CN\"",
+            None,
+            false,
+            400.0,
+        );
+        let fallbacks = font.fallbacks.expect("terminal font fallbacks");
+
+        assert_eq!(font.family.as_ref(), "Maple Mono");
+        assert_eq!(
+            fallbacks.fallback_list().first().map(String::as_str),
+            Some("Maple Mono NF CN")
+        );
+    }
 
     #[test]
     fn host_overrides_replace_only_terminal_protocol_defaults() {

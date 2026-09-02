@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use keyring::{Entry, Error as KeyringError};
 use std::process::Command;
 use zeroize::Zeroizing;
 
@@ -30,7 +31,14 @@ pub(super) fn store(service: &str, account: &str, secret: &str) -> Result<()> {
 }
 
 pub(super) fn get(service: &str, account: &str) -> Result<Option<Zeroizing<String>>> {
-    read_password(service, account)
+    read_password_with_security_tool(service, account)
+}
+
+pub(super) fn get_preserving_multiline(
+    service: &str,
+    account: &str,
+) -> Result<Option<Zeroizing<String>>> {
+    read_password_with_native_keychain(service, account)
 }
 
 pub(super) fn delete(service: &str, account: &str) -> Result<()> {
@@ -59,14 +67,17 @@ pub(super) fn exists(service: &str, account: &str) -> Result<bool> {
     anyhow::bail!("failed to inspect a macOS keychain entry")
 }
 
-fn read_password(service: &str, account: &str) -> Result<Option<Zeroizing<String>>> {
+fn read_password_with_security_tool(
+    service: &str,
+    account: &str,
+) -> Result<Option<Zeroizing<String>>> {
     let output = Command::new(SECURITY_TOOL_PATH)
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .output()
         .context("failed to run the macOS keychain tool to load a secret")?;
     if output.status.success() {
-        // The command output owns secret bytes, so zeroize that allocation after
-        // moving the decoded value into its domain owner.
+        // The subprocess buffer owns secret bytes and is scrubbed after the
+        // decoded value moves into the caller's zeroizing allocation.
         let output = Zeroizing::new(output.stdout);
         let secret = std::str::from_utf8(output.as_slice())
             .context("macOS keychain secret is not valid UTF-8")?;
@@ -81,8 +92,47 @@ fn read_password(service: &str, account: &str) -> Result<Option<Zeroizing<String
     }
 }
 
+fn read_password_with_native_keychain(
+    service: &str,
+    account: &str,
+) -> Result<Option<Zeroizing<String>>> {
+    // Newer macOS releases can render multiline values as hexadecimal through
+    // the CLI, so only callers that own multiline semantics use the native API.
+    let entry = Entry::new(service, account)
+        .context("failed to open a macOS keychain entry for secret loading")?;
+    match entry.get_password() {
+        Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(error).context("failed to load a secret from the macOS keychain"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ordinary_and_multiline_reads_keep_distinct_authentication_backends() {
+        let source = include_str!("macos.rs");
+        // Encrypted configuration already performs device-owner authentication,
+        // so its ordinary read must not add a native Keychain authorization prompt.
+        let ordinary_get = source
+            .split("pub(super) fn get(")
+            .nth(1)
+            .and_then(|source| {
+                source
+                    .split("pub(super) fn get_preserving_multiline")
+                    .next()
+            })
+            .expect("ordinary get precedes multiline get");
+        let multiline_get = source
+            .split("pub(super) fn get_preserving_multiline")
+            .nth(1)
+            .and_then(|source| source.split("pub(super) fn delete").next())
+            .expect("multiline get precedes delete");
+
+        assert!(ordinary_get.contains("read_password_with_security_tool"));
+        assert!(multiline_get.contains("read_password_with_native_keychain"));
+    }
+
     #[test]
     fn preview_14_store_arguments_include_permissive_acl() {
         let source = include_str!("macos.rs");

@@ -279,30 +279,14 @@ impl WorkspaceApp {
                 marked_text: self.marked_text_for_target(target, cx),
             },
         )
-        .h(px(34.0))
-        .cursor(CursorStyle::IBeam);
-        let workspace = cx.entity();
-        let input = text_input_anchor_probe(
-            target.anchor_id(),
-            input
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        this.ime_marked_text = None;
-                        this.show_active_input_caret(cx);
-                        window.focus(&this.focus_handle, cx);
-                        this.begin_ime_selection_from_mouse_down(target, event, window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                    this.update_ime_selection_drag_from_mouse_move(event, window, cx);
-                })),
-            move |anchor, _window, cx| {
-                let _ = workspace.update(cx, |this, cx| {
-                    this.update_text_input_anchor(anchor, cx);
-                });
+        .h(px(34.0));
+        let input = self.text_input_with_workspace_ime(
+            target,
+            input,
+            |this, cx| {
+                this.show_active_input_caret(cx);
             },
+            cx,
         );
         let cancel_action = self.workspace_confirm_footer_action_button(
             self.i18n.t("common.cancel"),
@@ -994,32 +978,9 @@ impl WorkspaceApp {
                             .child(self.i18n.t("tabbar.detach_to_window")),
                     ),
             );
-        let preview = if self.tokens.motion.enabled {
-            preview
-                .with_animation(
-                    ("tab-detach-drag-preview", drag.tab_id.0),
-                    Animation::new(oxideterm_gpui_ui::motion::scaled_duration(
-                        &self.tokens,
-                        760,
-                    ))
-                    .repeat(),
-                    |preview, delta| {
-                        let pulse = if delta < 0.5 {
-                            delta * 2.0
-                        } else {
-                            (1.0 - delta) * 2.0
-                        };
-                        preview.opacity(
-                            0.82 + oxideterm_gpui_ui::motion::ease_in_out_cubic(pulse) * 0.16,
-                        )
-                    },
-                )
-                .into_any_element()
-        } else {
-            preview.opacity(0.96).into_any_element()
-        };
-
-        Some(preview)
+        // A drag preview is pointer feedback, not an autonomous animation owner.
+        // Keeping it static avoids re-entrant frame requests during Win32 input dispatch.
+        Some(preview.opacity(0.96).into_any_element())
     }
 
     fn render_detached_tab_return_drag_preview(

@@ -149,7 +149,7 @@ impl ConnectionStore {
     }
 
     fn get_managed_ssh_key_secret(&self, secret_id: &str) -> Result<SecretString> {
-        match self.managed_keychain.get(secret_id) {
+        match self.managed_keychain.get_preserving_multiline(secret_id) {
             Ok(secret) => Ok(secret),
             Err(keychain_error) => {
                 let config_key = load_config_encryption_key()?.ok_or_else(|| {
@@ -1035,6 +1035,12 @@ impl ConnectionStore {
         profile.stop_bits = request.stop_bits.unwrap_or(1);
         profile.parity = request.parity.unwrap_or(SerialParity::None);
         profile.flow_control = request.flow_control.unwrap_or(SerialFlowControl::None);
+        if let Some(line_ending) = request.input_line_ending {
+            profile.input_line_ending = line_ending;
+        }
+        if let Some(line_ending) = request.output_line_ending {
+            profile.output_line_ending = line_ending;
+        }
         profile.terminal = request.terminal;
         profile.connect_on_open = request.connect_on_open.unwrap_or(false);
         if !self
@@ -1061,6 +1067,39 @@ impl ConnectionStore {
         self.normalize();
         self.save()?;
         Ok(profile)
+    }
+
+    /// Persists terminal-side newline handling without replacing unrelated profile fields.
+    pub fn set_serial_profile_line_endings(
+        &mut self,
+        id: &str,
+        input_line_ending: Option<SerialLineEnding>,
+        output_line_ending: Option<SerialLineEnding>,
+    ) -> Result<bool> {
+        let Some(profile) = self
+            .data
+            .serial_profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+        else {
+            return Ok(false);
+        };
+        let input_changed = input_line_ending
+            .is_some_and(|line_ending| profile.input_line_ending != line_ending);
+        let output_changed = output_line_ending
+            .is_some_and(|line_ending| profile.output_line_ending != line_ending);
+        if !input_changed && !output_changed {
+            return Ok(false);
+        }
+        if let Some(line_ending) = input_line_ending {
+            profile.input_line_ending = line_ending;
+        }
+        if let Some(line_ending) = output_line_ending {
+            profile.output_line_ending = line_ending;
+        }
+        profile.updated_at = Utc::now();
+        self.save()?;
+        Ok(true)
     }
 
     pub fn delete_serial_profile(&mut self, id: &str) -> Result<bool> {
@@ -2592,17 +2631,30 @@ impl ConnectionStore {
     }
 
     pub fn resolve_managed_ssh_key_private_key(&self, id: &str) -> Result<SecretString> {
-        let secret_id = self
+        let managed_key = self
             .data
             .managed_ssh_keys
             .iter()
             .find(|key| key.id == id)
-            .map(|key| key.secret_id.clone())
             .ok_or_else(|| anyhow::anyhow!("Managed SSH key not found"))?;
+        let private_key = self.get_managed_ssh_key_secret(&managed_key.secret_id)?;
+        let Some(recovery) = recover_legacy_hex_managed_private_key(
+            &private_key,
+            &managed_key.fingerprint,
+            managed_key.requires_passphrase,
+        )? else {
+            // Secret material leaves the managed backend only at the SSH auth boundary.
+            // Callers must decode/use it immediately and must not persist this value.
+            return Ok(private_key);
+        };
 
-        // Secret material leaves the managed backend only at the SSH auth boundary.
-        // Callers must decode/use it immediately and must not persist this value.
-        self.get_managed_ssh_key_secret(&secret_id)
+        if recovery.safe_to_persist {
+            // Older macOS builds could rewrite a multiline Keychain value as hexadecimal text.
+            // Persist only fingerprint-validated recovery so later reads use the original bytes.
+            self.store_managed_ssh_key_secret(&managed_key.secret_id, &recovery.private_key)
+                .context("failed to repair a legacy managed SSH key")?;
+        }
+        Ok(recovery.private_key)
     }
 
     fn create_managed_ssh_key(

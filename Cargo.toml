@@ -101,6 +101,10 @@ members = [
   "crates/russh",
   "crates/russh-sftp",
 ]
+exclude = [
+  "crates/gpui-ce/xim-ctext",
+  "crates/gpui-ce/zed-xim",
+]
 default-members = ["crates/oxideterm-gpui-app"]
 resolver = "2"
 
@@ -115,7 +119,7 @@ vte = { path = "crates/vte" }
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false
-version = "2.0.24"
+version = "2.0.26"
 
 [workspace.dependencies]
 accesskit = { version = "0.24.0", features = ["enumn"] }

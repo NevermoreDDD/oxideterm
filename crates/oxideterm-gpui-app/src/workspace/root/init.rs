@@ -1129,6 +1129,7 @@ impl WorkspaceApp {
             cjk_font_family: terminal_cjk_font_family_preference(&terminal.cjk_font_family),
             font_ligatures: terminal.font_ligatures,
             font_size: terminal.font_size as f32,
+            font_weight: terminal.font_weight as f32,
             line_height: terminal.line_height as f32,
             cursor_shape: match terminal.cursor_style {
                 SettingsCursorStyle::Block => TerminalCursorShape::Block,
@@ -1245,6 +1246,7 @@ impl WorkspaceApp {
                 send_mode: self.i18n.t("terminal.serial_control.send_mode"),
                 display_mode: self.i18n.t("terminal.serial_control.display_mode"),
                 line_ending: self.i18n.t("terminal.serial_control.line_ending"),
+                output_line_ending: self.i18n.t("terminal.serial_control.output_line_ending"),
                 local_echo: self.i18n.t("terminal.serial_control.local_echo"),
                 text_mode: self.i18n.t("terminal.serial_control.text_mode"),
                 hex_mode: self.i18n.t("terminal.serial_control.hex_mode"),

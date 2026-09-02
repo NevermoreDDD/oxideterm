@@ -75,16 +75,18 @@ impl NativeSecretStore {
         }
     }
 
-    /// Loads a secret and restores the Preview 14 ACL after a successful read.
-    pub fn get_and_relax(&self, account: &str) -> Result<Option<Zeroizing<String>>> {
-        let secret = self.get(account)?;
+    /// Loads a secret through the macOS backend that preserves multiline content exactly.
+    ///
+    /// This mode can request application-specific Keychain authorization, so only domains
+    /// whose secret format permits newlines should select it.
+    pub fn get_preserving_multiline(&self, account: &str) -> Result<Option<Zeroizing<String>>> {
         #[cfg(target_os = "macos")]
-        if let Some(secret) = secret.as_ref() {
-            // Callers use this only after accepting the stored value as a valid
-            // domain secret, so invalid config keys take the plain get path.
-            self.store(account, secret.as_str())?;
+        {
+            return macos::get_preserving_multiline(&self.service, account);
         }
-        Ok(secret)
+
+        #[cfg(not(target_os = "macos"))]
+        self.get(account)
     }
 
     pub fn delete(&self, account: &str) -> Result<()> {

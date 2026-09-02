@@ -2550,6 +2550,8 @@ mod tests {
             stop_bits: 1,
             parity: SerialParity::None,
             flow_control: SerialFlowControl::Hardware,
+            input_line_ending: SerialLineEnding::CrLf,
+            output_line_ending: SerialLineEnding::Lf,
             terminal: ConnectionTerminalOptions::default(),
             connect_on_open: true,
             created_at: now,
@@ -2571,9 +2573,30 @@ mod tests {
             "#451a03"
         );
         assert_eq!(value["serial_profiles"][0]["flow_control"], "hardware");
+        assert_eq!(value["serial_profiles"][0]["input_line_ending"], "crlf");
+        assert_eq!(value["serial_profiles"][0]["output_line_ending"], "lf");
         assert!(value["serial_profiles"][0].get("host").is_none());
         assert!(value["serial_profiles"][0].get("username").is_none());
         assert!(value["serial_profiles"][0].get("auth").is_none());
+
+        let mut legacy_value = value.clone();
+        legacy_value["serial_profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_line_ending");
+        legacy_value["serial_profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_line_ending");
+        let legacy_round_trip: ConnectionStoreData = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(
+            legacy_round_trip.serial_profiles[0].input_line_ending,
+            SerialLineEnding::None
+        );
+        assert_eq!(
+            legacy_round_trip.serial_profiles[0].output_line_ending,
+            SerialLineEnding::None
+        );
 
         let round_trip: ConnectionStoreData = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip.serial_profiles, vec![profile]);
@@ -2675,6 +2698,51 @@ mod tests {
         profile.baud_rate = 115_200;
         profile.port_path.clear();
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn serial_line_endings_persist_in_sync_snapshot() {
+        let mut store = load_empty_store("serial-line-endings-sync");
+        let profile = store
+            .upsert_serial_profile(SaveSerialProfileRequest {
+                name: "Serial".to_string(),
+                port_path: "/dev/ttyUSB0".to_string(),
+                ..SaveSerialProfileRequest::default()
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .set_serial_profile_line_endings(
+                    &profile.id,
+                    Some(SerialLineEnding::CrLf),
+                    None,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_serial_profile_line_endings(
+                    &profile.id,
+                    None,
+                    Some(SerialLineEnding::Lf),
+                )
+                .unwrap()
+        );
+
+        let snapshot = store.export_serial_profiles_snapshot().unwrap();
+        assert_eq!(snapshot.records[0].input_line_ending, SerialLineEnding::CrLf);
+        assert_eq!(snapshot.records[0].output_line_ending, SerialLineEnding::Lf);
+
+        let reloaded = ConnectionStore::load(store.path()).unwrap();
+        assert_eq!(
+            reloaded.serial_profiles()[0].input_line_ending,
+            SerialLineEnding::CrLf
+        );
+        assert_eq!(
+            reloaded.serial_profiles()[0].output_line_ending,
+            SerialLineEnding::Lf
+        );
     }
 
     #[test]
@@ -2845,6 +2913,111 @@ mod tests {
             !serde_json::to_string(&info)
                 .unwrap()
                 .contains("PRIVATE KEY")
+        );
+    }
+
+    #[test]
+    fn managed_key_resolve_repairs_legacy_hex_encoded_secret() {
+        let mut store = load_empty_store("managed-key-legacy-hex");
+        let private_key = generated_private_key_text(None);
+        let info = store
+            .create_managed_ssh_key_from_text(
+                SecretString::from(private_key.clone()),
+                Some("Legacy Keychain Key".to_string()),
+                None,
+            )
+            .unwrap();
+        let secret_id = store.data.managed_ssh_keys[0].secret_id.clone();
+        let legacy_hex = private_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        store
+            .managed_keychain
+            .store(&secret_id, &SecretString::from(legacy_hex))
+            .unwrap();
+
+        let restored = store
+            .resolve_managed_ssh_key_private_key(&info.id)
+            .expect("legacy hexadecimal managed key should be repaired");
+
+        assert_eq!(restored, private_key.as_str());
+        assert_eq!(
+            store.managed_keychain.get(&secret_id).unwrap(),
+            private_key.as_str(),
+            "the repaired private key should replace the legacy hexadecimal value"
+        );
+    }
+
+    #[test]
+    fn managed_key_resolve_does_not_persist_unverified_encrypted_recovery() {
+        let mut store = load_empty_store("managed-key-encrypted-legacy-hex");
+        let passphrase = SecretString::from("secret-passphrase");
+        let private_key = generated_private_key_text(Some(passphrase.expose_secret()));
+        let info = store
+            .create_managed_ssh_key_from_text(
+                SecretString::from(private_key.clone()),
+                Some("Encrypted Legacy Keychain Key".to_string()),
+                Some(passphrase.clone()),
+            )
+            .unwrap();
+        let secret_id = store.data.managed_ssh_keys[0].secret_id.clone();
+        let legacy_hex = private_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        store
+            .managed_keychain
+            .store(&secret_id, &SecretString::from(legacy_hex.clone()))
+            .unwrap();
+
+        let restored = store
+            .resolve_managed_ssh_key_private_key(&info.id)
+            .expect("encrypted legacy hexadecimal key should be usable for authentication");
+
+        assert_eq!(restored, private_key.as_str());
+        decode_managed_private_key(&restored, Some(&passphrase))
+            .expect("the caller-provided passphrase should validate the recovered key");
+        assert_eq!(
+            store.managed_keychain.get(&secret_id).unwrap(),
+            legacy_hex.as_str(),
+            "encrypted recovery must not be persisted before fingerprint validation"
+        );
+    }
+
+    #[test]
+    fn managed_key_resolve_rejects_legacy_hex_with_wrong_fingerprint() {
+        let mut store = load_empty_store("managed-key-legacy-hex-mismatch");
+        let expected_key = generated_private_key_text(None);
+        let different_key = generated_private_key_text(None);
+        let info = store
+            .create_managed_ssh_key_from_text(
+                SecretString::from(expected_key),
+                Some("Expected Key".to_string()),
+                None,
+            )
+            .unwrap();
+        let secret_id = store.data.managed_ssh_keys[0].secret_id.clone();
+        let legacy_hex = different_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        store
+            .managed_keychain
+            .store(&secret_id, &SecretString::from(legacy_hex.clone()))
+            .unwrap();
+
+        let error = store
+            .resolve_managed_ssh_key_private_key(&info.id)
+            .expect_err("a different legacy key must fail its metadata integrity check");
+
+        assert_eq!(error.to_string(), "Managed SSH key integrity check failed");
+        assert_eq!(
+            store.managed_keychain.get(&secret_id).unwrap(),
+            legacy_hex.as_str()
         );
     }
 
