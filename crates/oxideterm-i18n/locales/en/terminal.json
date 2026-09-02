@@ -126,6 +126,16 @@
       "cancel": "Cancel",
       "paste": "Paste"
     },
+    "kitty_file_transmission": {
+      "title": "Allow Kitty local-file access for this session?",
+      "description": "The request was blocked. If you allow it, OxideTerm creates a private session directory and copies its path. Retry the transfer using a tty-graphics-protocol file directly inside that directory.",
+      "cancel": "Deny",
+      "allow": "Allow for this session",
+      "allowed_title": "Kitty file access allowed for this session",
+      "allowed_description": "The private transfer directory was copied to the clipboard. The permission ends when this terminal session closes.",
+      "failed_title": "Could not enable Kitty file access",
+      "failed_description": "OxideTerm could not create the private transfer directory."
+    },
     "command_selection": {
       "actions": "Command selection actions",
       "copy": "Copy",
@@ -160,7 +170,6 @@
       "port_missing": "Port missing",
       "port_unknown": "Port unknown",
       "refresh": "Refresh",
-      "reconnect": "Reconnect",
       "send_break": "Break",
       "dtr": "DTR",
       "rts": "RTS",
@@ -171,7 +180,8 @@
       "flow_hardware": "RTS/CTS",
       "send_mode": "Send",
       "display_mode": "Display",
-      "line_ending": "Line",
+      "line_ending": "TX line ending",
+      "output_line_ending": "RX line ending",
       "local_echo": "Echo",
       "text_mode": "Text",
       "hex_mode": "Hex",
@@ -179,8 +189,7 @@
       "line_ending_lf": "LF",
       "line_ending_crlf": "CRLF",
       "line_ending_cr": "CR",
-      "line_ending_none": "Raw",
-      "reconnect_failed": "Serial reconnect failed"
+      "line_ending_none": "Raw"
     },
     "recording": {
       "started": "Terminal recording started",
@@ -206,6 +215,8 @@
     },
     "session_log": {
       "title": "Session log",
+      "automatic_for_connection": "Auto-save session logs for this connection",
+      "profile_preferences_save_failed": "Could not save this connection's terminal defaults",
       "started": "Session logging started",
       "start_failed": "Could not start session logging",
       "write_failed": "Session logging stopped because the file could not be written",
@@ -297,6 +308,7 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
+      "delete_group_description": "Commands in \"{{name}}\" will be moved to the default group before deletion.",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",

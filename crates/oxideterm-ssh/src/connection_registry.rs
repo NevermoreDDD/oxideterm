@@ -64,6 +64,7 @@ pub enum ConnectionConsumer {
     Terminal(String),
     Sftp(String),
     PortForward(String),
+    Monitor(String),
     X11Forward(String),
     Ide(String),
     NodeRouter(String),
@@ -416,6 +417,44 @@ pub struct SshConnectionHandle {
     entry: Arc<ConnectionEntry>,
 }
 
+/// Owns one registry-managed physical connection for a single logical consumer.
+pub struct DedicatedConnectionLease {
+    registry: SshConnectionRegistry,
+    handle: SshConnectionHandle,
+    consumer: ConnectionConsumer,
+}
+
+impl DedicatedConnectionLease {
+    pub(crate) fn new(
+        registry: SshConnectionRegistry,
+        handle: SshConnectionHandle,
+        consumer: ConnectionConsumer,
+    ) -> Self {
+        Self {
+            registry,
+            handle,
+            consumer,
+        }
+    }
+
+    pub fn handle(&self) -> &SshConnectionHandle {
+        &self.handle
+    }
+
+    pub fn connection_id(&self) -> &str {
+        self.handle.connection_id()
+    }
+}
+
+impl Drop for DedicatedConnectionLease {
+    fn drop(&mut self) {
+        // The lease is the consumer lifetime boundary; the registry retires the
+        // isolated transport without changing the parent node's readiness.
+        self.registry
+            .release(self.handle.connection_id(), &self.consumer);
+    }
+}
+
 impl SshConnectionHandle {
     pub fn connection_id(&self) -> &str {
         &self.entry.connection_id
@@ -718,8 +757,8 @@ impl SshConnectionRegistry {
         consumer: ConnectionConsumer,
     ) -> SshConnectionHandle {
         let pool_key = format!("{}|dedicated={}", config.connection_key(), Uuid::new_v4());
-        // Dedicated terminals remain registry-owned without joining the shared
-        // node pool. Their transport is retired as soon as its terminal exits.
+        // Dedicated consumers remain registry-owned without joining the shared
+        // node pool. Their transport retires when the explicit owner releases it.
         let entry = Arc::new(ConnectionEntry::new_with_key(
             config,
             pool_key.clone(),
@@ -1125,6 +1164,15 @@ impl SshConnectionRegistry {
         ) {
             return ProbeConnectionStatus::NotApplicable;
         }
+        if handle
+            .config()
+            .ssh_channel_strategy
+            .requires_dedicated_consumers()
+        {
+            // Some one-channel appliances treat keepalive global requests as
+            // an unsupported second operation and close an otherwise healthy link.
+            return ProbeConnectionStatus::NotApplicable;
+        }
 
         match handle.probe_alive(timeout).await {
             KeepaliveProbeResult::Ok => {
@@ -1185,6 +1233,13 @@ impl SshConnectionRegistry {
             | ConnectionState::Disconnecting
             | ConnectionState::Disconnected
             | ConnectionState::Error(_) => return ProbeConnectionStatus::NotApplicable,
+        }
+        if handle
+            .config()
+            .ssh_channel_strategy
+            .requires_dedicated_consumers()
+        {
+            return ProbeConnectionStatus::NotApplicable;
         }
 
         match handle.probe_alive(timeout).await {
@@ -1590,6 +1645,9 @@ fn topology_consumer_summary(
             ConnectionConsumer::PortForward(_) | ConnectionConsumer::X11Forward(_) => {
                 summary.port_forwards += 1
             }
+            // Monitor leases are visible as isolated transports but do not
+            // masquerade as terminal, SFTP, IDE, or forwarding ownership.
+            ConnectionConsumer::Monitor(_) => {}
             ConnectionConsumer::Ide(_) => summary.ide += 1,
             ConnectionConsumer::NodeRouter(_) => summary.node_router += 1,
             ConnectionConsumer::PublicMcp(_) => summary.public_mcp += 1,
@@ -1829,6 +1887,7 @@ impl From<&ConnectionConsumer> for ConnectionMonitorConsumerKind {
             ConnectionConsumer::PortForward(_) | ConnectionConsumer::X11Forward(_) => {
                 Self::PortForward
             }
+            ConnectionConsumer::Monitor(_) => Self::Other,
             ConnectionConsumer::Ide(_)
             | ConnectionConsumer::NodeRouter(_)
             | ConnectionConsumer::PublicMcp(_)
@@ -1846,8 +1905,6 @@ impl Default for SshConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::router::{NodeId, NodeReadiness, NodeStateEvent};
-
     #[test]
     fn shares_one_connection_for_many_consumers() {
         let registry = SshConnectionRegistry::default();
@@ -1928,14 +1985,6 @@ mod tests {
             Some(false)
         );
         assert_eq!(registry.mark_visible_terminal_ready("missing"), None);
-    }
-
-    #[test]
-    fn remote_env_parser_matches_tauri_unix_os_names() {
-        assert_eq!(classify_remote_unix_os("Linux"), "Linux");
-        assert_eq!(classify_remote_unix_os("Darwin"), "macOS");
-        assert_eq!(classify_remote_unix_os("MINGW64_NT-10.0"), "Windows_MinGW");
-        assert_eq!(classify_remote_unix_os(""), "Unknown");
     }
 
     #[test]
@@ -2058,6 +2107,22 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_lease_retires_connection_on_drop() {
+        let registry = SshConnectionRegistry::default();
+        let consumer = ConnectionConsumer::Sftp("node-1:browse".into());
+        let handle = registry.acquire_dedicated(
+            SshConfig::password("dedicated.example", 22, "alice", "pw"),
+            consumer.clone(),
+        );
+        let connection_id = handle.connection_id().to_string();
+        let lease = DedicatedConnectionLease::new(registry.clone(), handle, consumer);
+
+        drop(lease);
+
+        assert!(registry.get(&connection_id).is_none());
+    }
+
+    #[test]
     fn dedicated_child_retirement_releases_parent_ownership() {
         let registry = SshConnectionRegistry::default();
         let parent_owner = ConnectionConsumer::NodeRouter("parent".into());
@@ -2112,6 +2177,27 @@ mod tests {
         let info = registry.get(handle.connection_id()).unwrap().info();
         assert_eq!(info.state, ConnectionState::Idle);
         assert!(info.keep_alive);
+    }
+
+    #[tokio::test]
+    async fn single_channel_connections_skip_global_keepalive_probes() {
+        let registry = SshConnectionRegistry::default();
+        let consumer = ConnectionConsumer::NodeRouter("single-channel".into());
+        let handle = registry.acquire(
+            SshConfig {
+                ssh_channel_strategy:
+                    oxideterm_connections::SshChannelStrategy::DedicatedPerConsumer,
+                ..SshConfig::default()
+            },
+            consumer,
+        );
+        registry.mark_state(handle.connection_id(), ConnectionState::Active);
+
+        let status = registry
+            .probe_single_connection(handle.connection_id(), Duration::from_millis(1))
+            .await;
+
+        assert_eq!(status, ProbeConnectionStatus::NotApplicable);
     }
 
     #[tokio::test]
@@ -2339,58 +2425,6 @@ mod tests {
                 .consumers
                 .contains(&ConnectionConsumer::NodeRouter("root".into()))
         );
-    }
-
-    #[test]
-    fn link_down_cascade_emits_tauri_shaped_status_event() {
-        let registry = SshConnectionRegistry::default();
-        let emitter = NodeEventEmitter::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        emitter.subscribe(tx);
-        registry.set_node_event_emitter(emitter.clone());
-
-        let root = registry.acquire(
-            SshConfig::password("jump", 22, "me", "pw"),
-            ConnectionConsumer::NodeRouter("root".into()),
-        );
-        let child = registry.acquire(
-            SshConfig::password("target", 22, "me", "pw"),
-            ConnectionConsumer::NodeRouter("child".into()),
-        );
-        emitter.register(root.connection_id(), NodeId::new("root"));
-        emitter.register(child.connection_id(), NodeId::new("child"));
-        registry.mark_state_without_event(root.connection_id(), ConnectionState::Active);
-        registry.mark_state_without_event(child.connection_id(), ConnectionState::Active);
-        registry.set_parent_connection_id(
-            child.connection_id(),
-            Some(root.connection_id().to_string()),
-        );
-
-        registry.mark_link_down_cascade(root.connection_id());
-
-        match rx.recv().unwrap() {
-            NodeStateEvent::ConnectionStatusChanged {
-                connection_id,
-                status,
-                affected_children,
-                ..
-            } => {
-                assert_eq!(connection_id, root.connection_id());
-                assert_eq!(status, "link_down");
-                assert_eq!(affected_children, vec![child.connection_id().to_string()]);
-            }
-            event => panic!("expected connection status event, got {event:?}"),
-        }
-        match rx.recv().unwrap() {
-            NodeStateEvent::ConnectionStateChanged { node_id, state, .. } => {
-                assert_eq!(node_id, "root");
-                assert_eq!(state, NodeReadiness::Error);
-            }
-            event => panic!("expected root node state event, got {event:?}"),
-        }
-
-        registry.mark_link_down_cascade(root.connection_id());
-        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -128,6 +128,15 @@ fn main() {
         eprintln!("failed to initialize OxideTerm portable runtime: {error}");
         std::process::exit(1);
     }
+    if matches!(
+        oxideterm_portable_runtime::portable_bootstrap_status(),
+        Ok(oxideterm_portable_runtime::PortableBootstrapStatus::Locked)
+    ) && oxideterm_portable_runtime::keystore::try_portable_auto_unlock().is_err()
+    {
+        // Automatic-unlock failures must retain the normal password fallback.
+        // Avoid including backend details that may identify credential entries.
+        eprintln!("portable automatic unlock is unavailable; password unlock is required");
+    }
     // Only the primary process may snapshot mutable stores. This still runs
     // before SettingsStore or ConnectionStore can perform migrations.
     let settings_path = oxideterm_settings::default_settings_path();
@@ -173,6 +182,8 @@ fn main() {
             None
         }
     };
+    #[cfg(target_os = "windows")]
+    let managed_x11_runtime_owner = oxideterm_x11_forwarding::install_managed_windows_x11_runtime();
 
     let application = oxideterm_gpui_platform::application().with_assets(NativeAssets);
     let url_event_receiver = single_instance_rx.clone();
@@ -288,6 +299,8 @@ fn main() {
             eprintln!("failed to confirm the applied update: {error}");
         }
     });
+    #[cfg(target_os = "windows")]
+    drop(managed_x11_runtime_owner);
 }
 
 fn confirm_update_after_initial_workspace() -> std::io::Result<()> {

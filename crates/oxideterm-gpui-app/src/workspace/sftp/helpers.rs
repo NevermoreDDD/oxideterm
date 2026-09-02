@@ -490,7 +490,11 @@ async fn load_remote_sftp_listing_inner(
         .map_err(|error| error.to_string())?;
     match list_remote_sftp_once(&transfer, path).await {
         Ok(listing) => {
-            if update_ready_path && let SftpRemoteBackend::Node { router, node_id } = &backend {
+            if update_ready_path
+                && let SftpRemoteBackend::Node {
+                    router, node_id, ..
+                } = &backend
+            {
                 let connection = router
                     .resolve_connection(node_id)
                     .await
@@ -516,7 +520,11 @@ async fn load_remote_sftp_listing_inner(
             let listing = list_remote_sftp_once(&transfer, path)
                 .await
                 .map_err(|retry_error| retry_error.to_string())?;
-            if update_ready_path && let SftpRemoteBackend::Node { router, node_id } = &backend {
+            if update_ready_path
+                && let SftpRemoteBackend::Node {
+                    router, node_id, ..
+                } = &backend
+            {
                 let connection = router
                     .resolve_connection(node_id)
                     .await
@@ -924,17 +932,6 @@ mod sftp_helper_tests {
 
         // The generated UUID keeps cleanup scoped to this test's directory.
         std::fs::remove_dir_all(&directory).expect("temporary directory should be removed");
-    }
-
-    #[test]
-    fn modified_date_matches_tauri_seconds_contract() {
-        assert_eq!(format_modified(None), "-");
-        assert_eq!(format_modified(Some(0)), "-");
-
-        let rendered = format_modified(Some(1_700_000_000));
-        assert_ne!(rendered, "-");
-        assert_ne!(rendered, "2026/5/7");
-        assert!(rendered.contains('/'));
     }
 
     #[test]

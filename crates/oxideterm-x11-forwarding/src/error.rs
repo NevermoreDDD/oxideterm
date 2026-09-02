@@ -31,6 +31,10 @@ pub enum X11ForwardingError {
     XauthFailed(String),
     #[error("xauth output exceeded {0} bytes")]
     XauthOutputTooLarge(usize),
+    #[error("managed X11 runtime is unavailable: {0}")]
+    ManagedRuntimeUnavailable(String),
+    #[error("managed X11 runtime failed: {0}")]
+    ManagedRuntimeFailed(String),
     #[error("no remote X11 display candidate was available")]
     RemoteDisplayUnavailable,
     #[error("X11 auth cookie did not match the forwarding cookie")]

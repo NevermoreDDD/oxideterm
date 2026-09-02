@@ -3,6 +3,12 @@
     "name": "OxideTerm",
     "shellLauncher": "Trình khởi chạy shell"
   },
+  "window_controls": {
+    "minimize": "Thu nhỏ",
+    "maximize": "Phóng to",
+    "restore": "Khôi phục",
+    "close": "Đóng"
+  },
   "language": {
     "english": "English",
     "simplified_chinese": "简体中文",
@@ -139,7 +145,8 @@
       "cancel": "Hủy",
       "confirm": "Xác nhận",
       "do_not_ask_again": "Không hỏi lại",
-      "delete": "Xóa"
+      "delete": "Xóa",
+      "retry": "Thử lại"
     },
     "cancel": "Hủy",
     "delete": "Xóa",
@@ -978,8 +985,6 @@
     "security_desc": "Lưu trữ chuỗi khóa, mã hóa ChaCha20-Poly1305, SSH thuần Rust.",
     "local_file_manager": "Trình quản lý tập tin cục bộ",
     "local_file_manager_desc": "Trình duyệt tập tin với xem trước nhanh, đánh dấu và kéo thả.",
-    "launchpad": "Launchpad macOS",
-    "launchpad_desc": "Trình khởi chạy ứng dụng gốc — tìm kiếm và mở ứng dụng từ /Applications.",
     "wsl_graphics": "Đồ họa WSL",
     "wsl_graphics_desc": "Chạy ứng dụng Linux đồ họa trên Windows qua VNC tích hợp — chế độ máy tính để bàn hoặc ứng dụng đơn.",
     "plugin_system": "Hệ thống plugin",
@@ -1196,7 +1201,6 @@
     "vnc_preview_title": "Xem trước VNC",
     "provider_missing": "Trình cung cấp máy tính từ xa không khả dụng.",
     "session_missing": "Phiên máy tính từ xa không khả dụng.",
-    "force_recover": "Khôi phục",
     "reconnect": "Kết nối lại",
     "resize_fixed": "Kích thước do máy chủ cố định",
     "resize_unknown": "Chưa phát hiện đổi kích thước",

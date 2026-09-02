@@ -57,7 +57,7 @@ impl WorkspaceApp {
                     )
                 };
                 if show_group_manager {
-                    modals.push(self.render_group_manager_dialog(cx));
+                    modals.push(self.render_group_manager_dialog(window, cx));
                 }
                 if show_delete_confirm {
                     modals.push(self.render_session_manager_delete_confirm(cx));
@@ -161,7 +161,6 @@ impl WorkspaceApp {
                     TabKind::Settings
                         | TabKind::SessionManager
                         | TabKind::FileManager
-                        | TabKind::Launcher
                         | TabKind::Graphics
                         | TabKind::Runtime
                         | TabKind::ConnectionPool
@@ -188,7 +187,6 @@ impl WorkspaceApp {
             match (tab_kind, root_pane) {
                 (TabKind::Settings, _) => self.render_settings_surface(cx),
                 (TabKind::FileManager, _) => self.render_file_manager_surface(window, cx),
-                (TabKind::Launcher, _) => self.render_launcher_surface(window, cx),
                 (TabKind::Graphics, _) => self.render_graphics_surface(window, cx),
                 (TabKind::Runtime, _) => self.render_connection_runtime_surface(cx),
                 (TabKind::ConnectionPool, _) => {
@@ -242,6 +240,10 @@ impl WorkspaceApp {
             self.render_workspace_window_background(window_background, window, cx);
         let has_window_background = window_background_layer.is_some();
         let native_update_notification = self.render_native_update_notification(cx);
+        let show_connection_cards = !self
+            .connection_flow
+            .read(cx)
+            .has_keyboard_interactive_challenge();
         let overlay_layers = {
             let tokens = self.tokens;
             let i18n = &self.i18n;
@@ -257,6 +259,7 @@ impl WorkspaceApp {
                     i18n,
                     mono_font_family,
                     native_update_notification,
+                    show_connection_cards,
                     cx,
                 )
             })
@@ -271,6 +274,7 @@ impl WorkspaceApp {
             || self.sidebar_resizing
             || self.ai_entity.read(cx).chat_ui().sidebar_resizing;
         let embedded_sftp_resize_cursor_active = self.embedded_sftp_sidebar_resizing;
+        let read_only_selection_workspace = cx.entity();
         self.update_main_window_tabbar_drop_bounds(window, titlebar_visible, zen_mode, cx);
 
         div()
@@ -474,14 +478,6 @@ impl WorkspaceApp {
                     cx.stop_propagation();
                 } else if this
                     .active_tab(cx)
-                    .is_some_and(|tab| tab.kind == TabKind::Launcher)
-                    && this.launcher.read(cx).focused_input().is_some()
-                {
-                    let _ = this.handle_launcher_key(event, cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if this
-                    .active_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::Graphics)
                     && this.graphics.read(cx).focused_input().is_some()
                 {
@@ -549,6 +545,13 @@ impl WorkspaceApp {
                 // Continue scrollbar dragging after the pointer leaves its thin hit target.
                 this.update_host_tools_tab_scrollbar_drag(event, cx);
                 this.update_tabbar_scrollbar_drag(event, window, cx);
+                if this.read_only_selection_drag_active() && !event.dragging() {
+                    // A platform capture loss can omit the matching mouse-up. The
+                    // next buttonless move must release the logical text drag so
+                    // it cannot keep swallowing unrelated workspace input.
+                    this.finish_ime_selection_drag(cx);
+                    this.stop_selectable_text_autoscroll();
+                }
                 this.update_ime_selection_drag(event.position, window, cx);
                 if this.read_only_selection_drag_active() {
                     this.update_selectable_text_autoscroll(event.position, cx);
@@ -591,6 +594,19 @@ impl WorkspaceApp {
                     cx.notify();
                 }
             }))
+            .on_mouse_up_all(move |event, phase, _hitbox, _window, cx| {
+                if phase == gpui::DispatchPhase::Capture && event.button == MouseButton::Left {
+                    read_only_selection_workspace.update(cx, |this, cx| {
+                        if this.read_only_selection_drag_active() {
+                            // This listener deliberately ignores hit testing: a
+                            // release outside the window or behind an occluding
+                            // surface still owns the active text selection drag.
+                            this.finish_ime_selection_drag(cx);
+                            this.stop_selectable_text_autoscroll();
+                        }
+                    });
+                }
+            })
             .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, window, cx| {
                 if event.button == MouseButton::Left
                     && this.browser_pointer_capture_owner(cx).is_some()
@@ -1272,13 +1288,7 @@ impl WorkspaceApp {
         self.stop_selectable_text_autoscroll();
         self.finish_tab_drag(event, window, cx);
         let cancelled_sftp_drag = self.cancel_sftp_drag_capture(cx);
-        let cleared_launcher_press = self
-            .launcher
-            .update(cx, |launcher, cx| launcher.clear_pressed_app(cx));
-        if cleared_launcher_press || cancelled_sftp_drag {
-            // A single mouse-up can clear both transient states; repaint once
-            // after composing those no-longer-visible captures instead of
-            // notifying per flag.
+        if cancelled_sftp_drag {
             cx.notify();
         }
         if capture_owner.is_some() || was_read_only_dragging || cancelled_sftp_drag {

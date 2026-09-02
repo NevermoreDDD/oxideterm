@@ -18,7 +18,6 @@ mod graphics;
 mod graphics_vnc;
 mod ide;
 mod ime;
-mod launcher;
 mod local_shell_launcher;
 mod local_terminal_background;
 mod new_connection;
@@ -54,6 +53,7 @@ mod session_manager;
 mod settings;
 mod sftp;
 mod sidebar;
+mod standalone_connections;
 mod tabs;
 mod terminal_cast;
 mod terminal_command_bar;
@@ -151,8 +151,8 @@ use oxideterm_connection_monitor::{
     visible_tmux_session_rows,
 };
 use oxideterm_connections::{
-    ConnectionStore, ConnectionTerminalOptions, ConnectionTerminalSessionLogPolicy,
-    MoshIpFamily as SavedMoshIpFamily, MoshPredictionMode,
+    ConnectionStore, ConnectionTerminalOptions, ConnectionTerminalProfileKind,
+    ConnectionTerminalSessionLogPolicy, MoshIpFamily as SavedMoshIpFamily, MoshPredictionMode,
     MoshUdpPortSelection as SavedMoshUdpPortSelection, PrivilegeCredentialKind,
     SaveConnectionRequest, SavedPrivilegeCredential, SshConfigSyncService,
 };
@@ -171,20 +171,21 @@ use oxideterm_gpui_terminal::{
     TerminalCommandSelectionLabels, TerminalContextAction, TerminalHighlightMatchScope,
     TerminalHighlightRenderMode, TerminalHighlightRule as UiHighlightRule,
     TerminalHighlightRuleSetOverride, TerminalInputBroadcaster, TerminalInputInterceptor,
-    TerminalInputInterceptorResult, TerminalModemLabels, TerminalNotice, TerminalNoticeVariant,
-    TerminalOutputProcessor, TerminalPane, TerminalPaneEvent, TerminalPasteLabels,
-    TerminalRecordingState, TerminalRecordingStatus, TerminalSearchStatus,
-    TerminalSerialControlLabels, TerminalSessionLogContext, TerminalSessionLogLabels,
-    TerminalSessionLogOptions, TerminalSessionLogState, TerminalSessionLogStatus,
-    TerminalTmuxLabels, TerminalTrzszLabels, TerminalUiPreferenceOverrides, TerminalUiPreferences,
-    TerminalUiTheme, TerminalWorkingDirectorySource, detect_custom_privilege_prompt,
-    prune_terminal_session_logs, resolved_terminal_semantic_scheme,
+    TerminalInputInterceptorResult, TerminalKittyFileTransmissionLabels, TerminalModemLabels,
+    TerminalNotice, TerminalNoticeVariant, TerminalOutputProcessor, TerminalPane,
+    TerminalPaneEvent, TerminalPasteLabels, TerminalRecordingState, TerminalRecordingStatus,
+    TerminalSearchStatus, TerminalSerialControlLabels, TerminalSessionLogContext,
+    TerminalSessionLogLabels, TerminalSessionLogOptions, TerminalSessionLogState,
+    TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
+    TerminalUiPreferenceOverrides, TerminalUiPreferences, TerminalUiTheme,
+    TerminalWorkingDirectorySource, detect_custom_privilege_prompt, prune_terminal_session_logs,
+    resolved_terminal_semantic_scheme,
 };
 use oxideterm_gpui_ui::scroll::ScrollableElement;
 use oxideterm_gpui_ui::{
     ConfirmDialogAction, ConfirmDialogVariant, ConfirmDialogView, checkbox,
     modal::{popover_backdrop, set_tauri_backdrop_blur_allowed},
-    text_input::{TextInputView, text_input, text_input_anchor_probe},
+    text_input::{TextInputView, text_input},
     toast::{ToastVariant, ToastView, toast_action, toast_close},
     toaster::toaster,
     tooltip::tooltip_content,
@@ -210,9 +211,10 @@ use oxideterm_render_policy::{
     DetectedGraphics, EffectiveRenderPolicy, RenderProfile, compute_render_policy,
 };
 use oxideterm_session_adapter::{
-    reconnect_max_attempts_from_settings, reconnect_timing_from_settings,
-    sftp_runtime_settings_from_settings, terminal_backspace_sequence_from_connection,
-    terminal_delete_sequence_from_connection, terminal_encoding_from_connection,
+    managed_key_resolver_from_store, reconnect_max_attempts_from_settings,
+    reconnect_timing_from_settings, sftp_runtime_settings_from_settings,
+    terminal_backspace_sequence_from_connection, terminal_delete_sequence_from_connection,
+    terminal_encoding_from_connection,
     terminal_encoding_from_settings as session_terminal_encoding,
 };
 use oxideterm_settings::{
@@ -235,14 +237,15 @@ use oxideterm_sftp::{
 use oxideterm_ssh::{
     AuthMethod, ConnectionConsumer, ConnectionPoolConfig, ConnectionProgressReporter,
     ConnectionState, ConnectionTraceEvent, ConnectionTraceMode, ConnectionTracePlan,
-    ConnectionTraceStage, ConnectionTraceState, ConnectionTraceStatus, MAX_RETAINED_RECONNECT_JOBS,
-    NodeEventReceiver, NodeEventSubscription, NodeId, NodeOrigin, NodeReadiness, NodeRouter,
-    NodeRuntimeStore, NodeState, NodeStateEvent, NodeTreeExpansion, NodeTreePersistenceSnapshot,
-    NodeTreeSnapshot, NodeTreeSnapshotNode, PhaseResult, ProbeConnectionStatus, ProxyHopConfig,
-    ReconnectForwardRuleSnapshot, ReconnectNodeConnectionSnapshot, ReconnectNodeTerminalSnapshot,
-    ReconnectNodeTransferSnapshot, ReconnectOrchestratorStore, ReconnectPhase, ReconnectProgress,
-    ReconnectSnapshot, SshAlgorithmDiagnosticKind, SshConfig, SshConnectionHandle,
-    SshConnectionRegistry, SshTransportClient, TerminalEndpoint,
+    ConnectionTraceStage, ConnectionTraceState, ConnectionTraceStatus, DedicatedConnectionLease,
+    MAX_RETAINED_RECONNECT_JOBS, ManagedKeyResolver, NodeEventReceiver, NodeEventSubscription,
+    NodeId, NodeOrigin, NodeReadiness, NodeRouter, NodeRuntimeStore, NodeState, NodeStateEvent,
+    NodeTreeExpansion, NodeTreePersistenceSnapshot, NodeTreeSnapshot, NodeTreeSnapshotNode,
+    PhaseResult, ProbeConnectionStatus, ProxyHopConfig, ReconnectForwardRuleSnapshot,
+    ReconnectNodeConnectionSnapshot, ReconnectNodeTerminalSnapshot, ReconnectNodeTransferSnapshot,
+    ReconnectOrchestratorStore, ReconnectPhase, ReconnectProgress, ReconnectSnapshot,
+    SshAlgorithmDiagnosticKind, SshConfig, SshConnectionHandle, SshConnectionRegistry,
+    SshPromptHandler, SshTransportClient, TerminalEndpoint,
 };
 use oxideterm_ssh_launch::{
     NativeConnectionLaunch, TemporaryMoshLaunch, TemporarySshLaunch, TemporaryTelnetLaunch,
@@ -274,7 +277,6 @@ use self::ime::{
     WorkspaceImeElement, WorkspaceImeSelection, WorkspaceImeTarget,
     active_ime_should_defer_input_key, workspace_ime_target_for_plain_host_tools_input,
 };
-use self::launcher::{LauncherWorkspaceEntity, LauncherWorkspaceEvent};
 use self::new_connection::{
     ConnectionFlowEntity, ConnectionFlowEvent, NativeSshPromptHandler, NewConnectionField,
     NewConnectionForm, SavedConnectionPromptAction, SshAuthTab, SshConnectionIntent,
@@ -768,6 +770,8 @@ pub(crate) struct WorkspaceApp {
     serial_terminal_configs: HashMap<TerminalSessionId, SerialSessionConfig>,
     // A Telnet pane keeps only the stable profile owner needed for toolbar persistence.
     telnet_terminal_profile_ids: HashMap<TerminalSessionId, String>,
+    // Non-SSH connection records outlive their current terminal or desktop surface.
+    standalone_connections: standalone_connections::StandaloneConnectionRegistry,
     detached_local_terminals_popover_open: bool,
     command_palette: Entity<command_palette::CommandPaletteEntity>,
     _command_palette_observation: Subscription,
@@ -852,6 +856,7 @@ pub(crate) struct WorkspaceApp {
     settings_legal_notice_scroll: MarkdownVirtualListScrollHandle,
     _window_intents: Entity<WorkspaceWindowIntentEntity>,
     _window_intent_subscription: Subscription,
+    _window_button_layout_subscription: Subscription,
     window_registry: window_registry::WorkspaceWindowRegistry,
     window_effect_delivery_scheduled: bool,
     connection_flow: Entity<ConnectionFlowEntity>,
@@ -883,6 +888,10 @@ pub(crate) struct WorkspaceApp {
     sftp_tab_nodes: HashMap<TabId, NodeId>,
     standalone_sftp_tabs: HashMap<TabId, sftp::StandaloneSftpTabBinding>,
     standalone_sftp_sessions: HashMap<String, sftp::StandaloneSftpRuntime>,
+    dedicated_sftp_connections:
+        Arc<parking_lot::Mutex<HashMap<NodeId, sftp::DedicatedSftpConnectionSlot>>>,
+    ssh_consumer_prompt_handler: Arc<dyn SshPromptHandler>,
+    ssh_consumer_managed_key_resolver: ManagedKeyResolver,
     pending_standalone_sftp_pair_launches:
         HashMap<String, new_connection::PendingStandaloneSftpPairLaunch>,
     embedded_sftp_node_id: Option<NodeId>,
@@ -892,9 +901,6 @@ pub(crate) struct WorkspaceApp {
     sftp_view: Entity<sftp::SftpWorkspaceEntity>,
     _sftp_observation: Subscription,
     _sftp_subscription: Subscription,
-    launcher: Entity<LauncherWorkspaceEntity>,
-    _launcher_observation: Subscription,
-    _launcher_subscription: Subscription,
     graphics: Entity<GraphicsWorkspaceEntity>,
     _graphics_observation: Subscription,
     _graphics_subscription: Subscription,

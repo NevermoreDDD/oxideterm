@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, Corners, DecorationRun, PathBuilder, Pixels, Point, RenderImage, Rgba,
-    SharedString, TextAlign, Window, fill, point, px, rgb, rgba, size,
+    App, Bounds, Corners, DecorationRun, Hsla, PathBuilder, Pixels, Point, RenderImage, Rgba,
+    SharedString, TextAlign, TextRun, Window, fill, point, px, rgb, rgba, size,
 };
 use oxideterm_terminal::{TerminalCursorShape, TerminalImageData};
 use unicode_width::UnicodeWidthChar;
@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::terminal_ui::*;
 use crate::terminal_view::element::{
     BatchedTextRun, TerminalCommandMarkOverlay, TerminalCursor, TerminalImageLayout, TerminalRect,
-    TerminalScrollbar,
+    TerminalRowRect, TerminalRowTextRun, TerminalScrollbar, TerminalTextRunCache,
 };
 use crate::terminal_view::element::{
     PowerlineDirection, PowerlineShape, PowerlineWeight, powerline_separator,
@@ -52,18 +52,44 @@ pub(crate) fn paint_terminal_rect(
     metrics: &TerminalMetrics,
     window: &mut Window,
 ) {
+    paint_terminal_rect_at(
+        rect.row, rect.col, rect.cells, rect.color, origin, metrics, window,
+    );
+}
+
+pub(crate) fn paint_terminal_row_rect(
+    row: usize,
+    rect: &TerminalRowRect,
+    origin: gpui::Point<Pixels>,
+    metrics: &TerminalMetrics,
+    window: &mut Window,
+) {
+    paint_terminal_rect_at(
+        row, rect.col, rect.cells, rect.color, origin, metrics, window,
+    );
+}
+
+fn paint_terminal_rect_at(
+    row: usize,
+    col: usize,
+    cells: usize,
+    color: Hsla,
+    origin: gpui::Point<Pixels>,
+    metrics: &TerminalMetrics,
+    window: &mut Window,
+) {
     let bounds = Bounds::new(
         origin
             + point(
-                px(rect.col as f32 * metrics.cell_width_f32()),
-                px(rect.row as f32 * metrics.line_height_f32()),
+                px(col as f32 * metrics.cell_width_f32()),
+                px(row as f32 * metrics.line_height_f32()),
             ),
         size(
-            px(rect.cells as f32 * metrics.cell_width_f32()),
+            px(cells as f32 * metrics.cell_width_f32()),
             metrics.line_height,
         ),
     );
-    window.paint_quad(fill(bounds, rect.color));
+    window.paint_quad(fill(bounds, color));
 }
 
 pub(crate) fn paint_terminal_underline(
@@ -377,7 +403,52 @@ pub(crate) fn paint_text_run(
     window: &mut Window,
     cx: &mut App,
 ) {
-    if paint_powerline_separators(run, origin, metrics, window) {
+    paint_text_run_with_layer(run, origin, metrics, true, window, cx);
+}
+
+struct TerminalPaintRun<'a> {
+    row: usize,
+    col: usize,
+    text: &'a SharedString,
+    cells: usize,
+    style: &'a TextRun,
+    cache: Option<&'a TerminalTextRunCache>,
+}
+
+fn paint_text_run_with_layer(
+    run: &BatchedTextRun,
+    origin: gpui::Point<Pixels>,
+    metrics: &TerminalMetrics,
+    establish_layer: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    paint_text_run_parts(
+        TerminalPaintRun {
+            row: run.row,
+            col: run.col,
+            text: &run.text,
+            cells: run.cells,
+            style: &run.style,
+            cache: run.cache.as_deref(),
+        },
+        origin,
+        metrics,
+        establish_layer,
+        window,
+        cx,
+    );
+}
+
+fn paint_text_run_parts(
+    run: TerminalPaintRun<'_>,
+    origin: gpui::Point<Pixels>,
+    metrics: &TerminalMetrics,
+    establish_layer: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if paint_powerline_separators(&run, origin, metrics, window) {
         return;
     }
 
@@ -386,14 +457,14 @@ pub(crate) fn paint_text_run(
             px(run.col as f32 * metrics.cell_width_f32()),
             px(run.row as f32 * metrics.line_height_f32()),
         );
-    if let Some(cache) = &run.cache {
+    if let Some(cache) = run.cache {
         // Stable terminal rows retain only glyph layout; one explicit decoration avoids the
         // large inline decoration capacity carried by `ShapedLine` for every cached run.
         let layout = cache.layout.get_or_init(|| {
             window.text_system().layout_line(
-                &run.text,
+                run.text,
                 metrics.font_size,
-                std::slice::from_ref(&run.style),
+                std::slice::from_ref(run.style),
                 Some(metrics.cell_width),
             )
         });
@@ -404,21 +475,33 @@ pub(crate) fn paint_text_run(
             underline: run.style.underline,
             strikethrough: run.style.strikethrough,
         };
-        let _ = layout.paint_cached(
-            position,
-            metrics.line_height,
-            std::slice::from_ref(&decoration),
-            &cache.paint,
-            window,
-            cx,
-        );
+        let decorations = std::slice::from_ref(&decoration);
+        let _ = if establish_layer {
+            layout.paint_cached(
+                position,
+                metrics.line_height,
+                decorations,
+                &cache.paint,
+                window,
+                cx,
+            )
+        } else {
+            layout.paint_cached_in_current_layer(
+                position,
+                metrics.line_height,
+                decorations,
+                &cache.paint,
+                window,
+                cx,
+            )
+        };
         return;
     }
 
     let shaped = window.text_system().shape_line(
         run.text.clone(),
         metrics.font_size,
-        std::slice::from_ref(&run.style),
+        std::slice::from_ref(run.style),
         Some(metrics.cell_width),
     );
     let _ = shaped.paint(
@@ -429,6 +512,73 @@ pub(crate) fn paint_text_run(
         window,
         cx,
     );
+}
+
+pub(crate) fn paint_text_runs_by_row(
+    runs: &[BatchedTextRun],
+    origin: gpui::Point<Pixels>,
+    terminal_cols: usize,
+    metrics: &TerminalMetrics,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for row_runs in runs.chunk_by(|left, right| left.row == right.row) {
+        let row = row_runs[0].row;
+        let row_bounds = Bounds::new(
+            origin + point(px(0.0), px(row as f32 * metrics.line_height_f32())),
+            size(
+                px(terminal_cols as f32 * metrics.cell_width_f32()),
+                metrics.line_height,
+            ),
+        );
+        // The complete row bounds include glyph overhang that can extend beyond a run's cells.
+        // One row-scoped layer still avoids a layer pair for every adjacent style run.
+        window.paint_layer(row_bounds, |window| {
+            for run in row_runs {
+                paint_text_run_with_layer(run, origin, metrics, false, window, cx);
+            }
+        });
+    }
+}
+
+pub(crate) fn paint_cached_text_runs_for_row(
+    row: usize,
+    runs: &[TerminalRowTextRun],
+    origin: gpui::Point<Pixels>,
+    terminal_cols: usize,
+    metrics: &TerminalMetrics,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if runs.is_empty() {
+        return;
+    }
+    let row_bounds = Bounds::new(
+        origin + point(px(0.0), px(row as f32 * metrics.line_height_f32())),
+        size(
+            px(terminal_cols as f32 * metrics.cell_width_f32()),
+            metrics.line_height,
+        ),
+    );
+    window.paint_layer(row_bounds, |window| {
+        for run in runs {
+            paint_text_run_parts(
+                TerminalPaintRun {
+                    row,
+                    col: run.col,
+                    text: &run.text,
+                    cells: run.cells,
+                    style: &run.style,
+                    cache: Some(&run.cache),
+                },
+                origin,
+                metrics,
+                false,
+                window,
+                cx,
+            );
+        }
+    });
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -527,7 +677,7 @@ pub(crate) fn ghost_text_grid_segments(text: &str) -> Vec<TerminalGhostTextSegme
 }
 
 fn paint_powerline_separators(
-    run: &BatchedTextRun,
+    run: &TerminalPaintRun<'_>,
     origin: gpui::Point<Pixels>,
     metrics: &TerminalMetrics,
     window: &mut Window,

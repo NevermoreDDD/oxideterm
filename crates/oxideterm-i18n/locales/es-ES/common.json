@@ -3,6 +3,12 @@
     "name": "OxideTerm",
     "shellLauncher": "Lanzador de shell"
   },
+  "window_controls": {
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
+    "close": "Cerrar"
+  },
   "language": {
     "english": "English",
     "simplified_chinese": "简体中文",
@@ -139,7 +145,8 @@
       "cancel": "Cancelar",
       "confirm": "Confirmar",
       "do_not_ask_again": "No volver a preguntar",
-      "delete": "Eliminar"
+      "delete": "Eliminar",
+      "retry": "Reintentar"
     },
     "cancel": "Cancelar",
     "delete": "Eliminar",
@@ -978,8 +985,6 @@
     "security_desc": "Almacenamiento en llavero, cifrado ChaCha20-Poly1305, SSH en Rust puro.",
     "local_file_manager": "Gestor de archivos local",
     "local_file_manager_desc": "Explorador de archivos con vista previa rápida, marcadores y arrastrar y soltar.",
-    "launchpad": "Launchpad de macOS",
-    "launchpad_desc": "Lanzador de apps nativo — busca y abre apps desde /Applications al instante.",
     "wsl_graphics": "Gráficos WSL",
     "wsl_graphics_desc": "Ejecuta apps gráficas de Linux en Windows con VNC integrado — modo escritorio o app individual.",
     "plugin_system": "Sistema de plugins",
@@ -1196,7 +1201,6 @@
     "vnc_preview_title": "Vista previa VNC",
     "provider_missing": "El proveedor de escritorio remoto no está disponible.",
     "session_missing": "La sesión de escritorio remoto no está disponible.",
-    "force_recover": "Recuperar",
     "reconnect": "Reconectar",
     "resize_fixed": "Tamaño fijo del servidor",
     "resize_unknown": "Redimensionamiento no detectado",

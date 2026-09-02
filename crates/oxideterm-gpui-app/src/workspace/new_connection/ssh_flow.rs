@@ -12,7 +12,7 @@ use oxideterm_connections::{
     SaveStandaloneSftpProfileRequest, SaveTelnetProfileRequest, SavedConnectionRuntimeSecrets,
     SavedMoshProfileRuntimeSecrets, SavedProxyCommand, SavedUpstreamProxyAuth,
     SavedUpstreamProxyConfig, SavedUpstreamProxyPolicy, SavedUpstreamProxyProtocol, SecretString,
-    first_available_default_key_path,
+    SshChannelStrategy, first_available_default_key_path,
 };
 use oxideterm_mosh::{MoshBootstrapConfig, MoshBootstrapContext};
 use oxideterm_remote_desktop::{
@@ -118,6 +118,7 @@ struct SavedConnectionRuntimeHandoff {
 pub(in crate::workspace) struct SshTerminalConnectionOptions {
     pub(in crate::workspace) terminal: ConnectionTerminalOptions,
     pub(in crate::workspace) dedicated_new_terminal_connection: bool,
+    pub(in crate::workspace) ssh_channel_strategy: SshChannelStrategy,
 }
 
 impl SshTerminalConnectionOptions {
@@ -126,6 +127,7 @@ impl SshTerminalConnectionOptions {
         Self {
             terminal: form.terminal.clone(),
             dedicated_new_terminal_connection: form.dedicated_new_terminal_connection,
+            ssh_channel_strategy: form.ssh_channel_strategy,
         }
     }
 }
@@ -135,6 +137,7 @@ impl Default for SshTerminalConnectionOptions {
         Self {
             terminal: ConnectionTerminalOptions::default(),
             dedicated_new_terminal_connection: false,
+            ssh_channel_strategy: SshChannelStrategy::default(),
         }
     }
 }
@@ -199,6 +202,8 @@ pub(in crate::workspace) struct MoshConnectionOptions {
     pub(in crate::workspace) terminal: ConnectionTerminalOptions,
     // Correlates an asynchronous verified Mosh launch without exposing a GPUI identity.
     pub(in crate::workspace) public_mcp_open_token: Option<String>,
+    // Reconnect binds the new terminal surface to an existing logical connection record.
+    pub(in crate::workspace) runtime_connection_attempt_id: Option<String>,
 }
 
 pub(in crate::workspace) enum SshConnectionWorkerResult {

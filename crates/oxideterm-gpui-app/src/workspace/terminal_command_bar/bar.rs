@@ -47,6 +47,9 @@ impl WorkspaceApp {
         let is_local_terminal = self
             .active_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::LocalTerminal);
+        let split_controls_visible = self
+            .active_tab(cx)
+            .is_some_and(|tab| matches!(tab.kind, TabKind::LocalTerminal | TabKind::SshTerminal));
         let can_configure_remote_integration = self.active_ssh_terminal_node_id(cx).is_some();
         let remote_integration_pending = self.remote_shell_integration_pending(cx);
         let remote_integration_tooltip_id = "terminal-command-configure-directory-tracking";
@@ -55,14 +58,7 @@ impl WorkspaceApp {
             .t("settings_view.connections.shell_integration.toolbar_action");
         let target_indicator_is_local =
             is_local_terminal && target_label == self.i18n.t("terminal.command_bar.local_shell");
-        let can_split = self.active_tab(cx).is_some_and(|tab| {
-            tab.kind == TabKind::LocalTerminal
-                && !self.active_tab_has_serial_terminal(cx)
-                && tab
-                    .root_pane
-                    .as_ref()
-                    .is_some_and(|root| root.pane_count() < MAX_PANES_PER_TAB)
-        });
+        let can_split = self.can_split_active_pane(cx);
         let broadcast_targets =
             self.terminal_broadcast_target_panes(active_pane_id.unwrap_or(PaneId(0)), cx);
         let (broadcast_enabled, broadcast_targets_empty) = {
@@ -256,7 +252,9 @@ impl WorkspaceApp {
                                     )
                                 },
                             )
-                            .when(is_local_terminal, |actions| {
+                            .when(split_controls_visible, |actions| {
+                                // Transport readiness controls the disabled state; keeping SSH
+                                // actions visible makes their placement match local terminals.
                                 actions
                                     .child(self.terminal_command_action_button(
                                         LucideIcon::SplitSquareHorizontal,
@@ -734,6 +732,7 @@ impl WorkspaceApp {
     fn render_terminal_recording_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let session_log_status = self.active_terminal_session_log_status(cx);
         let session_log_available = self.active_terminal_session_log_available(cx);
+        let session_log_automatic = self.active_terminal_session_log_automatic_default(cx);
         let menu = context_menu_event_boundary(
             dropdown_menu_content(&self.tokens)
                 .absolute()
@@ -781,6 +780,27 @@ impl WorkspaceApp {
                 },
                 |this, _event, window, cx| {
                     this.open_terminal_cast_file(window, cx);
+                },
+                cx,
+            ))
+            .child(dropdown_menu_separator(&self.tokens));
+
+        let automatic_item = dropdown_menu_item(
+            &self.tokens,
+            self.i18n.t("terminal.session_log.automatic_for_connection"),
+            DropdownMenuItemKind::Checkbox(session_log_automatic.unwrap_or(false)),
+            false,
+            session_log_automatic.is_none(),
+        );
+        let menu = menu
+            .child(self.workspace_context_menu_styled_action(
+                automatic_item,
+                session_log_automatic.is_none(),
+                false,
+                ContextMenuActionableStyle::default(),
+                |this| this.terminal_recording_menu_open = false,
+                |this, _event, _window, cx| {
+                    this.toggle_active_terminal_session_log_automatic_default(cx)
                 },
                 cx,
             ))
@@ -1136,7 +1156,6 @@ impl WorkspaceApp {
 
         if let Some((edit_kind, value)) = group_editor {
             let target = WorkspaceImeTarget::TerminalBroadcastGroupName;
-            let workspace = cx.entity();
             let valid = self.terminal_broadcast_group_name_valid(edit_kind, &value);
             menu = menu.child(
                 div()
@@ -1146,38 +1165,29 @@ impl WorkspaceApp {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(text_input_anchor_probe(
-                        target.anchor_id(),
-                        text_input(
-                            &self.tokens,
-                            TextInputView {
-                                value: &value,
-                                placeholder: self
-                                    .i18n
-                                    .t("terminal.broadcast.group_name_placeholder"),
-                                focused: true,
-                                caret_visible: self.input_caret.visible(),
-                                secret: false,
-                                selected_all: false,
-                                selected_range: self.ime_selected_range_for_target(target, cx),
-                                marked_text: self.marked_text_for_target(target, cx),
-                            },
-                        )
-                        .h(px(28.0))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event, window, cx| {
-                                window.focus(&this.focus_handle, cx);
-                                this.begin_ime_selection_from_mouse_down(target, event, window, cx);
-                                cx.stop_propagation();
-                            }),
+                    .child(
+                        self.text_input_with_workspace_ime(
+                            target,
+                            text_input(
+                                &self.tokens,
+                                TextInputView {
+                                    value: &value,
+                                    placeholder: self
+                                        .i18n
+                                        .t("terminal.broadcast.group_name_placeholder"),
+                                    focused: true,
+                                    caret_visible: self.input_caret.visible(),
+                                    secret: false,
+                                    selected_all: false,
+                                    selected_range: self.ime_selected_range_for_target(target, cx),
+                                    marked_text: self.marked_text_for_target(target, cx),
+                                },
+                            )
+                            .h(px(28.0)),
+                            |_this, _cx| {},
+                            cx,
                         ),
-                        move |anchor, _window, cx| {
-                            let _ = workspace.update(cx, |this, cx| {
-                                this.update_text_input_anchor(anchor, cx);
-                            });
-                        },
-                    ))
+                    )
                     .child(
                         div()
                             .size(px(24.0))

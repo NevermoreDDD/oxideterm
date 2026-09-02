@@ -47,6 +47,16 @@
       "cancel": "取消",
       "paste": "貼上"
     },
+    "kitty_file_transmission": {
+      "title": "允許此工作階段使用 Kitty 本機檔案存取？",
+      "description": "此要求已被封鎖。允許後，OxideTerm 會建立工作階段私有目錄並複製其路徑。請將帶有 tty-graphics-protocol 標記的檔案直接放入該目錄後重試傳輸。",
+      "cancel": "拒絕",
+      "allow": "僅此工作階段允許",
+      "allowed_title": "此工作階段已允許 Kitty 檔案存取",
+      "allowed_description": "私有傳輸目錄已複製到剪貼簿。終端工作階段關閉後，此權限會自動失效。",
+      "failed_title": "無法啟用 Kitty 檔案存取",
+      "failed_description": "OxideTerm 無法建立私有傳輸目錄。"
+    },
     "command_selection": {
       "actions": "命令選取操作",
       "copy": "複製",
@@ -81,7 +91,6 @@
       "port_missing": "連接埠遺失",
       "port_unknown": "連接埠未知",
       "refresh": "重新整理",
-      "reconnect": "重新連線",
       "send_break": "Break",
       "dtr": "DTR",
       "rts": "RTS",
@@ -92,7 +101,8 @@
       "flow_hardware": "RTS/CTS",
       "send_mode": "傳送",
       "display_mode": "顯示",
-      "line_ending": "換行",
+      "line_ending": "傳送換行",
+      "output_line_ending": "接收換行",
       "local_echo": "回顯",
       "text_mode": "文字",
       "hex_mode": "十六進位",
@@ -100,8 +110,7 @@
       "line_ending_lf": "LF",
       "line_ending_crlf": "CRLF",
       "line_ending_cr": "CR",
-      "line_ending_none": "原樣",
-      "reconnect_failed": "串口重新連線失敗"
+      "line_ending_none": "原樣"
     },
     "recording": {
       "started": "終端錄製已開始",
@@ -127,6 +136,8 @@
     },
     "session_log": {
       "title": "工作階段日誌",
+      "automatic_for_connection": "自動儲存此連線的工作階段日誌",
+      "profile_preferences_save_failed": "無法儲存此連線的終端機預設設定",
       "started": "工作階段日誌已開始",
       "start_failed": "無法開始工作階段日誌",
       "write_failed": "無法寫入檔案，工作階段日誌已停止",
@@ -244,6 +255,7 @@
       "add_group": "新增组",
       "edit_group": "编辑组",
       "delete_group": "删除组",
+      "delete_group_description": "刪除前，「{{name}}」中的快速命令會移至預設群組。",
       "save_group": "保存组",
       "group_name_placeholder": "组名称",
       "icon_terminal": "终端",

@@ -1,12 +1,10 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::{fmt, path::Path, process::Stdio, time::Duration};
+
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 
 use tempfile::TempDir;
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
@@ -44,6 +42,25 @@ impl fmt::Debug for X11PreparedForwarding {
 
 /// Resolves device-local X11 authority for one terminal without persisting cookies.
 pub async fn prepare_x11_forwarding(policy: X11ForwardPolicy) -> X11Result<X11PreparedForwarding> {
+    #[cfg(windows)]
+    {
+        match crate::managed::prepare_managed_windows_x11_forwarding(policy).await {
+            Ok(prepared) => return Ok(prepared),
+            Err(managed_error) => {
+                return prepare_environment_x11_forwarding(policy)
+                    .await
+                    .or(Err(managed_error));
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    prepare_environment_x11_forwarding(policy).await
+}
+
+async fn prepare_environment_x11_forwarding(
+    policy: X11ForwardPolicy,
+) -> X11Result<X11PreparedForwarding> {
     let display_value = resolve_process_display().await?;
     let environment =
         X11AuthorityEnvironment::from_values(Some(display_value), std::env::var("XAUTHORITY").ok());
@@ -130,7 +147,7 @@ fn secure_xauth_temp_dir() -> X11Result<TempDir> {
         .map_err(|error| X11ForwardingError::AuthorityFileUnavailable(error.to_string()))
 }
 
-fn xauth_expiry_seconds(timeout_millis: Option<u64>) -> Option<u64> {
+pub(crate) fn xauth_expiry_seconds(timeout_millis: Option<u64>) -> Option<u64> {
     timeout_millis.map(|millis| {
         // Keep the local authorization alive slightly longer than route admission,
         // and clamp to the X SECURITY extension's 32-bit timeout field.
@@ -142,7 +159,7 @@ fn xauth_expiry_seconds(timeout_millis: Option<u64>) -> Option<u64> {
     })
 }
 
-fn untrusted_generate_args(
+pub(crate) fn untrusted_generate_args(
     authority_path: &Path,
     display: &crate::X11Display,
     timeout_seconds: Option<u64>,
@@ -193,12 +210,26 @@ fn xauth_program() -> String {
     "xauth".to_string()
 }
 
-async fn run_xauth(mut command: X11AuthCommand) -> X11Result<Zeroizing<Vec<u8>>> {
+async fn run_xauth(command: X11AuthCommand) -> X11Result<Zeroizing<Vec<u8>>> {
+    run_xauth_with_context(command, None, None).await
+}
+
+pub(crate) async fn run_xauth_with_context(
+    mut command: X11AuthCommand,
+    current_dir: Option<&Path>,
+    authority_path: Option<&Path>,
+) -> X11Result<Zeroizing<Vec<u8>>> {
     if command.program == "xauth" {
         command.program = xauth_program();
     }
     let mut process = Command::new(&command.program);
     process.args(&command.args);
+    if let Some(current_dir) = current_dir {
+        process.current_dir(current_dir);
+    }
+    if let Some(authority_path) = authority_path {
+        process.env("XAUTHORITY", authority_path);
+    }
     run_bounded_command(process).await
 }
 

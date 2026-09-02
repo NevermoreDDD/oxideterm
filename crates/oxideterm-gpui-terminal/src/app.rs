@@ -21,11 +21,11 @@ use gpui::{
 };
 use oxideterm_ssh::SshConnectionHandle;
 use oxideterm_terminal::{
-    GraphicsOptions, LocalPtyConfig, SerialControlLine, SerialControlState, SerialDisplayMode,
-    SerialLineEnding, SerialRuntimeOptions, SerialSendMode, SerialSessionConfig,
-    ShellIntegrationLifecycleState, ShellIntegrationStatus, SshSessionConfig, TelnetSessionConfig,
-    TermMode, TerminalCommandMark, TerminalCommandMarkClosedBy, TerminalCommandMarkConfidence,
-    TerminalCommandMarkDetectionSource, TerminalCommandMarkEvent,
+    GraphicsOptions, KittyFileTransmissionControl, LocalPtyConfig, SerialControlLine,
+    SerialControlState, SerialDisplayMode, SerialLineEnding, SerialRuntimeOptions, SerialSendMode,
+    SerialSessionConfig, ShellIntegrationLifecycleState, ShellIntegrationStatus, SshSessionConfig,
+    TelnetSessionConfig, TermMode, TerminalCommandMark, TerminalCommandMarkClosedBy,
+    TerminalCommandMarkConfidence, TerminalCommandMarkDetectionSource, TerminalCommandMarkEvent,
     TerminalCwdIntegrationLaunchState, TerminalDrainBudget, TerminalDrainReport,
     TerminalEditorApplication, TerminalEditorClipboardOperation, TerminalEditorIntegrationEvent,
     TerminalEvent, TerminalLifecycle, TerminalOutputProcessor, TerminalProcessInfo,
@@ -115,7 +115,9 @@ const TERMINAL_AUTOSUGGEST_MAX_CANDIDATES: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalPaneEvent {
-    Exited { exit_code: Option<i32> },
+    Exited {
+        exit_code: Option<i32>,
+    },
     // Output contents stay pane-owned; consumers only learn that the visible buffer changed.
     OutputActivity,
     // CWD payloads stay pane-owned; Workspace only recomputes the active metadata key.
@@ -134,6 +136,11 @@ pub enum TerminalPaneEvent {
     TriggerMatchesAvailable,
     // Search completion is asynchronous; Workspace reads the latest pane-owned status.
     SearchStatusChanged,
+    // Persistence stays workspace-owned because panes do not own saved connection profiles.
+    SerialLineEndingsChanged {
+        input: Option<SerialLineEnding>,
+        output: Option<SerialLineEnding>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,12 +265,12 @@ pub struct TerminalSerialStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalSerialAction {
     RefreshPortPresence,
-    Reconnect,
     SendBreak,
     SetDataTerminalReady(bool),
     SetRequestToSend(bool),
     SetLocalEcho(bool),
     SetLineEnding(SerialLineEnding),
+    SetOutputLineEnding(SerialLineEnding),
     SetDisplayMode(SerialDisplayMode),
     SetSendMode(SerialSendMode),
 }
@@ -272,7 +279,6 @@ pub enum TerminalSerialAction {
 /// Actions that must execute through the entity owning the live Telnet session.
 pub enum TerminalTelnetAction {
     SendControl(oxideterm_terminal::TelnetControlCommand),
-    Disconnect,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -386,9 +392,9 @@ fn terminal_latency_percentiles(samples: &VecDeque<u64>) -> (u64, u64, u64) {
 
 pub struct TerminalPane {
     terminal: Arc<Mutex<TerminalSession>>,
-    // The backend kind is immutable for a pane, including serial reconnects.
+    // The backend kind is immutable for the pane's full lifetime.
     session_kind: TerminalSessionKind,
-    serial_reconnect_config: Option<SerialSessionConfig>,
+    serial_session_config: Option<SerialSessionConfig>,
     serial_port_available: Option<bool>,
     focus_handle: FocusHandle,
     preference_overrides: TerminalUiPreferenceOverrides,
@@ -418,6 +424,9 @@ pub struct TerminalPane {
     selection: Option<TerminalSelection>,
     pending_paste: Option<String>,
     pending_paste_prefix: Option<Vec<u8>>,
+    // The pane observes only its session's capability and never stores the sandbox path.
+    kitty_file_transmission: Option<KittyFileTransmissionControl>,
+    kitty_file_transmission_confirm_open: bool,
     // Control-mode prompts stay pane-owned so text never reaches the hosted shell.
     tmux_prompt: Option<TmuxPromptState>,
     dismissed_tmux_message_generation: u64,
@@ -493,6 +502,12 @@ pub struct TerminalPane {
     process_info_refresh_in_flight: bool,
     last_process_info_refresh_requested: Instant,
     render_stats: TerminalRenderStats,
+    #[cfg(feature = "bench")]
+    benchmark_performance_metrics_enabled: bool,
+    #[cfg(feature = "bench")]
+    benchmark_backend_snapshot_micros: u64,
+    #[cfg(feature = "bench")]
+    benchmark_snapshot_state_micros: u64,
     render_stats_window_start: Instant,
     render_stats_window_writes: usize,
     drain_duration_samples_micros: VecDeque<u64>,
@@ -844,10 +859,10 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        let reconnect_config = config.clone();
+        let session_config = config.clone();
         let terminal = Self::open_serial_session_with_preferences(config, &preferences)?;
         let mut pane = Self::from_session(terminal, preferences, window, cx)?;
-        pane.serial_reconnect_config = Some(reconnect_config);
+        pane.serial_session_config = Some(session_config);
         Ok(pane)
     }
 
@@ -911,6 +926,7 @@ impl TerminalPane {
                 terminal.cwd_integration_launch_state(),
             )
         };
+        let kitty_file_transmission = terminal.lock().kitty_file_transmission_control();
         let mut next_snapshot_line_id = 1;
         assign_initial_snapshot_line_ids(&mut snapshot, &mut next_snapshot_line_id);
         let cwd_shell_integration_status = initial_cwd_shell_integration_status(
@@ -1032,7 +1048,7 @@ impl TerminalPane {
         let mut pane = Self {
             terminal,
             session_kind,
-            serial_reconnect_config: None,
+            serial_session_config: None,
             serial_port_available: None,
             focus_handle,
             preference_overrides: TerminalUiPreferenceOverrides::default(),
@@ -1046,7 +1062,7 @@ impl TerminalPane {
             snapshot_dirty: false,
             snapshot_generation: 1,
             next_snapshot_line_id,
-            terminal_timestamps_enabled: false,
+            terminal_timestamps_enabled: preferences.terminal_timestamps_enabled,
             row_timestamps: Arc::new(HashMap::new()),
             row_timestamp_retained_min_line: None,
             metrics,
@@ -1054,6 +1070,8 @@ impl TerminalPane {
             selection: None,
             pending_paste: None,
             pending_paste_prefix: None,
+            kitty_file_transmission,
+            kitty_file_transmission_confirm_open: false,
             tmux_prompt: None,
             dismissed_tmux_message_generation: 0,
             context_menu: None,
@@ -1134,6 +1152,12 @@ impl TerminalPane {
                 .checked_sub(ACTIVE_PROCESS_INFO_REFRESH_INTERVAL)
                 .unwrap_or_else(Instant::now),
             render_stats: TerminalRenderStats::default(),
+            #[cfg(feature = "bench")]
+            benchmark_performance_metrics_enabled: false,
+            #[cfg(feature = "bench")]
+            benchmark_backend_snapshot_micros: 0,
+            #[cfg(feature = "bench")]
+            benchmark_snapshot_state_micros: 0,
             render_stats_window_start: Instant::now(),
             render_stats_window_writes: 0,
             drain_duration_samples_micros: VecDeque::with_capacity(
@@ -1180,6 +1204,7 @@ impl TerminalPane {
     }
 
     fn stamp_snapshot(&mut self, mut snapshot: TerminalSnapshot) -> TerminalSnapshot {
+        let backend_reused_rows = snapshot.lines.iter().any(|row| row.line_id != 0);
         reconcile_snapshot_line_ids(
             &mut snapshot,
             &self.snapshot,
@@ -1187,7 +1212,11 @@ impl TerminalPane {
         );
         // Raw backend snapshots are stateless; the pane owns frame generation
         // so future render caches can invalidate without changing backends.
-        snapshot.reuse_unchanged_rows_from(&self.snapshot);
+        if !backend_reused_rows {
+            // Incremental backends already carry shared cell buffers and line identities. Full
+            // snapshots still receive the equality fallback used by reset and resize paths.
+            snapshot.reuse_unchanged_rows_from(&self.snapshot);
+        }
         self.record_snapshot_row_timestamps(&snapshot);
         self.snapshot_generation = self.snapshot_generation.wrapping_add(1);
         if self.snapshot_generation == 0 {
@@ -1412,16 +1441,12 @@ impl TerminalPane {
     }
 
     fn terminal_autosuggest_candidates(&self) -> Vec<TerminalAutosuggestCandidate> {
-        let mode = self.terminal.lock().mode();
-        let state = self.input_tracker.state();
         let cursor_row_is_active_input = self
             .snapshot
             .lines
             .get(self.snapshot.cursor_row)
             .is_some_and(|row| row.active_input);
         if !self.autosuggest_prompt_active
-            || !self.terminal_accepts_input()
-            || mode.contains(TermMode::ALT_SCREEN)
             || self.marked_text.is_some()
             || self.tmux_prompt.is_some()
             || self.pending_paste.is_some()
@@ -1429,8 +1454,22 @@ impl TerminalPane {
             || self.privilege_prompt_inline_hint.is_some()
             || !cursor_row_is_active_input
             || self.snapshot.display_offset != 0
-            || self.autosuggest_dismissed_query.as_deref() == Some(state.value.as_str())
         {
+            return Vec::new();
+        }
+        // Most terminal frames have no active suggestion prompt. Defer both the terminal lock and
+        // input-state clone until the pane-local eligibility checks have passed.
+        let (mode, terminal_interactive) = {
+            let terminal = self.terminal.lock();
+            (terminal.mode(), terminal.is_interactive())
+        };
+        if mode.contains(TermMode::ALT_SCREEN)
+            || !self.terminal_accepts_input_with_interactive_state(terminal_interactive)
+        {
+            return Vec::new();
+        }
+        let state = self.input_tracker.state();
+        if self.autosuggest_dismissed_query.as_deref() == Some(state.value.as_str()) {
             return Vec::new();
         }
         self.command_history
@@ -1591,6 +1630,7 @@ impl TerminalPane {
             || self.preferences.cjk_font_family != preferences.cjk_font_family
             || self.preferences.font_ligatures != preferences.font_ligatures
             || self.preferences.font_size.to_bits() != preferences.font_size.to_bits()
+            || self.preferences.font_weight.to_bits() != preferences.font_weight.to_bits()
             || self.preferences.line_height.to_bits() != preferences.line_height.to_bits();
         let next_settings = TerminalUiSettings::from_preferences(&preferences);
         if !next_settings.command_marks_enabled {
@@ -1638,10 +1678,10 @@ impl TerminalPane {
         self
     }
 
-    pub fn with_serial_reconnect_config(mut self, config: SerialSessionConfig) -> Self {
+    pub fn with_serial_session_config(mut self, config: SerialSessionConfig) -> Self {
         // A pane built from a pre-opened session still owns the configuration
-        // required by explicit reconnect and serial status controls.
-        self.serial_reconnect_config = Some(config);
+        // required by serial status and device-presence controls.
+        self.serial_session_config = Some(config);
         self
     }
 
@@ -1736,11 +1776,11 @@ impl TerminalPane {
     }
 
     pub fn is_serial_transport(&self) -> bool {
-        self.serial_reconnect_config.is_some()
+        self.serial_session_config.is_some()
     }
 
     pub fn serial_status(&self) -> Option<TerminalSerialStatus> {
-        let config = self.serial_reconnect_config.clone()?;
+        let config = self.serial_session_config.clone()?;
         let terminal = self.terminal.lock();
         Some(TerminalSerialStatus {
             config,
@@ -1748,7 +1788,8 @@ impl TerminalPane {
             control_state: terminal.serial_control_state().unwrap_or_default(),
             runtime_options: terminal.serial_runtime_options().unwrap_or_default(),
             port_available: self.serial_port_available,
-            can_reconnect: self.can_reconnect_serial(),
+            // Reconnect is workspace-owned because it must allocate a fresh tab and pane.
+            can_reconnect: false,
         })
     }
 
@@ -1763,15 +1804,6 @@ impl TerminalPane {
         match action {
             TerminalSerialAction::RefreshPortPresence => {
                 self.refresh_serial_port_presence(cx);
-            }
-            TerminalSerialAction::Reconnect => {
-                if !self.can_reconnect_serial() {
-                    return Err("The serial session is not ready to reconnect.".to_string());
-                }
-                self.reconnect_serial(cx);
-                if !self.lifecycle().is_running() {
-                    return Err("The serial session could not be reconnected.".to_string());
-                }
             }
             TerminalSerialAction::SendBreak => {
                 self.terminal
@@ -1801,11 +1833,7 @@ impl TerminalPane {
                     .serial_runtime_options()
                     .ok_or_else(|| "Serial runtime options are unavailable.".to_string())?;
                 options.local_echo = enabled;
-                self.terminal
-                    .lock()
-                    .set_serial_runtime_options(options)
-                    .map_err(|error| error.to_string())?;
-                cx.notify();
+                self.update_serial_runtime_options(options, cx)?;
             }
             TerminalSerialAction::SetLineEnding(line_ending) => {
                 let mut options = self
@@ -1814,11 +1842,16 @@ impl TerminalPane {
                     .serial_runtime_options()
                     .ok_or_else(|| "Serial runtime options are unavailable.".to_string())?;
                 options.line_ending = line_ending;
-                self.terminal
+                self.update_serial_runtime_options(options, cx)?;
+            }
+            TerminalSerialAction::SetOutputLineEnding(line_ending) => {
+                let mut options = self
+                    .terminal
                     .lock()
-                    .set_serial_runtime_options(options)
-                    .map_err(|error| error.to_string())?;
-                cx.notify();
+                    .serial_runtime_options()
+                    .ok_or_else(|| "Serial runtime options are unavailable.".to_string())?;
+                options.output_line_ending = line_ending;
+                self.update_serial_runtime_options(options, cx)?;
             }
             TerminalSerialAction::SetDisplayMode(display_mode) => {
                 let mut options = self
@@ -1827,11 +1860,7 @@ impl TerminalPane {
                     .serial_runtime_options()
                     .ok_or_else(|| "Serial runtime options are unavailable.".to_string())?;
                 options.display_mode = display_mode;
-                self.terminal
-                    .lock()
-                    .set_serial_runtime_options(options)
-                    .map_err(|error| error.to_string())?;
-                cx.notify();
+                self.update_serial_runtime_options(options, cx)?;
             }
             TerminalSerialAction::SetSendMode(send_mode) => {
                 let mut options = self
@@ -1840,11 +1869,7 @@ impl TerminalPane {
                     .serial_runtime_options()
                     .ok_or_else(|| "Serial runtime options are unavailable.".to_string())?;
                 options.send_mode = send_mode;
-                self.terminal
-                    .lock()
-                    .set_serial_runtime_options(options)
-                    .map_err(|error| error.to_string())?;
-                cx.notify();
+                self.update_serial_runtime_options(options, cx)?;
             }
         }
         Ok(())
@@ -1866,105 +1891,13 @@ impl TerminalPane {
                     .send_telnet_control(command)
                     .map_err(|error| error.to_string())?;
             }
-            TerminalTelnetAction::Disconnect => self.shutdown(),
         }
         cx.notify();
         Ok(())
     }
 
-    fn can_reconnect_serial(&self) -> bool {
-        self.serial_reconnect_config.is_some() && self.terminal_exited
-    }
-
-    fn reconnect_serial(&mut self, cx: &mut Context<Self>) {
-        if !self.can_reconnect_serial() {
-            return;
-        }
-        let Some(config) = self.serial_reconnect_config.clone() else {
-            return;
-        };
-
-        let resize = self
-            .last_pty_resize
-            .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS, 0, 0));
-        let runtime_options = self
-            .terminal
-            .lock()
-            .serial_runtime_options()
-            .unwrap_or_default();
-        self.terminal.lock().shutdown();
-
-        let mut terminal = match TerminalSession::serial_with_graphics_and_encoding(
-            config.clone(),
-            resize.0,
-            resize.1,
-            graphics_options_from_preferences(&self.preferences),
-            self.preferences.terminal_encoding,
-            self.preferences.scrollback_lines,
-        ) {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                self.title = SharedString::from(format!(
-                    "{}: {error}",
-                    self.preferences.serial_control_labels.reconnect_failed
-                ));
-                cx.notify();
-                return;
-            }
-        };
-        let _ = terminal.set_serial_runtime_options(runtime_options);
-        if resize.2 > 0 && resize.3 > 0 {
-            let _ = terminal.resize_with_cell_size(resize.0, resize.1, resize.2, resize.3);
-        }
-        let _ = terminal.set_focused(self.focused);
-        let snapshot = terminal.snapshot();
-
-        // Preserve the pane identity while replacing the transport-owned serial handle.
-        self.terminal = Arc::new(Mutex::new(terminal));
-        self.serial_reconnect_config = Some(config);
-        self.serial_port_available = Some(true);
-        self.snapshot = self.stamp_snapshot(snapshot);
-        self.mark_terminal_content_changed(cx);
-        self.terminal_exited = false;
-        self.input_locked = false;
-        self.title = SharedString::from("OxideTerm");
-        self.selection = None;
-        self.pending_paste = None;
-        self.context_menu = None;
-        self.context_action_requested = None;
-        self.marked_text = None;
-        self.privilege_prompt_inline_hint = None;
-        self.privilege_prompt_submit_requested = false;
-        self.search_query = None;
-        self.search_cache = None;
-        self.selected_search_match = None;
-        self.hovered_link = None;
-        self.hovered_command_mark_id = None;
-        self.selecting = false;
-        self.last_mouse_report_point = None;
-        self.command_marks.clear();
-        self.command_marks_render_cache_dirty = true;
-        self.selected_command_mark_id = None;
-        self.command_mark_id_aliases.clear();
-        self.input_tracker.reset();
-        self.privilege_prompt_tracker = PrivilegePromptTracker::default();
-        self.privilege_prompt_expiry_generation =
-            self.privilege_prompt_expiry_generation.wrapping_add(1);
-        self.privilege_prompt_expiry_task = None;
-        self.sync_terminal_output_events_enabled();
-        cx.emit(TerminalPaneEvent::PrivilegePromptStateChanged);
-        self.command_fact_ledger = CommandFactLedger::default();
-        self.last_pty_resize = Some(resize);
-        self.pending_pty_resize = None;
-        self.last_drain_budget_exhausted = false;
-        self.clear_smooth_scroll_remainder();
-        self.reset_cursor_blink();
-        self.wake_terminal_scheduler();
-        cx.notify();
-    }
-
     fn refresh_serial_port_presence(&mut self, cx: &mut Context<Self>) {
-        let Some(config) = self.serial_reconnect_config.as_ref() else {
+        let Some(config) = self.serial_session_config.as_ref() else {
             return;
         };
         let expected = config.port_path.trim().to_ascii_lowercase();
@@ -2003,14 +1936,36 @@ impl TerminalPane {
         options: SerialRuntimeOptions,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .terminal
-            .lock()
-            .set_serial_runtime_options(options)
-            .is_ok()
-        {
-            cx.notify();
+        let _ = self.update_serial_runtime_options(options, cx);
+    }
+
+    fn update_serial_runtime_options(
+        &mut self,
+        options: SerialRuntimeOptions,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let previous_options = {
+            let mut terminal = self.terminal.lock();
+            let previous_options = terminal.serial_runtime_options();
+            terminal
+                .set_serial_runtime_options(options)
+                .map_err(|error| error.to_string())?;
+            previous_options
+        };
+        let changed_input = previous_options
+            .filter(|previous| previous.line_ending != options.line_ending)
+            .map(|_| options.line_ending);
+        let changed_output = previous_options
+            .filter(|previous| previous.output_line_ending != options.output_line_ending)
+            .map(|_| options.output_line_ending);
+        if changed_input.is_some() || changed_output.is_some() {
+            cx.emit(TerminalPaneEvent::SerialLineEndingsChanged {
+                input: changed_input,
+                output: changed_output,
+            });
         }
+        cx.notify();
+        Ok(())
     }
 
     fn cycle_serial_send_mode(&mut self, cx: &mut Context<Self>) {
@@ -2041,6 +1996,19 @@ impl TerminalPane {
             return;
         };
         options.line_ending = match options.line_ending {
+            SerialLineEnding::None => SerialLineEnding::Lf,
+            SerialLineEnding::Lf => SerialLineEnding::CrLf,
+            SerialLineEnding::CrLf => SerialLineEnding::Cr,
+            SerialLineEnding::Cr => SerialLineEnding::None,
+        };
+        self.set_serial_runtime_options(options, cx);
+    }
+
+    fn cycle_serial_output_line_ending(&mut self, cx: &mut Context<Self>) {
+        let Some(mut options) = self.terminal.lock().serial_runtime_options() else {
+            return;
+        };
+        options.output_line_ending = match options.output_line_ending {
             SerialLineEnding::None => SerialLineEnding::Lf,
             SerialLineEnding::Lf => SerialLineEnding::CrLf,
             SerialLineEnding::CrLf => SerialLineEnding::Cr,
@@ -2571,6 +2539,61 @@ impl TerminalPane {
         }
     }
 
+    pub(crate) fn confirm_kitty_file_transmission(&mut self, cx: &mut Context<Self>) {
+        self.kitty_file_transmission_confirm_open = false;
+        let labels = &self.preferences.kitty_file_transmission_labels;
+        let result = self
+            .kitty_file_transmission
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Kitty file transmission is unavailable"))
+            .and_then(KittyFileTransmissionControl::authorize_for_session);
+        match result {
+            Ok(sandbox_path) => {
+                // Clipboard export is the explicit user-authorized capability boundary;
+                // the path is never retained by pane state, logs, or persistence.
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    sandbox_path.to_string_lossy().into_owned(),
+                ));
+                self.emit_kitty_file_transmission_notice(
+                    labels.allowed_title.clone(),
+                    labels.allowed_description.clone(),
+                    TerminalNoticeVariant::Success,
+                );
+            }
+            Err(_) => self.emit_kitty_file_transmission_notice(
+                labels.failed_title.clone(),
+                labels.failed_description.clone(),
+                TerminalNoticeVariant::Error,
+            ),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn deny_kitty_file_transmission(&mut self, cx: &mut Context<Self>) {
+        self.kitty_file_transmission_confirm_open = false;
+        if let Some(control) = &self.kitty_file_transmission {
+            control.deny_for_session();
+        }
+        cx.notify();
+    }
+
+    fn emit_kitty_file_transmission_notice(
+        &self,
+        title: String,
+        description: String,
+        variant: TerminalNoticeVariant,
+    ) {
+        if let Some(sink) = &self.preferences.notice_sink {
+            sink(TerminalNotice {
+                title,
+                description: Some(description),
+                status_text: None,
+                progress: None,
+                variant,
+            });
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let budget = self.next_drain_budget();
@@ -2607,6 +2630,15 @@ impl TerminalPane {
             false
         };
         let mut needs_notify = event_effect.needs_notify || report.changed;
+        if self
+            .kitty_file_transmission
+            .as_ref()
+            .is_some_and(KittyFileTransmissionControl::take_authorization_request)
+            && !self.kitty_file_transmission_confirm_open
+        {
+            self.kitty_file_transmission_confirm_open = true;
+            needs_notify = true;
+        }
         if (self.preferences.show_performance_overlay && render_stats_changed)
             || cleared_command_mark_selection
             || cleared_privilege_prompt_hint
@@ -3448,10 +3480,19 @@ impl TerminalPane {
     fn terminal_accepts_input(&self) -> bool {
         #[cfg(test)]
         if self.test_accepts_input {
+            return !self.input_locked;
+        }
+        let terminal_interactive = self.terminal.lock().is_interactive();
+        self.terminal_accepts_input_with_interactive_state(terminal_interactive)
+    }
+
+    fn terminal_accepts_input_with_interactive_state(&self, terminal_interactive: bool) -> bool {
+        #[cfg(test)]
+        if self.test_accepts_input {
             // Unit tests can exercise input routing without creating a live PTY.
             return !self.input_locked;
         }
-        !self.input_locked && !self.terminal_exited && self.terminal.lock().is_interactive()
+        !self.input_locked && !self.terminal_exited && terminal_interactive
     }
 
     fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -3709,6 +3750,7 @@ fn graphics_options_from_preferences(preferences: &TerminalUiPreferences) -> Gra
         pixel_limit: graphics.pixel_limit.min(u32::MAX as usize) as u32,
         storage_limit_mb: storage_limit_mb.min(u32::MAX as usize) as u32,
         show_placeholder: graphics.show_placeholders,
+        kitty_file_transmission: KittyFileTransmissionControl::new(),
     }
 }
 
@@ -3875,6 +3917,23 @@ mod tests {
     use gpui::{AppContext, IntoElement, Render, TestAppContext, div};
     use oxideterm_terminal::{TerminalAttrs, TerminalCell, TerminalColor, TerminalCursorShape};
 
+    #[test]
+    fn idle_terminal_has_no_maintenance_deadline() {
+        assert_eq!(
+            terminal_maintenance_interval(
+                false,
+                false,
+                Duration::from_millis(8),
+                false,
+                None,
+                None,
+                None,
+                None,
+            ),
+            None
+        );
+    }
+
     struct TerminalTestRoot;
 
     struct TerminalBroadcastRecorder {
@@ -3897,6 +3956,7 @@ mod tests {
             stop_bits: 1,
             parity: oxideterm_terminal::SerialParity::None,
             flow_control: oxideterm_terminal::SerialFlowControl::None,
+            runtime_options: SerialRuntimeOptions::default(),
         };
 
         let result = TerminalPane::open_serial_session_with_preferences(

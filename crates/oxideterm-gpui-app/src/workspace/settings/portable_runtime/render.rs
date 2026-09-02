@@ -1,11 +1,12 @@
 use gpui::{
-    AnyElement, Context, IntoElement, MouseDownEvent, ParentElement, Styled, Window, div,
-    prelude::FluentBuilder, px, rgb, rgba,
+    AnyElement, Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    ParentElement, Styled, Window, div, prelude::FluentBuilder, px, rgb, rgba,
 };
 use oxideterm_gpui_ui::button::{
     ButtonOptions, ButtonRadius, ButtonSize, ButtonVariant, ToolbarButtonIconPosition,
     ToolbarButtonOptions,
 };
+use oxideterm_gpui_ui::checkbox::{CheckboxOptions, checkbox_with};
 
 use crate::assets::LucideIcon;
 
@@ -230,6 +231,12 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let can_change_password = status.is_unlocked;
+        let auto_unlock_enabled = status.auto_unlock_enabled;
+        let auto_unlock_pending = self
+            .settings_workspace
+            .read(cx)
+            .portable_auto_unlock_pending();
+        let can_toggle_auto_unlock = status.is_unlocked && !auto_unlock_pending;
         let action_error = self
             .settings_workspace
             .read(cx)
@@ -242,30 +249,59 @@ impl WorkspaceApp {
             .gap(px(PORTABLE_SETTINGS_BUTTON_GAP))
             .child(
                 div()
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(self.portable_settings_text(
-                        "portable-security-title",
-                        "settings_view.general.portable_biometric",
-                        self.i18n.t("settings_view.general.portable_biometric"),
-                        self.tokens.metrics.ui_text_sm,
-                        self.tokens.ui.text,
-                        Some(gpui::FontWeight::MEDIUM),
-                        cx,
-                    ))
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.0))
                     .child(
-                        self.portable_settings_text(
-                            "portable-security-hint",
-                            "settings_view.general.portable_biometric_unsupported",
-                            self.i18n
-                                .t("settings_view.general.portable_biometric_unsupported"),
-                            self.tokens.metrics.ui_text_xs,
-                            self.tokens.ui.text_muted,
-                            None,
-                            cx,
-                        ),
-                    ),
+                        div()
+                            .min_w(px(0.0))
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(self.portable_settings_text(
+                                "portable-auto-unlock-title",
+                                "settings_view.general.portable_auto_unlock",
+                                self.i18n.t("settings_view.general.portable_auto_unlock"),
+                                self.tokens.metrics.ui_text_sm,
+                                self.tokens.ui.text,
+                                Some(gpui::FontWeight::MEDIUM),
+                                cx,
+                            ))
+                            .child(
+                                self.portable_settings_text(
+                                    "portable-auto-unlock-hint",
+                                    "settings_view.general.portable_auto_unlock_hint",
+                                    self.i18n
+                                        .t("settings_view.general.portable_auto_unlock_hint"),
+                                    self.tokens.metrics.ui_text_xs,
+                                    self.tokens.ui.text_muted,
+                                    None,
+                                    cx,
+                                ),
+                            ),
+                    )
+                    .child(div().flex_none().child(checkbox_with(
+                        &self.tokens,
+                        String::new(),
+                        auto_unlock_enabled,
+                        CheckboxOptions {
+                            disabled: !can_toggle_auto_unlock,
+                            ..CheckboxOptions::default()
+                        },
+                    )))
+                    .when(can_toggle_auto_unlock, |row| {
+                        // The label and hint provide a discoverable target around the compact control.
+                        row.cursor_pointer().on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.set_portable_auto_unlock_enabled(!auto_unlock_enabled, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                    }),
             )
             .child(
                 div()

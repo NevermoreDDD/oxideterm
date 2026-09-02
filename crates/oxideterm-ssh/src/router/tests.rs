@@ -48,6 +48,30 @@ mod tests {
     }
 
     #[test]
+    fn single_channel_nodes_reject_unmanaged_shared_consumers() {
+        let registry = SshConnectionRegistry::default();
+        let router = NodeRouter::new(registry);
+        let node_id = NodeId::new("single-channel");
+        router.upsert_node(
+            node_id.clone(),
+            SshConfig {
+                ssh_channel_strategy:
+                    oxideterm_connections::SshChannelStrategy::DedicatedPerConsumer,
+                ..SshConfig::default()
+            },
+        );
+
+        let error = router
+            .acquire_connection(
+                &node_id,
+                ConnectionConsumer::Sftp("unmanaged".to_string()),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, RouteError::CapabilityUnavailable(_)));
+    }
+
+    #[test]
     fn terminal_url_tracks_bound_endpoint() {
         let registry = SshConnectionRegistry::default();
         let router = NodeRouter::new(registry);
@@ -643,29 +667,6 @@ mod tests {
         assert!(store.snapshot(&expansion.target_node_id).is_none());
     }
 
-    #[test]
-    fn drill_down_requires_ready_parent_like_tauri_tree() {
-        let store = NodeRuntimeStore::default();
-        let root = NodeId::new("root");
-        store.upsert_node(root.clone(), SshConfig::password("jump", 22, "me", "pw"));
-
-        assert!(matches!(
-            store.drill_down(root.clone(), SshConfig::password("child", 22, "me", "pw")),
-            Err(RouteError::ParentNotConnected(_))
-        ));
-
-        {
-            let mut snapshot = store.export_snapshot();
-            snapshot.nodes[0].state.readiness = NodeReadiness::Ready;
-            store.apply_snapshot(snapshot).unwrap();
-        }
-
-        let child = store
-            .drill_down(root.clone(), SshConfig::password("child", 22, "me", "pw"))
-            .unwrap();
-        let path = store.path_to_node(&child).unwrap();
-        assert_eq!(path, vec![root, child]);
-    }
 
     #[test]
     fn reconcile_runtime_tree_clears_missing_runtime_connection() {

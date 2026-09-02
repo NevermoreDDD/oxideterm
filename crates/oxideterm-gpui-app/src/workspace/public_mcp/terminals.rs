@@ -23,6 +23,7 @@ use crate::workspace::{
     new_connection::{
         MoshConnectionOptions, SshConnectionIntent, mosh_options_from_profile,
         terminal_serial_flow_from_profile, terminal_serial_parity_from_profile,
+        terminal_serial_runtime_options_from_profile,
     },
 };
 
@@ -273,6 +274,12 @@ impl WorkspaceApp {
             ));
             return;
         }
+        if matches!(action, TerminalControlAction::SerialReconnect) {
+            request.finish(ToolEnvelope::failed(
+                "Serial reconnect must create a new terminal tab from Active Sessions",
+            ));
+            return;
+        }
         let result = pane.update(cx, |pane, cx| match action {
             TerminalControlAction::Interrupt => pane
                 .send_command_sender_raw_bytes(&[0x03], cx)
@@ -291,9 +298,7 @@ impl WorkspaceApp {
             TerminalControlAction::SerialBreak => {
                 pane.apply_serial_action(TerminalSerialAction::SendBreak, cx)
             }
-            TerminalControlAction::SerialReconnect => {
-                pane.apply_serial_action(TerminalSerialAction::Reconnect, cx)
-            }
+            TerminalControlAction::SerialReconnect => unreachable!("handled above"),
             TerminalControlAction::SerialDataTerminalReady { asserted } => {
                 pane.apply_serial_action(TerminalSerialAction::SetDataTerminalReady(asserted), cx)
             }
@@ -517,6 +522,7 @@ impl WorkspaceApp {
                 return;
             };
             let title = requested_title.unwrap_or_else(|| profile.name.clone());
+            let runtime_options = terminal_serial_runtime_options_from_profile(&profile);
             let config = SerialSessionConfig {
                 port_path: profile.port_path,
                 baud_rate: profile.baud_rate,
@@ -524,6 +530,7 @@ impl WorkspaceApp {
                 stop_bits: profile.stop_bits,
                 parity: terminal_serial_parity_from_profile(&profile.parity),
                 flow_control: terminal_serial_flow_from_profile(&profile.flow_control),
+                runtime_options,
             };
             match self.create_serial_terminal_tab_with_title(
                 config,
@@ -792,6 +799,14 @@ impl WorkspaceApp {
         intent: &SshConnectionIntent,
         error: impl Into<String>,
     ) {
+        if let SshConnectionIntent::Mosh(MoshConnectionOptions {
+            runtime_connection_attempt_id: Some(connection_attempt_id),
+            ..
+        }) = intent
+        {
+            self.standalone_connections
+                .mark_attempt_error(connection_attempt_id);
+        }
         let SshConnectionIntent::Mosh(MoshConnectionOptions {
             public_mcp_open_token: Some(token),
             ..

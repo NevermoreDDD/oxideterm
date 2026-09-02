@@ -20,6 +20,8 @@ impl WorkspaceApp {
                 workspace.enqueue_window_intent(intent, cx);
             },
         );
+        let window_button_layout_subscription =
+            cx.observe_button_layout_changed(window, |_workspace, _window, cx| cx.notify());
         let mut settings_store = SettingsStore::load_default()?;
         settings_store.settings_mut().sidebar_ui.zen_mode = false;
         if let Err(error) = ensure_bundled_workspace_backgrounds(settings_store.path()) {
@@ -177,6 +179,7 @@ impl WorkspaceApp {
             ssh_registry.clone(),
             node_router.clone(),
             forwarding_runtime.clone(),
+            i18n.t("ssh.form.single_channel_forwarding_unavailable"),
         );
         let connection_flow = cx.new(ConnectionFlowEntity::new);
         let settings_path = settings_store.path().to_path_buf();
@@ -199,33 +202,6 @@ impl WorkspaceApp {
         );
         let terminal_triggers =
             settings::TerminalTriggersSettingsState::load(settings_store.path());
-        let launcher = cx.new(|cx| LauncherWorkspaceEntity::new(settings.launcher.enabled, cx));
-        let launcher_observation = cx.observe(&launcher, |_workspace, _launcher, cx| {
-            // Entity-owned scans and input transitions repaint every mounted launcher surface.
-            cx.notify();
-        });
-        let launcher_subscription = cx.subscribe(
-            &launcher,
-            |workspace, _launcher, event: &LauncherWorkspaceEvent, cx| match event {
-                LauncherWorkspaceEvent::EnabledChanged(enabled) => {
-                    workspace.settings_store.settings_mut().launcher.enabled = *enabled;
-                    let _ = workspace.settings_store.save();
-                    workspace.settings_workspace.update(cx, |settings, _cx| {
-                        settings.acknowledge_external_store_state()
-                    });
-                    if !enabled {
-                        workspace.ime_marked_text = None;
-                    }
-                    cx.notify();
-                }
-                LauncherWorkspaceEvent::TooltipRequested { id, label, x, y } => {
-                    workspace.queue_workspace_tooltip(id, label, *x, *y, cx);
-                }
-                LauncherWorkspaceEvent::TooltipCleared { id } => {
-                    workspace.clear_workspace_tooltip(id, cx);
-                }
-            },
-        );
         let file_manager = cx.new(|cx| FileManagerState::load(settings_store.path(), cx));
         let file_manager_observation =
             cx.observe(&file_manager, |_workspace, _file_manager, cx| {
@@ -275,6 +251,8 @@ impl WorkspaceApp {
                 settings.terminal.command_bar.current_directory_awareness,
             );
         });
+        let ssh_consumer_prompt_handler = workspace_runtime.read(cx).native_ssh_prompt_handler();
+        let ssh_consumer_managed_key_resolver = managed_key_resolver_from_store(&connection_store);
         let workspace_runtime_subscription = cx.subscribe(
             &workspace_runtime,
             |workspace, _runtime, event: &runtime_entity::WorkspaceRuntimeEvent, cx| {
@@ -428,6 +406,11 @@ impl WorkspaceApp {
                 profiler_update_rx,
                 ssh_registry.clone(),
                 cx,
+            );
+            host_tools.set_ssh_consumer_context(
+                node_router.clone(),
+                ssh_consumer_prompt_handler.clone(),
+                ssh_consumer_managed_key_resolver.clone(),
             );
             host_tools.set_messages(host_tools_messages);
             host_tools
@@ -652,6 +635,7 @@ impl WorkspaceApp {
             detached_local_terminal_order: Vec::new(),
             serial_terminal_configs: HashMap::new(),
             telnet_terminal_profile_ids: HashMap::new(),
+            standalone_connections: standalone_connections::StandaloneConnectionRegistry::default(),
             detached_local_terminals_popover_open: false,
             command_palette,
             _command_palette_observation: command_palette_observation,
@@ -785,6 +769,7 @@ impl WorkspaceApp {
             settings_legal_notice_scroll: MarkdownVirtualListScrollHandle::new(),
             _window_intents: window_intents,
             _window_intent_subscription: window_intent_subscription,
+            _window_button_layout_subscription: window_button_layout_subscription,
             window_registry,
             window_effect_delivery_scheduled: false,
             connection_flow,
@@ -823,6 +808,9 @@ impl WorkspaceApp {
             sftp_tab_nodes: HashMap::new(),
             standalone_sftp_tabs: HashMap::new(),
             standalone_sftp_sessions: HashMap::new(),
+            dedicated_sftp_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            ssh_consumer_prompt_handler,
+            ssh_consumer_managed_key_resolver,
             pending_standalone_sftp_pair_launches: HashMap::new(),
             embedded_sftp_node_id: None,
             sftp_presentation_request: None,
@@ -831,9 +819,6 @@ impl WorkspaceApp {
             sftp_view,
             _sftp_observation: sftp_observation,
             _sftp_subscription: sftp_subscription,
-            launcher,
-            _launcher_observation: launcher_observation,
-            _launcher_subscription: launcher_subscription,
             graphics,
             _graphics_observation: graphics_observation,
             _graphics_subscription: graphics_subscription,
@@ -1144,6 +1129,7 @@ impl WorkspaceApp {
             cjk_font_family: terminal_cjk_font_family_preference(&terminal.cjk_font_family),
             font_ligatures: terminal.font_ligatures,
             font_size: terminal.font_size as f32,
+            font_weight: terminal.font_weight as f32,
             line_height: terminal.line_height as f32,
             cursor_shape: match terminal.cursor_style {
                 SettingsCursorStyle::Block => TerminalCursorShape::Block,
@@ -1191,6 +1177,22 @@ impl WorkspaceApp {
                 cancel: self.i18n.t("terminal.paste.cancel"),
                 paste: self.i18n.t("terminal.paste.paste"),
             },
+            kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels {
+                title: self.i18n.t("terminal.kitty_file_transmission.title"),
+                description: self.i18n.t("terminal.kitty_file_transmission.description"),
+                cancel: self.i18n.t("terminal.kitty_file_transmission.cancel"),
+                allow: self.i18n.t("terminal.kitty_file_transmission.allow"),
+                allowed_title: self
+                    .i18n
+                    .t("terminal.kitty_file_transmission.allowed_title"),
+                allowed_description: self
+                    .i18n
+                    .t("terminal.kitty_file_transmission.allowed_description"),
+                failed_title: self.i18n.t("terminal.kitty_file_transmission.failed_title"),
+                failed_description: self
+                    .i18n
+                    .t("terminal.kitty_file_transmission.failed_description"),
+            },
             autosuggest_labels: TerminalAutosuggestLabels {
                 history_source: self.i18n.t("terminal.command_bar.source_history"),
             },
@@ -1233,7 +1235,6 @@ impl WorkspaceApp {
                 port_missing: self.i18n.t("terminal.serial_control.port_missing"),
                 port_unknown: self.i18n.t("terminal.serial_control.port_unknown"),
                 refresh: self.i18n.t("terminal.serial_control.refresh"),
-                reconnect: self.i18n.t("terminal.serial_control.reconnect"),
                 send_break: self.i18n.t("terminal.serial_control.send_break"),
                 dtr: self.i18n.t("terminal.serial_control.dtr"),
                 rts: self.i18n.t("terminal.serial_control.rts"),
@@ -1245,6 +1246,7 @@ impl WorkspaceApp {
                 send_mode: self.i18n.t("terminal.serial_control.send_mode"),
                 display_mode: self.i18n.t("terminal.serial_control.display_mode"),
                 line_ending: self.i18n.t("terminal.serial_control.line_ending"),
+                output_line_ending: self.i18n.t("terminal.serial_control.output_line_ending"),
                 local_echo: self.i18n.t("terminal.serial_control.local_echo"),
                 text_mode: self.i18n.t("terminal.serial_control.text_mode"),
                 hex_mode: self.i18n.t("terminal.serial_control.hex_mode"),
@@ -1253,7 +1255,6 @@ impl WorkspaceApp {
                 line_ending_crlf: self.i18n.t("terminal.serial_control.line_ending_crlf"),
                 line_ending_cr: self.i18n.t("terminal.serial_control.line_ending_cr"),
                 line_ending_none: self.i18n.t("terminal.serial_control.line_ending_none"),
-                reconnect_failed: self.i18n.t("terminal.serial_control.reconnect_failed"),
             },
             tmux_labels: TerminalTmuxLabels {
                 tmux: self.i18n.t("terminal.tmux.tmux"),
@@ -1283,6 +1284,7 @@ impl WorkspaceApp {
                 confirm: self.i18n.t("terminal.tmux.confirm"),
                 cancel: self.i18n.t("terminal.tmux.cancel"),
             },
+            terminal_timestamps_enabled: false,
             session_log_options: Some(TerminalSessionLogOptions {
                 directory: session_log_directory,
                 include_control_sequences: session_log_settings.include_control_sequences,
@@ -1501,6 +1503,7 @@ pub(in crate::workspace) fn terminal_preference_overrides(
         highlight_rule_set_id,
         semantic_shell: None,
         local_shell_id: None,
+        terminal_timestamps_enabled: Some(options.timestamps_enabled),
         session_log_available: match options.session_log_policy {
             ConnectionTerminalSessionLogPolicy::Disabled => Some(false),
             ConnectionTerminalSessionLogPolicy::Automatic
@@ -1657,6 +1660,15 @@ mod semantic_scheme_tests {
             terminal_preference_overrides(ConnectionTerminalOptions::default(), &terminal);
         assert_eq!(inherited.session_log_available, None);
         assert_eq!(inherited.session_log_automatic, None);
+
+        let timestamps = terminal_preference_overrides(
+            ConnectionTerminalOptions {
+                timestamps_enabled: true,
+                ..ConnectionTerminalOptions::default()
+            },
+            &terminal,
+        );
+        assert_eq!(timestamps.terminal_timestamps_enabled, Some(true));
     }
 }
 

@@ -25,10 +25,23 @@ REQUIRED_DOCUMENTS = {
 }
 LINUX_DEB_GRAPHICS_RECOMMENDS = {"libegl1", "libvulkan1"}
 LINUX_RPM_GRAPHICS_RECOMMENDS = {"libglvnd-egl", "vulkan-loader"}
+LINUX_GLIBC_MAX_VERSION = (2, 35)
 PACKAGE_VERSION_FILENAME = "VERSION"
 PORTABLE_PLUGINS_DIR = "data/plugins"
 PORTABLE_UPDATE_MANIFEST_FILENAME = "portable-update.json"
 PORTABLE_UPDATE_MANIFEST_FORMAT = 1
+WINDOWS_X11_RUNTIME_VERSION = "21.1.16.1"
+WINDOWS_X11_RELEASE_SHA256 = "df7fed8f49665d0592528ab6be9d07111ea73c6848283d128b77690e05b8f90b"
+WINDOWS_X11_RUNTIME_SUFFIXES = {
+    "resources/x11/vcxsrv/COPYING",
+    "resources/x11/vcxsrv/VCXSRV-RUNTIME.json",
+    "resources/x11/vcxsrv/fonts/fonts.conf",
+    "resources/x11/vcxsrv/swrast_dri.dll",
+    "resources/x11/vcxsrv/vcxsrv.exe",
+    "resources/x11/vcxsrv/xauth.exe",
+    "resources/x11/vcxsrv/xkbcomp.exe",
+    "resources/x11/vcxsrv/xkbdata/rules/base",
+}
 
 
 def normalized_version(raw: str) -> str:
@@ -129,6 +142,21 @@ def verify_embedded_version(path: Path, suffix: str, expected_version: str) -> N
         )
 
 
+def verify_windows_x11_provenance(content: bytes, artifact: Path) -> None:
+    manifest = json.loads(content.decode("utf-8"))
+    if manifest.get("version") != WINDOWS_X11_RUNTIME_VERSION:
+        raise RuntimeError(f"{artifact.name} contains the wrong VcXsrv version")
+    release_asset = manifest.get("releaseAsset")
+    if (
+        not isinstance(release_asset, dict)
+        or release_asset.get("sha256") != WINDOWS_X11_RELEASE_SHA256
+    ):
+        raise RuntimeError(f"{artifact.name} contains unverified VcXsrv provenance")
+    source = manifest.get("source")
+    if not isinstance(source, dict) or not source.get("commit"):
+        raise RuntimeError(f"{artifact.name} does not identify the VcXsrv source")
+
+
 def verify_portable_archive(path: Path, target: str, expected_version: str) -> None:
     executable = "oxideterm-native.exe" if "windows" in target else "oxideterm-native"
     update_helper = (
@@ -136,20 +164,25 @@ def verify_portable_archive(path: Path, target: str, expected_version: str) -> N
         if "windows" in target
         else "tools/oxideterm-update-helper"
     )
-    require_archive_suffixes(
-        archive_names(path),
-        REQUIRED_DOCUMENTS
-        | {
-            PACKAGE_VERSION_FILENAME,
-            PORTABLE_PLUGINS_DIR,
-            "portable",
-            PORTABLE_UPDATE_MANIFEST_FILENAME,
-            update_helper,
-            executable,
-        },
-        path,
-    )
+    required_entries = REQUIRED_DOCUMENTS | {
+        PACKAGE_VERSION_FILENAME,
+        PORTABLE_PLUGINS_DIR,
+        "portable",
+        PORTABLE_UPDATE_MANIFEST_FILENAME,
+        update_helper,
+        executable,
+    }
+    if "windows" in target:
+        required_entries |= WINDOWS_X11_RUNTIME_SUFFIXES
+    require_archive_suffixes(archive_names(path), required_entries, path)
     verify_embedded_version(path, PACKAGE_VERSION_FILENAME, expected_version)
+    if "windows" in target:
+        verify_windows_x11_provenance(
+            archive_entry_bytes(path, "resources/x11/vcxsrv/VCXSRV-RUNTIME.json"),
+            path,
+        )
+        if not archive_entry_bytes(path, "resources/x11/vcxsrv/COPYING").strip():
+            raise RuntimeError(f"{path.name} contains an empty VcXsrv license")
     manifest = json.loads(
         archive_entry_bytes(path, PORTABLE_UPDATE_MANIFEST_FILENAME).decode("utf-8")
     )
@@ -245,6 +278,36 @@ def verify_linux_dynamic_libraries(binary: Path) -> None:
         raise RuntimeError(f"Linux binary has unresolved libraries: {'; '.join(missing)}")
     # WGPU loads Vulkan and EGL with dlopen, so ldd cannot prove that either
     # graphics path is installed. Package metadata and VM smoke tests cover it.
+
+
+def parse_glibc_versions(version_info: str) -> set[tuple[int, int]]:
+    """Collect the glibc symbol versions required by an ELF binary."""
+    return {
+        (int(major), int(minor))
+        for major, minor in re.findall(r"GLIBC_(\d+)\.(\d+)", version_info)
+    }
+
+
+def verify_linux_glibc_compatibility(binary: Path) -> None:
+    """Reject release binaries that exceed the supported glibc baseline."""
+    readelf = shutil.which("readelf")
+    if not readelf:
+        raise RuntimeError(
+            "readelf is required for Linux glibc compatibility verification"
+        )
+    versions = parse_glibc_versions(
+        run_checked([readelf, "--version-info", str(binary)])
+    )
+    if not versions:
+        raise RuntimeError(f"{binary.name} does not declare any glibc symbol versions")
+    required_version = max(versions)
+    if required_version > LINUX_GLIBC_MAX_VERSION:
+        required = ".".join(str(component) for component in required_version)
+        supported = ".".join(str(component) for component in LINUX_GLIBC_MAX_VERSION)
+        raise RuntimeError(
+            f"{binary.name} requires glibc {required}, "
+            f"exceeding the supported {supported} baseline"
+        )
 
 
 def require_metadata_values(
@@ -343,12 +406,16 @@ def verify_windows_installer(path: Path, expected_version: str) -> None:
     seven_zip = next((shutil.which(name) for name in ("7z", "7zz", "7za") if shutil.which(name)), None)
     if not seven_zip:
         raise RuntimeError("7-Zip is required for NSIS content verification")
-    listing = run_checked([seven_zip, "l", "-slt", str(path)])
-    for name in REQUIRED_DOCUMENTS | {
-        PACKAGE_VERSION_FILENAME,
-        "oxideterm-native.exe",
-        "oxideterm-update-helper.exe",
-    }:
+    listing = run_checked([seven_zip, "l", "-slt", str(path)]).replace("\\", "/")
+    for name in (
+        REQUIRED_DOCUMENTS
+        | WINDOWS_X11_RUNTIME_SUFFIXES
+        | {
+            PACKAGE_VERSION_FILENAME,
+            "oxideterm-native.exe",
+            "oxideterm-update-helper.exe",
+        }
+    ):
         if name not in listing:
             raise RuntimeError(f"{path.name} does not contain {name}")
     with tempfile.TemporaryDirectory() as directory:
@@ -356,6 +423,14 @@ def verify_windows_installer(path: Path, expected_version: str) -> None:
         versions = list(Path(directory).rglob(PACKAGE_VERSION_FILENAME))
         if not versions or all(item.read_text(encoding="utf-8").strip() != expected_version for item in versions):
             raise RuntimeError(f"{path.name} does not contain version {expected_version}")
+        provenance = [
+            item
+            for item in Path(directory).rglob("VCXSRV-RUNTIME.json")
+            if item.as_posix().endswith("resources/x11/vcxsrv/VCXSRV-RUNTIME.json")
+        ]
+        if not provenance:
+            raise RuntimeError(f"{path.name} does not contain VcXsrv provenance")
+        verify_windows_x11_provenance(provenance[0].read_bytes(), path)
 
 
 def verify_release(dist: Path, target: str, version: str) -> dict[str, object]:
@@ -381,6 +456,7 @@ def verify_release(dist: Path, target: str, version: str) -> dict[str, object]:
         verify_binary_architecture(binary, target)
         if "linux" in target:
             verify_linux_dynamic_libraries(binary)
+            verify_linux_glibc_compatibility(binary)
 
     if "windows" in target:
         verify_windows_installer(dist / f"OxideTerm_{version}_{label}-setup.exe", version)

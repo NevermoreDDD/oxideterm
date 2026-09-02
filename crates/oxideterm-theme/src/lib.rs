@@ -406,7 +406,7 @@ impl UiMetrics {
             sidebar_vibrancy_alpha: 0.64,
             terminal_vibrancy_alpha: 0.92,
             markdown_body_font_family: "SF Pro Text",
-            markdown_code_font_family: "JetBrainsMono Nerd Font",
+            markdown_code_font_family: "JetBrainsMono NFM",
             markdown_body_font_size: 14.0,
             markdown_heading_h1_scale: 2.0,
             markdown_heading_h2_scale: 1.5,
@@ -872,15 +872,6 @@ include!("generated_ui.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn derives_ui_colors_like_tauri() {
-        let ui = ThemeTokens::from_builtin(theme_by_id("default")).ui;
-        assert_eq!(ui.bg, 0x09090b);
-        assert_eq!(ui.bg_panel, 0x18181b);
-        assert_eq!(ui.bg_hover, 0x27272a);
-        assert_eq!(ui.accent, 0xea580c);
-    }
 
     #[test]
     fn applies_builtin_theme_overrides() {

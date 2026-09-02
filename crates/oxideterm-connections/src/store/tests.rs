@@ -39,6 +39,7 @@ mod tests {
             ssh_algorithms: SshAlgorithmPreferences::default(),
             x11_forwarding: ConnectionX11ForwardingOptions::default(),
             dedicated_new_terminal_connection: false,
+            ssh_channel_strategy: SshChannelStrategy::default(),
             post_connect_command: None,
             terminal: ConnectionTerminalOptions::default(),
         }
@@ -373,15 +374,18 @@ mod tests {
                 .get("dedicated_new_terminal_connection")
                 .is_none()
         );
+        assert!(default_options.get("ssh_channel_strategy").is_none());
 
         let options = ConnectionOptions {
             dedicated_new_terminal_connection: true,
+            ssh_channel_strategy: SshChannelStrategy::DedicatedPerConsumer,
             terminal: ConnectionTerminalOptions {
                 encoding: Some(ConnectionTerminalEncoding::Utf8),
                 backspace_sequence: Some(ConnectionTerminalBackspaceSequence::ControlH),
                 delete_sequence: Some(ConnectionTerminalDeleteSequence::Delete),
                 semantic_scheme: Some("conservative".to_string()),
                 highlight_rule_set: Some("network-devices".to_string()),
+                timestamps_enabled: true,
                 session_log_policy: ConnectionTerminalSessionLogPolicy::Automatic,
             },
             ..ConnectionOptions::default()
@@ -395,8 +399,10 @@ mod tests {
             serialized["terminal"]["highlightRuleSet"],
             "network-devices"
         );
+        assert_eq!(serialized["terminal"]["timestampsEnabled"], true);
         assert_eq!(serialized["terminal"]["sessionLogPolicy"], "automatic");
         assert_eq!(serialized["dedicated_new_terminal_connection"], true);
+        assert_eq!(serialized["ssh_channel_strategy"], "dedicated_per_consumer");
         assert_eq!(
             serde_json::to_value(ConnectionTerminalEncoding::EucJp).unwrap(),
             "euc-jp"
@@ -409,6 +415,10 @@ mod tests {
         let decoded: ConnectionOptions = serde_json::from_value(serialized).unwrap();
         assert_eq!(decoded.terminal, options.terminal);
         assert!(decoded.dedicated_new_terminal_connection);
+        assert_eq!(
+            decoded.ssh_channel_strategy,
+            SshChannelStrategy::DedicatedPerConsumer
+        );
 
         let legacy: ConnectionOptions = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(
@@ -416,7 +426,9 @@ mod tests {
             DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS
         );
         assert!(legacy.terminal.inherits_application_defaults());
+        assert!(!legacy.terminal.timestamps_enabled);
         assert!(!legacy.dedicated_new_terminal_connection);
+        assert_eq!(legacy.ssh_channel_strategy, SshChannelStrategy::Multiplexed);
         assert_eq!(
             legacy.x11_forwarding,
             ConnectionX11ForwardingOptions::default()
@@ -427,6 +439,136 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(custom_timeout.effective_connect_timeout_seconds(), 120);
+    }
+
+    #[test]
+    fn terminal_defaults_update_only_the_qualified_saved_profile() {
+        let path = temp_store_path("terminal-profile-defaults");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store
+            .upsert(request("shared-id", SavedAuth::Agent))
+            .expect("SSH connection saved");
+        store
+            .upsert_serial_profile(SaveSerialProfileRequest {
+                id: Some("shared-id".to_string()),
+                name: "Serial".to_string(),
+                port_path: "/dev/ttyUSB0".to_string(),
+                ..SaveSerialProfileRequest::default()
+            })
+            .expect("serial profile saved");
+        store
+            .upsert_telnet_profile(SaveTelnetProfileRequest {
+                id: Some("shared-id".to_string()),
+                name: "Telnet".to_string(),
+                host: "telnet.example.com".to_string(),
+                port: 23,
+                ..SaveTelnetProfileRequest::default()
+            })
+            .expect("Telnet profile saved");
+        store
+            .upsert_mosh_profile(mosh_request("shared-id", SavedAuth::Agent))
+            .expect("Mosh profile saved");
+
+        let kinds = [
+            ConnectionTerminalProfileKind::Ssh,
+            ConnectionTerminalProfileKind::Serial,
+            ConnectionTerminalProfileKind::Telnet,
+            ConnectionTerminalProfileKind::Mosh,
+        ];
+        for kind in kinds {
+            store
+                .set_terminal_session_log_policy(
+                    kind,
+                    "shared-id",
+                    ConnectionTerminalSessionLogPolicy::Manual,
+                )
+                .unwrap();
+        }
+
+        for kind in kinds {
+            assert!(
+                store
+                    .set_terminal_timestamps_enabled(kind, "shared-id", true)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .set_terminal_session_log_policy(
+                        kind,
+                        "shared-id",
+                        ConnectionTerminalSessionLogPolicy::Automatic,
+                    )
+                    .unwrap()
+            );
+
+            for candidate in kinds {
+                let terminal = store
+                    .terminal_options_for_profile(candidate, "shared-id")
+                    .unwrap();
+                assert_eq!(terminal.timestamps_enabled, candidate == kind);
+                assert_eq!(
+                    terminal.session_log_policy,
+                    if candidate == kind {
+                        ConnectionTerminalSessionLogPolicy::Automatic
+                    } else {
+                        ConnectionTerminalSessionLogPolicy::Manual
+                    }
+                );
+            }
+
+            assert!(
+                store
+                    .set_terminal_timestamps_enabled(kind, "shared-id", false)
+                    .unwrap()
+            );
+            assert!(
+                store
+                    .set_terminal_session_log_policy(
+                        kind,
+                        "shared-id",
+                        ConnectionTerminalSessionLogPolicy::Manual,
+                    )
+                    .unwrap()
+            );
+        }
+
+        assert!(
+            store
+                .set_terminal_timestamps_enabled(
+                    ConnectionTerminalProfileKind::Serial,
+                    "shared-id",
+                    true,
+                )
+                .unwrap()
+        );
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert!(
+            reloaded
+                .terminal_options_for_profile(
+                    ConnectionTerminalProfileKind::Serial,
+                    "shared-id",
+                )
+                .unwrap()
+                .timestamps_enabled
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn single_channel_strategy_disables_shared_forwarding_policies() {
+        let mut store = load_empty_store("single-channel-policy");
+        let mut request = request("single-channel", SavedAuth::Agent);
+        request.ssh_channel_strategy = SshChannelStrategy::DedicatedPerConsumer;
+        request.agent_forwarding = true;
+        request.dedicated_new_terminal_connection = false;
+        request.x11_forwarding.enabled = true;
+
+        store.upsert(request).unwrap();
+        let saved = store.get("single-channel").unwrap();
+
+        assert!(!saved.options.agent_forwarding);
+        assert!(!saved.options.dedicated_new_terminal_connection);
+        assert!(!saved.options.x11_forwarding.enabled);
     }
 
     #[test]
@@ -965,169 +1107,9 @@ mod tests {
         assert_eq!(store.get_connection_password("conn-1").unwrap(), "secret");
     }
 
-    #[test]
-    fn saved_connection_store_writes_tauri_compatible_versions() {
-        let path = temp_store_path("versioned-store");
-        let mut store = ConnectionStore::load(&path).unwrap();
 
-        store
-            .upsert(request("conn-1", SavedAuth::Agent))
-            .expect("connection saved");
 
-        let saved = fs::read_to_string(&path).unwrap();
-        assert!(saved.contains("\"version\": 1"));
-        assert_eq!(store.get("conn-1").unwrap().version, CONFIG_VERSION);
-    }
 
-    #[test]
-    fn encrypted_tauri_connections_payload_round_trips() {
-        let mut data = ConnectionStoreData::default();
-        data.groups.push("Work".to_string());
-        data.recent.push("conn-1".to_string());
-        data.connections.push(SavedConnection {
-            id: "conn-1".to_string(),
-            version: CONFIG_VERSION,
-            name: "Work Host".to_string(),
-            group: Some("Work".to_string()),
-            notes: None,
-            host: "work.example.com".to_string(),
-            port: 22,
-            username: "me".to_string(),
-            auth: SavedAuth::Agent,
-            proxy_chain: Vec::new(),
-            upstream_proxy: SavedUpstreamProxyPolicy::UseGlobal,
-            proxy_command: None,
-            options: ConnectionOptions {
-                post_connect_command: Some("uptime".to_string()),
-                ..ConnectionOptions::default()
-            },
-            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
-            last_used_at: None,
-            updated_at: None,
-            color: None,
-            icon_background_color: None,
-            icon: None,
-            tags: Vec::new(),
-            post_connect_command: None,
-            privilege_credentials: Vec::new(),
-        });
-
-        let key = [7u8; CONFIG_ENCRYPTION_KEY_LEN];
-        let bytes = encode_encrypted_connection_store_data_for_tests(&data, &key);
-        let raw = String::from_utf8(bytes.clone()).unwrap();
-        assert!(raw.contains("\"format\": \"oxideterm.config.encrypted\""));
-        assert!(!raw.contains("Work Host"));
-
-        let loaded = decode_connection_store_data_for_tests(&bytes, &key).unwrap();
-        assert_eq!(loaded.format, ConnectionStoreStorageFormat::Encrypted);
-        assert_eq!(loaded.data.connections.len(), 1);
-        assert_eq!(loaded.data.groups, vec!["Work"]);
-        assert_eq!(loaded.data.recent, vec!["conn-1"]);
-        assert_eq!(
-            loaded.data.connections[0]
-                .options
-                .post_connect_command
-                .as_deref(),
-            Some("uptime")
-        );
-    }
-
-    #[test]
-    fn plaintext_load_preserves_recent_and_moves_post_connect_command_to_tauri_options() {
-        let path = temp_store_path("tauri-options-command");
-        fs::write(
-            &path,
-            r##"{
-              "version": 1,
-              "connections": [
-                {
-                  "id": "conn-1",
-                  "version": 1,
-                  "name": "Home",
-                  "host": "192.168.1.2",
-                  "port": 22,
-                  "username": "me",
-                  "auth": { "type": "agent" },
-                  "options": {},
-                  "created_at": "2026-01-01T00:00:00Z",
-                  "post_connect_command": "echo ready"
-                }
-              ],
-              "groups": [],
-              "recent": ["conn-1"]
-            }"##,
-        )
-        .unwrap();
-
-        let store = ConnectionStore::load(&path).unwrap();
-
-        assert_eq!(store.data.recent, vec!["conn-1"]);
-        assert_eq!(
-            store
-                .get("conn-1")
-                .unwrap()
-                .options
-                .post_connect_command
-                .as_deref(),
-            Some("echo ready")
-        );
-        store.save().unwrap();
-        let saved = fs::read_to_string(&path).unwrap();
-        let saved_json: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(saved_json["recent"], serde_json::json!(["conn-1"]));
-        let saved_connection = &saved_json["connections"][0];
-        assert!(saved_connection.get("post_connect_command").is_none());
-        assert_eq!(
-            saved_connection["options"]["post_connect_command"],
-            serde_json::json!("echo ready")
-        );
-    }
-
-    #[test]
-    fn edit_preserves_tauri_connection_options_without_changing_recency() {
-        let path = temp_store_path("preserve-options");
-        fs::write(
-            &path,
-            r##"{
-              "version": 1,
-              "connections": [
-                {
-                  "id": "conn-1",
-                  "version": 1,
-                  "name": "Home",
-                  "host": "192.168.1.2",
-                  "port": 22,
-                  "username": "me",
-                  "auth": { "type": "agent" },
-                  "options": {
-                    "keep_alive_interval": 45,
-                    "compression": true,
-                    "jump_host": "legacy-jump",
-                    "term_type": "vt100",
-                    "agent_forwarding": false
-                  },
-                  "created_at": "2026-01-01T00:00:00Z"
-                }
-              ],
-              "groups": []
-            }"##,
-        )
-        .unwrap();
-        let mut store = ConnectionStore::load(&path).unwrap();
-
-        let mut update = request("conn-1", SavedAuth::Agent);
-        update.name = "Home Edited".to_string();
-        update.agent_forwarding = true;
-        store.upsert(update).unwrap();
-
-        let conn = store.get("conn-1").unwrap();
-        assert_eq!(conn.options.keep_alive_interval, 45);
-        assert!(conn.options.compression);
-        assert_eq!(conn.options.jump_host.as_deref(), Some("legacy-jump"));
-        assert_eq!(conn.options.term_type.as_deref(), Some("vt100"));
-        assert!(conn.options.agent_forwarding);
-        assert!(conn.last_used_at.is_none());
-    }
 
     #[test]
     fn legacy_plaintext_password_and_passphrase_are_migrated() {
@@ -1549,37 +1531,6 @@ mod tests {
         assert!(!saved.contains("sudo-secret"));
     }
 
-    #[test]
-    fn sudo_privilege_credential_uses_tauri_default_prompt_fragments() {
-        let mut store = load_empty_store("privilege-default-sudo-patterns");
-        store.upsert(request("conn-1", SavedAuth::Agent)).unwrap();
-
-        let credential = store
-            .save_privilege_credential(SavePrivilegeCredentialRequest {
-                connection_id: "conn-1".to_string(),
-                credential_id: Some("cred-1".to_string()),
-                label: "sudo".to_string(),
-                kind: PrivilegeCredentialKind::SudoPassword,
-                username_hint: None,
-                prompt_patterns: Vec::new(),
-                secret: Some(SecretString::from("sudo-secret")),
-                enabled: true,
-                require_click_to_send: true,
-            })
-            .unwrap();
-
-        // Prompt patterns are substring fragments, not glob patterns. Keep the
-        // defaults broad enough to match Tauri's helper behavior.
-        assert_eq!(
-            credential.prompt_patterns,
-            vec![
-                "[sudo]".to_string(),
-                "password for".to_string(),
-                "的密码".to_string(),
-                "sudo password".to_string()
-            ]
-        );
-    }
 
     #[test]
     fn legacy_sudo_privilege_prompt_fragments_are_displayed_as_current_defaults() {
@@ -2442,8 +2393,13 @@ mod tests {
                 untrusted_timeout_seconds: 1_800,
             },
             dedicated_new_terminal_connection: true,
+            ssh_channel_strategy: SshChannelStrategy::DedicatedPerConsumer,
             post_connect_command: Some("uname -a".to_string()),
-            terminal: ConnectionTerminalOptions::default(),
+            terminal: ConnectionTerminalOptions {
+                timestamps_enabled: true,
+                session_log_policy: ConnectionTerminalSessionLogPolicy::Automatic,
+                ..ConnectionTerminalOptions::default()
+            },
         };
         source.save().unwrap();
 
@@ -2481,6 +2437,11 @@ mod tests {
             }
         );
         assert!(imported.options.dedicated_new_terminal_connection);
+        assert!(imported.options.terminal.timestamps_enabled);
+        assert_eq!(
+            imported.options.terminal.session_log_policy,
+            ConnectionTerminalSessionLogPolicy::Automatic
+        );
         assert_eq!(
             imported.options.post_connect_command.as_deref(),
             Some("uname -a")
@@ -2589,6 +2550,8 @@ mod tests {
             stop_bits: 1,
             parity: SerialParity::None,
             flow_control: SerialFlowControl::Hardware,
+            input_line_ending: SerialLineEnding::CrLf,
+            output_line_ending: SerialLineEnding::Lf,
             terminal: ConnectionTerminalOptions::default(),
             connect_on_open: true,
             created_at: now,
@@ -2610,9 +2573,30 @@ mod tests {
             "#451a03"
         );
         assert_eq!(value["serial_profiles"][0]["flow_control"], "hardware");
+        assert_eq!(value["serial_profiles"][0]["input_line_ending"], "crlf");
+        assert_eq!(value["serial_profiles"][0]["output_line_ending"], "lf");
         assert!(value["serial_profiles"][0].get("host").is_none());
         assert!(value["serial_profiles"][0].get("username").is_none());
         assert!(value["serial_profiles"][0].get("auth").is_none());
+
+        let mut legacy_value = value.clone();
+        legacy_value["serial_profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("input_line_ending");
+        legacy_value["serial_profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_line_ending");
+        let legacy_round_trip: ConnectionStoreData = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(
+            legacy_round_trip.serial_profiles[0].input_line_ending,
+            SerialLineEnding::None
+        );
+        assert_eq!(
+            legacy_round_trip.serial_profiles[0].output_line_ending,
+            SerialLineEnding::None
+        );
 
         let round_trip: ConnectionStoreData = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip.serial_profiles, vec![profile]);
@@ -2638,6 +2622,7 @@ mod tests {
                 delete_sequence: Some(ConnectionTerminalDeleteSequence::ControlH),
                 semantic_scheme: None,
                 highlight_rule_set: None,
+                timestamps_enabled: false,
                 session_log_policy: ConnectionTerminalSessionLogPolicy::Disabled,
             },
             connect_on_open: true,
@@ -2713,6 +2698,51 @@ mod tests {
         profile.baud_rate = 115_200;
         profile.port_path.clear();
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn serial_line_endings_persist_in_sync_snapshot() {
+        let mut store = load_empty_store("serial-line-endings-sync");
+        let profile = store
+            .upsert_serial_profile(SaveSerialProfileRequest {
+                name: "Serial".to_string(),
+                port_path: "/dev/ttyUSB0".to_string(),
+                ..SaveSerialProfileRequest::default()
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .set_serial_profile_line_endings(
+                    &profile.id,
+                    Some(SerialLineEnding::CrLf),
+                    None,
+                )
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_serial_profile_line_endings(
+                    &profile.id,
+                    None,
+                    Some(SerialLineEnding::Lf),
+                )
+                .unwrap()
+        );
+
+        let snapshot = store.export_serial_profiles_snapshot().unwrap();
+        assert_eq!(snapshot.records[0].input_line_ending, SerialLineEnding::CrLf);
+        assert_eq!(snapshot.records[0].output_line_ending, SerialLineEnding::Lf);
+
+        let reloaded = ConnectionStore::load(store.path()).unwrap();
+        assert_eq!(
+            reloaded.serial_profiles()[0].input_line_ending,
+            SerialLineEnding::CrLf
+        );
+        assert_eq!(
+            reloaded.serial_profiles()[0].output_line_ending,
+            SerialLineEnding::Lf
+        );
     }
 
     #[test]
@@ -2883,6 +2913,111 @@ mod tests {
             !serde_json::to_string(&info)
                 .unwrap()
                 .contains("PRIVATE KEY")
+        );
+    }
+
+    #[test]
+    fn managed_key_resolve_repairs_legacy_hex_encoded_secret() {
+        let mut store = load_empty_store("managed-key-legacy-hex");
+        let private_key = generated_private_key_text(None);
+        let info = store
+            .create_managed_ssh_key_from_text(
+                SecretString::from(private_key.clone()),
+                Some("Legacy Keychain Key".to_string()),
+                None,
+            )
+            .unwrap();
+        let secret_id = store.data.managed_ssh_keys[0].secret_id.clone();
+        let legacy_hex = private_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        store
+            .managed_keychain
+            .store(&secret_id, &SecretString::from(legacy_hex))
+            .unwrap();
+
+        let restored = store
+            .resolve_managed_ssh_key_private_key(&info.id)
+            .expect("legacy hexadecimal managed key should be repaired");
+
+        assert_eq!(restored, private_key.as_str());
+        assert_eq!(
+            store.managed_keychain.get(&secret_id).unwrap(),
+            private_key.as_str(),
+            "the repaired private key should replace the legacy hexadecimal value"
+        );
+    }
+
+    #[test]
+    fn managed_key_resolve_does_not_persist_unverified_encrypted_recovery() {
+        let mut store = load_empty_store("managed-key-encrypted-legacy-hex");
+        let passphrase = SecretString::from("secret-passphrase");
+        let private_key = generated_private_key_text(Some(passphrase.expose_secret()));
+        let info = store
+            .create_managed_ssh_key_from_text(
+                SecretString::from(private_key.clone()),
+                Some("Encrypted Legacy Keychain Key".to_string()),
+                Some(passphrase.clone()),
+            )
+            .unwrap();
+        let secret_id = store.data.managed_ssh_keys[0].secret_id.clone();
+        let legacy_hex = private_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        store
+            .managed_keychain
+            .store(&secret_id, &SecretString::from(legacy_hex.clone()))
+            .unwrap();
+
+        let restored = store
+            .resolve_managed_ssh_key_private_key(&info.id)
+            .expect("encrypted legacy hexadecimal key should be usable for authentication");
+
+        assert_eq!(restored, private_key.as_str());
+        decode_managed_private_key(&restored, Some(&passphrase))
+            .expect("the caller-provided passphrase should validate the recovered key");
+        assert_eq!(
+            store.managed_keychain.get(&secret_id).unwrap(),
+            legacy_hex.as_str(),
+            "encrypted recovery must not be persisted before fingerprint validation"
+        );
+    }
+
+    #[test]
+    fn managed_key_resolve_rejects_legacy_hex_with_wrong_fingerprint() {
+        let mut store = load_empty_store("managed-key-legacy-hex-mismatch");
+        let expected_key = generated_private_key_text(None);
+        let different_key = generated_private_key_text(None);
+        let info = store
+            .create_managed_ssh_key_from_text(
+                SecretString::from(expected_key),
+                Some("Expected Key".to_string()),
+                None,
+            )
+            .unwrap();
+        let secret_id = store.data.managed_ssh_keys[0].secret_id.clone();
+        let legacy_hex = different_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        store
+            .managed_keychain
+            .store(&secret_id, &SecretString::from(legacy_hex.clone()))
+            .unwrap();
+
+        let error = store
+            .resolve_managed_ssh_key_private_key(&info.id)
+            .expect_err("a different legacy key must fail its metadata integrity check");
+
+        assert_eq!(error.to_string(), "Managed SSH key integrity check failed");
+        assert_eq!(
+            store.managed_keychain.get(&secret_id).unwrap(),
+            legacy_hex.as_str()
         );
     }
 

@@ -1,12 +1,31 @@
 use super::*;
 use crate::workspace::new_connection::{MoshConnectionOptions, SshTerminalConnectionOptions};
 use crate::workspace::root::init::terminal_preference_overrides;
+use oxideterm_connections::SshChannelStrategy;
 use oxideterm_remote_desktop::{
     RemoteDesktopConnectionProfile, RemoteDesktopEndpoint, RemoteDesktopProtocol,
     RemoteDesktopSecret,
 };
 use oxideterm_session_adapter::managed_key_resolver_from_store;
 use oxideterm_ssh_launch::{RemoteDesktopLaunchProtocol, TemporaryRemoteDesktopLaunch};
+
+const SSH_ROOT_NODE_ID_PREFIX: &str = "ssh";
+
+fn next_available_ssh_root_node_id(
+    next_sequence: &mut u64,
+    mut node_exists: impl FnMut(&NodeId) -> bool,
+) -> NodeId {
+    loop {
+        let sequence = *next_sequence;
+        // Restored session trees can already own numeric ids while the workspace counter
+        // starts from one, so allocation must skip every live logical node owner.
+        *next_sequence = sequence.wrapping_add(1).max(1);
+        let node_id = NodeId::new(format!("{SSH_ROOT_NODE_ID_PREFIX}-{sequence}"));
+        if !node_exists(&node_id) {
+            return node_id;
+        }
+    }
+}
 
 fn attach_saved_owner_to_reused_ssh_node(
     node: &mut WorkspaceSshNode,
@@ -26,10 +45,13 @@ fn should_use_dedicated_terminal_connection(
     allow_dedicated_connection: bool,
     saved_policy: Option<bool>,
     manual_node_policy: bool,
+    channel_strategy: SshChannelStrategy,
 ) -> bool {
     // Initial tabs and reconnect remounts must consume the node connection that
     // was just authenticated. Only explicit additional terminals may isolate.
-    allow_dedicated_connection && saved_policy.unwrap_or(manual_node_policy)
+    allow_dedicated_connection
+        && (channel_strategy.requires_dedicated_consumers()
+            || saved_policy.unwrap_or(manual_node_policy))
 }
 
 type SshRouteEndpoint<'a> = (&'a str, u16, &'a str);
@@ -380,9 +402,42 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<TerminalSessionId> {
+        self.create_telnet_terminal_tab_for_connection(
+            config,
+            login,
+            terminal_options,
+            title,
+            None,
+            window,
+            cx,
+        )
+    }
+
+    pub(in crate::workspace) fn create_telnet_terminal_tab_for_connection(
+        &mut self,
+        config: TelnetSessionConfig,
+        login: Option<oxideterm_terminal::TelnetLoginCredentials>,
+        terminal_options: ConnectionTerminalOptions,
+        title: String,
+        connection_attempt_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TerminalSessionId> {
         let tab_id = self.alloc_tab_id(cx);
         let pane_id = self.alloc_pane_id(cx);
         let session_id = self.alloc_session_id(cx);
+        let reconnect_terminal_options = terminal_options.clone();
+        let reconnect_config = config.clone();
+        let connection_attempt_id = connection_attempt_id.unwrap_or_else(|| {
+            self.standalone_connections.insert_pending(
+                standalone_connections::StandaloneConnectionKind::Telnet,
+                title.clone(),
+                standalone_connections::StandaloneConnectionLaunch::Telnet {
+                    config: reconnect_config,
+                    terminal_options: reconnect_terminal_options,
+                },
+            )
+        });
         let mut preference_overrides = terminal_preference_overrides(
             terminal_options,
             &self.settings_store.settings().terminal,
@@ -417,7 +472,7 @@ impl WorkspaceApp {
             Tab {
                 id: tab_id,
                 kind: TabKind::LocalTerminal,
-                title,
+                title: title.clone(),
                 title_source: TabTitleSource::Static,
                 root_pane: Some(PaneNode::leaf(pane_id, session_id)),
                 active_pane_id: Some(pane_id),
@@ -425,6 +480,9 @@ impl WorkspaceApp {
             cx,
         );
         self.bind_terminal_location(tab_id, pane_id, session_id, cx);
+        let surface = standalone_connections::StandaloneConnectionSurface::Terminal(session_id);
+        self.standalone_connections
+            .bind_surface_for_attempt(&connection_attempt_id, surface);
         self.set_main_window_active_tab(Some(tab_id), cx);
         self.active_surface = ActiveSurface::Terminal;
         self.needs_active_pane_focus = true;
@@ -453,9 +511,40 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<TerminalSessionId> {
+        self.create_serial_terminal_tab_for_connection(
+            config,
+            terminal_options,
+            title,
+            None,
+            window,
+            cx,
+        )
+    }
+
+    pub(in crate::workspace) fn create_serial_terminal_tab_for_connection(
+        &mut self,
+        config: SerialSessionConfig,
+        terminal_options: ConnectionTerminalOptions,
+        title: String,
+        connection_attempt_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<TerminalSessionId> {
         let tab_id = self.alloc_tab_id(cx);
         let pane_id = self.alloc_pane_id(cx);
         let session_id = self.alloc_session_id(cx);
+        let reconnect_config = config.clone();
+        let reconnect_terminal_options = terminal_options.clone();
+        let connection_attempt_id = connection_attempt_id.unwrap_or_else(|| {
+            self.standalone_connections.insert_pending(
+                standalone_connections::StandaloneConnectionKind::Serial,
+                title.clone(),
+                standalone_connections::StandaloneConnectionLaunch::Serial {
+                    config: reconnect_config,
+                    terminal_options: reconnect_terminal_options,
+                },
+            )
+        });
         let mut preferences =
             self.prepare_terminal_preferences_for_tab_kind(&TabKind::LocalTerminal, cx);
         let mut preference_overrides = terminal_preference_overrides(
@@ -470,25 +559,35 @@ impl WorkspaceApp {
         });
         preference_overrides.apply_to(&mut preferences);
         let pane_config = config.clone();
-        let serial_session =
-            TerminalPane::open_serial_session_with_preferences(config.clone(), &preferences)?;
+        let serial_session = match TerminalPane::open_serial_session_with_preferences(
+            config.clone(),
+            &preferences,
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                self.standalone_connections
+                    .mark_attempt_error(&connection_attempt_id);
+                cx.notify();
+                return Err(error);
+            }
+        };
         let pane = cx.new(|cx| {
             TerminalPane::from_shared_session(serial_session, preferences, window, cx)
                 .expect("failed to initialize pre-opened Serial terminal pane")
-                .with_serial_reconnect_config(pane_config)
+                .with_serial_session_config(pane_config)
                 .with_preference_overrides(preference_overrides)
         });
 
-        // Serial mirrors Tauri local-terminal transport semantics: it is not
-        // an SSH node and must not expose SFTP, forwarding, or ProxyJump.
+        // Serial owns no SSH node and must not expose SFTP, forwarding, or ProxyJump.
         self.register_terminal_pane(pane_id, session_id, pane.clone(), window, cx);
-        self.serial_terminal_configs.insert(session_id, config);
+        self.serial_terminal_configs
+            .insert(session_id, config.clone());
         self.refresh_native_plugin_terminal_hooks(cx);
         self.insert_tab(
             Tab {
                 id: tab_id,
                 kind: TabKind::LocalTerminal,
-                title,
+                title: title.clone(),
                 title_source: TabTitleSource::Static,
                 root_pane: Some(PaneNode::leaf(pane_id, session_id)),
                 active_pane_id: Some(pane_id),
@@ -496,6 +595,9 @@ impl WorkspaceApp {
             cx,
         );
         self.bind_terminal_location(tab_id, pane_id, session_id, cx);
+        let surface = standalone_connections::StandaloneConnectionSurface::Terminal(session_id);
+        self.standalone_connections
+            .bind_surface_for_attempt(&connection_attempt_id, surface);
         self.set_main_window_active_tab(Some(tab_id), cx);
         self.active_surface = ActiveSurface::Terminal;
         self.needs_active_pane_focus = true;
@@ -505,11 +607,12 @@ impl WorkspaceApp {
         Ok(session_id)
     }
 
-    pub(in crate::workspace) fn create_mosh_terminal_tab(
+    pub(in crate::workspace) fn create_mosh_terminal_tab_for_connection(
         &mut self,
         mut config: MoshTerminalConfig,
         terminal_options: ConnectionTerminalOptions,
         title: String,
+        connection_attempt_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<TerminalSessionId> {
@@ -544,7 +647,7 @@ impl WorkspaceApp {
             Tab {
                 id: tab_id,
                 kind: TabKind::MoshTerminal,
-                title,
+                title: title.clone(),
                 title_source: TabTitleSource::Static,
                 root_pane: Some(PaneNode::leaf(pane_id, session_id)),
                 active_pane_id: Some(pane_id),
@@ -552,6 +655,9 @@ impl WorkspaceApp {
             cx,
         );
         self.bind_terminal_location(tab_id, pane_id, session_id, cx);
+        let surface = standalone_connections::StandaloneConnectionSurface::Terminal(session_id);
+        self.standalone_connections
+            .bind_surface_for_attempt(&connection_attempt_id, surface);
         self.set_main_window_active_tab(Some(tab_id), cx);
         self.active_surface = ActiveSurface::Terminal;
         self.needs_active_pane_focus = true;
@@ -569,13 +675,18 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let (saved_terminal_options, saved_dedicated_new_terminal_connection) = self
+        let (
+            saved_terminal_options,
+            saved_dedicated_new_terminal_connection,
+            saved_ssh_channel_strategy,
+        ) = self
             .connection_store
             .get(&saved_connection_id)
             .map(|connection| {
                 (
                     connection.options.terminal.clone(),
                     connection.options.dedicated_new_terminal_connection,
+                    connection.options.ssh_channel_strategy,
                 )
             })
             .unwrap_or_default();
@@ -591,6 +702,7 @@ impl WorkspaceApp {
             if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                 node.terminal_options = saved_terminal_options.clone();
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
+                node.ssh_channel_strategy = saved_ssh_channel_strategy;
             }
             if let Some(session_id) = self
                 .workspace_runtime
@@ -656,6 +768,7 @@ impl WorkspaceApp {
             if let Some(node) = self.ssh_nodes.get_mut(&target_node_id) {
                 node.terminal_options = saved_terminal_options;
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
+                node.ssh_channel_strategy = saved_ssh_channel_strategy;
             }
             let post_connect_command = target_config.post_connect_command.clone();
             self.queue_ssh_terminal_tab_for_node_with_mark_used(
@@ -685,6 +798,7 @@ impl WorkspaceApp {
                     node.terminal_options = saved_terminal_options.clone();
                     node.dedicated_new_terminal_connection =
                         saved_dedicated_new_terminal_connection;
+                    node.ssh_channel_strategy = saved_ssh_channel_strategy;
                 }
                 if let Some(session_id) = self
                     .workspace_runtime
@@ -741,6 +855,7 @@ impl WorkspaceApp {
             if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                 node.terminal_options = saved_terminal_options.clone();
                 node.dedicated_new_terminal_connection = saved_dedicated_new_terminal_connection;
+                node.ssh_channel_strategy = saved_ssh_channel_strategy;
             }
             let cleanup_node_id = node_id.clone();
             let post_connect_command = config.post_connect_command.clone();
@@ -928,8 +1043,9 @@ impl WorkspaceApp {
             self.saved_ssh_nodes.remove(saved_connection_id);
         }
 
-        let node_id = NodeId::new(format!("ssh-{}", self.next_ssh_node_id));
-        self.next_ssh_node_id += 1;
+        let node_id = next_available_ssh_root_node_id(&mut self.next_ssh_node_id, |node_id| {
+            self.node_router.contains_node(node_id) || self.ssh_nodes.contains_key(node_id)
+        });
         let origin = saved_connection_id
             .as_ref()
             .map(|id| NodeOrigin::Restored {
@@ -1056,6 +1172,7 @@ impl WorkspaceApp {
                 locale: None,
                 terminal: ConnectionTerminalOptions::default(),
                 public_mcp_open_token: None,
+                runtime_connection_attempt_id: None,
             }),
             cx,
         );
@@ -1144,6 +1261,7 @@ impl WorkspaceApp {
                     title,
                     terminal_options: ConnectionTerminalOptions::default(),
                     dedicated_new_terminal_connection: false,
+                    ssh_channel_strategy: SshChannelStrategy::default(),
                     terminal_ids: Vec::new(),
                     readiness: NodeReadiness::Disconnected,
                 },
@@ -1157,7 +1275,7 @@ impl WorkspaceApp {
         }
     }
 
-    pub(super) fn create_ssh_terminal_pane_for_existing_node(
+    pub(in crate::workspace) fn create_ssh_terminal_pane_for_existing_node(
         &mut self,
         node_id: &NodeId,
         post_connect_command: Option<String>,
@@ -1165,27 +1283,43 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(PaneId, TerminalSessionId)> {
-        let (host, port, username, saved_connection_id, node_dedicated_new_terminal_connection) =
-            self.ssh_nodes
-                .get(node_id)
-                .map(|node| {
-                    (
-                        node.endpoint.host.clone(),
-                        node.endpoint.port,
-                        node.endpoint.username.clone(),
-                        node.saved_connection_id.clone(),
-                        node.dedicated_new_terminal_connection,
-                    )
-                })
-                .ok_or_else(|| anyhow::anyhow!("SSH node {} not found", node_id.0))?;
-        let saved_dedicated_policy = saved_connection_id
+        let (
+            host,
+            port,
+            username,
+            saved_connection_id,
+            node_dedicated_new_terminal_connection,
+            node_ssh_channel_strategy,
+        ) = self
+            .ssh_nodes
+            .get(node_id)
+            .map(|node| {
+                (
+                    node.endpoint.host.clone(),
+                    node.endpoint.port,
+                    node.endpoint.username.clone(),
+                    node.saved_connection_id.clone(),
+                    node.dedicated_new_terminal_connection,
+                    node.ssh_channel_strategy,
+                )
+            })
+            .ok_or_else(|| anyhow::anyhow!("SSH node {} not found", node_id.0))?;
+        let saved_connection_policy = saved_connection_id
             .as_deref()
             .and_then(|id| self.connection_store.get(id))
-            .map(|connection| connection.options.dedicated_new_terminal_connection);
+            .map(|connection| {
+                (
+                    connection.options.dedicated_new_terminal_connection,
+                    connection.options.ssh_channel_strategy,
+                )
+            });
         let dedicated_new_terminal_connection = should_use_dedicated_terminal_connection(
             allow_dedicated_connection,
-            saved_dedicated_policy,
+            saved_connection_policy.map(|policy| policy.0),
             node_dedicated_new_terminal_connection,
+            saved_connection_policy
+                .map(|policy| policy.1)
+                .unwrap_or(node_ssh_channel_strategy),
         );
         let connection_id = self
             .node_router
@@ -1483,6 +1617,11 @@ impl WorkspaceApp {
                             .ssh_nodes
                             .get(&node_id)
                             .is_some_and(|node| node.dedicated_new_terminal_connection),
+                        ssh_channel_strategy: self
+                            .ssh_nodes
+                            .get(&node_id)
+                            .map(|node| node.ssh_channel_strategy)
+                            .unwrap_or_default(),
                     })
                 });
             if self.start_existing_session_tree_connect(
@@ -1671,6 +1810,23 @@ fn ssh_config_from_proxy_hop(hop: ProxyHopConfig, connect_timeout_seconds: u64) 
 mod create_tests {
     use super::*;
 
+    #[test]
+    fn ssh_root_node_allocator_skips_restored_node_ids() {
+        let occupied_node_ids = HashSet::from([
+            NodeId::new("ssh-1"),
+            NodeId::new("ssh-2"),
+            NodeId::new("direct-restored"),
+        ]);
+        let mut next_sequence = 1;
+
+        let node_id = next_available_ssh_root_node_id(&mut next_sequence, |node_id| {
+            occupied_node_ids.contains(node_id)
+        });
+
+        assert_eq!(node_id, NodeId::new("ssh-3"));
+        assert_eq!(next_sequence, 4);
+    }
+
     fn saved_connection_metadata(id: &str) -> oxideterm_connections::SavedConnection {
         // This fixture deliberately has no runtime credential so reuse can be
         // verified against persisted route identity alone.
@@ -1740,18 +1896,32 @@ mod create_tests {
         assert!(!should_use_dedicated_terminal_connection(
             false,
             Some(true),
-            true
+            true,
+            SshChannelStrategy::DedicatedPerConsumer,
         ));
         assert!(should_use_dedicated_terminal_connection(
             true,
             Some(true),
-            false
+            false,
+            SshChannelStrategy::Multiplexed,
         ));
-        assert!(should_use_dedicated_terminal_connection(true, None, true));
+        assert!(should_use_dedicated_terminal_connection(
+            true,
+            None,
+            true,
+            SshChannelStrategy::Multiplexed,
+        ));
         assert!(!should_use_dedicated_terminal_connection(
             true,
             Some(false),
-            true
+            true,
+            SshChannelStrategy::Multiplexed,
+        ));
+        assert!(should_use_dedicated_terminal_connection(
+            true,
+            Some(false),
+            false,
+            SshChannelStrategy::DedicatedPerConsumer,
         ));
     }
 

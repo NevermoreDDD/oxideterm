@@ -30,6 +30,7 @@ pub(crate) const DEFAULT_ROWS: usize = 40;
 pub(crate) const DEFAULT_SCROLLBACK_LINES: usize = 1000;
 pub const TERMINAL_FONT: &str = oxideterm_settings::JETBRAINS_MONO_SUBSET_FAMILY;
 pub(crate) const TERMINAL_FONT_SIZE: f32 = 14.0;
+pub(crate) const TERMINAL_FONT_WEIGHT: f32 = 400.0;
 pub(crate) const TERMINAL_LINE_HEIGHT_RATIO: f32 = 1.2;
 pub(crate) const TERMINAL_CONTENT_PADDING: f32 = 0.0;
 // Command marks no longer reserve a left gutter; column-zero terminal text must
@@ -72,6 +73,7 @@ pub struct TerminalUiPreferences {
     pub cjk_font_family: Option<String>,
     pub font_ligatures: bool,
     pub font_size: f32,
+    pub font_weight: f32,
     pub line_height: f32,
     pub cursor_shape: TerminalCursorShape,
     pub cursor_blink: bool,
@@ -107,12 +109,14 @@ pub struct TerminalUiPreferences {
     pub background: Option<TerminalBackgroundPreferences>,
     pub transparent_background: bool,
     pub paste_labels: TerminalPasteLabels,
+    pub kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels,
     pub autosuggest_labels: TerminalAutosuggestLabels,
     pub command_selection_labels: TerminalCommandSelectionLabels,
     pub modem_labels: TerminalModemLabels,
     pub trzsz_labels: TerminalTrzszLabels,
     pub serial_control_labels: TerminalSerialControlLabels,
     pub tmux_labels: TerminalTmuxLabels,
+    pub terminal_timestamps_enabled: bool,
     pub session_log_options: Option<TerminalSessionLogOptions>,
     pub session_log_automatic: bool,
     pub session_log_labels: TerminalSessionLogLabels,
@@ -133,6 +137,7 @@ pub struct TerminalUiPreferenceOverrides {
     pub semantic_shell: Option<SemanticShellDialect>,
     // Retain the local shell identity so settings refreshes can resolve its Scheme again.
     pub local_shell_id: Option<String>,
+    pub terminal_timestamps_enabled: Option<bool>,
     pub session_log_available: Option<bool>,
     pub session_log_automatic: Option<bool>,
     pub session_log_context: Option<TerminalSessionLogContext>,
@@ -161,6 +166,9 @@ impl TerminalUiPreferenceOverrides {
         if let Some(semantic_shell) = self.semantic_shell {
             preferences.semantic_shell = semantic_shell;
         }
+        if let Some(enabled) = self.terminal_timestamps_enabled {
+            preferences.terminal_timestamps_enabled = enabled;
+        }
         if self.session_log_available == Some(false) {
             preferences.session_log_options = None;
         }
@@ -182,6 +190,7 @@ impl Default for TerminalUiPreferences {
             cjk_font_family: None,
             font_ligatures: TERMINAL_FONT_LIGATURES,
             font_size: TERMINAL_FONT_SIZE,
+            font_weight: TERMINAL_FONT_WEIGHT,
             line_height: TERMINAL_LINE_HEIGHT_RATIO,
             cursor_shape: TerminalCursorShape::Block,
             cursor_blink: true,
@@ -221,12 +230,14 @@ impl Default for TerminalUiPreferences {
             background: None,
             transparent_background: false,
             paste_labels: TerminalPasteLabels::default(),
+            kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels::default(),
             autosuggest_labels: TerminalAutosuggestLabels::default(),
             command_selection_labels: TerminalCommandSelectionLabels::default(),
             modem_labels: TerminalModemLabels::default(),
             trzsz_labels: TerminalTrzszLabels::default(),
             serial_control_labels: TerminalSerialControlLabels::default(),
             tmux_labels: TerminalTmuxLabels::default(),
+            terminal_timestamps_enabled: false,
             session_log_options: None,
             session_log_automatic: false,
             session_log_labels: TerminalSessionLogLabels::default(),
@@ -442,7 +453,6 @@ pub struct TerminalSerialControlLabels {
     pub port_missing: String,
     pub port_unknown: String,
     pub refresh: String,
-    pub reconnect: String,
     pub send_break: String,
     pub dtr: String,
     pub rts: String,
@@ -454,6 +464,7 @@ pub struct TerminalSerialControlLabels {
     pub send_mode: String,
     pub display_mode: String,
     pub line_ending: String,
+    pub output_line_ending: String,
     pub local_echo: String,
     pub text_mode: String,
     pub hex_mode: String,
@@ -462,7 +473,6 @@ pub struct TerminalSerialControlLabels {
     pub line_ending_crlf: String,
     pub line_ending_cr: String,
     pub line_ending_none: String,
-    pub reconnect_failed: String,
 }
 
 #[derive(Clone, Debug)]
@@ -539,7 +549,6 @@ impl Default for TerminalSerialControlLabels {
             port_missing: "Port missing".to_string(),
             port_unknown: "Port unknown".to_string(),
             refresh: "Refresh".to_string(),
-            reconnect: "Reconnect".to_string(),
             send_break: "Break".to_string(),
             dtr: "DTR".to_string(),
             rts: "RTS".to_string(),
@@ -550,7 +559,8 @@ impl Default for TerminalSerialControlLabels {
             flow_hardware: "RTS/CTS".to_string(),
             send_mode: "Send".to_string(),
             display_mode: "Display".to_string(),
-            line_ending: "Line".to_string(),
+            line_ending: "TX line".to_string(),
+            output_line_ending: "RX line".to_string(),
             local_echo: "Echo".to_string(),
             text_mode: "Text".to_string(),
             hex_mode: "Hex".to_string(),
@@ -559,7 +569,6 @@ impl Default for TerminalSerialControlLabels {
             line_ending_crlf: "CRLF".to_string(),
             line_ending_cr: "CR".to_string(),
             line_ending_none: "Raw".to_string(),
-            reconnect_failed: "Serial reconnect failed".to_string(),
         }
     }
 }
@@ -662,6 +671,34 @@ impl Default for TerminalTrzszLabels {
             disabled_description:
                 "The remote server started a trzsz transfer, but in-band file transfer is not enabled. Enable trzsz in Settings -> Terminal."
                     .to_string(),
+        }
+    }
+}
+
+/// Localized copy for the per-session Kitty file-access decision.
+#[derive(Clone, Debug)]
+pub struct TerminalKittyFileTransmissionLabels {
+    pub title: String,
+    pub description: String,
+    pub cancel: String,
+    pub allow: String,
+    pub allowed_title: String,
+    pub allowed_description: String,
+    pub failed_title: String,
+    pub failed_description: String,
+}
+
+impl Default for TerminalKittyFileTransmissionLabels {
+    fn default() -> Self {
+        Self {
+            title: "Allow Kitty local-file access for this session?".to_string(),
+            description: "The request was blocked. If you allow it, OxideTerm creates a private session directory and copies its path. Retry the transfer using a tty-graphics-protocol file directly inside that directory.".to_string(),
+            cancel: "Deny".to_string(),
+            allow: "Allow for this session".to_string(),
+            allowed_title: "Kitty file access allowed for this session".to_string(),
+            allowed_description: "The private transfer directory was copied to the clipboard. The permission ends when this terminal session closes.".to_string(),
+            failed_title: "Could not enable Kitty file access".to_string(),
+            failed_description: "OxideTerm could not create the private transfer directory.".to_string(),
         }
     }
 }
@@ -874,6 +911,7 @@ impl TerminalMetrics {
             &preferences.font_family,
             preferences.cjk_font_family.as_deref(),
             preferences.font_ligatures,
+            preferences.font_weight,
         );
         let font_id = window.text_system().resolve_font(&font);
         let measured_width = window
@@ -930,9 +968,18 @@ pub(crate) fn terminal_font_with_family_and_cjk(
     family: &str,
     cjk_family: Option<&str>,
     font_ligatures: bool,
+    font_weight: f32,
 ) -> Font {
+    let configured_families = oxideterm_gpui_ui::css_font_family_stack(family);
+    let primary_family = configured_families
+        .first()
+        .cloned()
+        .unwrap_or_else(|| SharedString::from(TERMINAL_FONT));
     let mut fallback_families = Vec::new();
-    push_font_fallback(&mut fallback_families, family);
+    // Preserve the user-defined stack before appending built-in recovery fonts.
+    for configured_fallback in configured_families.iter().skip(1) {
+        push_font_fallback(&mut fallback_families, configured_fallback);
+    }
     // A bundled Latin monospace must precede optional CJK and system fallbacks.
     push_font_fallback(
         &mut fallback_families,
@@ -975,10 +1022,10 @@ pub(crate) fn terminal_font_with_family_and_cjk(
     }
 
     Font {
-        family: SharedString::from(family.to_string()),
+        family: primary_family,
         features: terminal_font_features(font_ligatures),
         fallbacks: Some(FontFallbacks::from_fonts(fallback_families)),
-        weight: FontWeight::default(),
+        weight: FontWeight(font_weight.clamp(100.0, 900.0)),
         style: FontStyle::Normal,
     }
 }
@@ -1005,6 +1052,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_font_stack_uses_first_family_and_preserves_fallback_order() {
+        let font = terminal_font_with_family_and_cjk(
+            "\"Maple Mono\",\"Maple Mono NF CN\"",
+            None,
+            false,
+            400.0,
+        );
+        let fallbacks = font.fallbacks.expect("terminal font fallbacks");
+
+        assert_eq!(font.family.as_ref(), "Maple Mono");
+        assert_eq!(
+            fallbacks.fallback_list().first().map(String::as_str),
+            Some("Maple Mono NF CN")
+        );
+    }
+
+    #[test]
     fn host_overrides_replace_only_terminal_protocol_defaults() {
         let mut preferences = TerminalUiPreferences::default();
         let original_font_family = preferences.font_family.clone();
@@ -1013,6 +1077,7 @@ mod tests {
             terminal_encoding: Some(TerminalEncoding::Gb18030),
             backspace_sequence: Some(TerminalBackspaceSequence::ControlH),
             delete_sequence: Some(TerminalDeleteSequence::Delete),
+            terminal_timestamps_enabled: Some(true),
             ..TerminalUiPreferenceOverrides::default()
         }
         .apply_to(&mut preferences);
@@ -1023,6 +1088,7 @@ mod tests {
             TerminalBackspaceSequence::ControlH
         );
         assert_eq!(preferences.delete_sequence, TerminalDeleteSequence::Delete);
+        assert!(preferences.terminal_timestamps_enabled);
         assert_eq!(preferences.font_family, original_font_family);
     }
 }

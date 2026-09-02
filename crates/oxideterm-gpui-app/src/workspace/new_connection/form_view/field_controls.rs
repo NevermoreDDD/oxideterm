@@ -1,6 +1,6 @@
 use super::*;
 use gpui::{Animation, AnimationExt, App, CursorStyle};
-use oxideterm_connections::ConnectionTerminalSessionLogPolicy;
+use oxideterm_connections::{ConnectionTerminalSessionLogPolicy, SshChannelStrategy};
 use oxideterm_remote_desktop::RemoteDesktopRdpNetworkProfile;
 use oxideterm_settings_model::parse_rgb24_hex;
 
@@ -1556,40 +1556,21 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let target = WorkspaceImeTarget::NewConnection(field);
-        let anchors = self.text_input_anchors.clone();
-        text_input_anchor_probe(
-            target.anchor_id(),
-            input
-                .id(("connection-field", field as u32))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                        this.update_connection_form_state(cx, |state| {
-                            if let Some(form) = state.form.as_mut() {
-                                form.field_focused = true;
-                                form.focused_field = field;
-                                clear_connection_selection(form);
-                            }
-                        });
-                        this.close_new_connection_select(cx);
-                        this.ime_marked_text = None;
-                        this.show_active_input_caret(cx);
-                        window.focus(&this.focus_handle, cx);
-                        this.begin_ime_selection_from_mouse_down(target, event, window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .on_mouse_move(
-                    cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                        this.update_ime_selection_drag_from_mouse_move(event, window, cx);
-                    }),
-                ),
-            move |anchor, _window, _cx| {
-                // Text geometry is layout-only state. Writing the shared store
-                // directly avoids re-entering WorkspaceApp once per input on
-                // every frame of an inertial form scroll.
-                anchors.update(anchor);
+        self.text_input_with_workspace_ime(
+            target,
+            input.id(("connection-field", field as u32)),
+            move |this, cx| {
+                this.update_connection_form_state(cx, |state| {
+                    if let Some(form) = state.form.as_mut() {
+                        form.field_focused = true;
+                        form.focused_field = field;
+                        clear_connection_selection(form);
+                    }
+                });
+                this.close_new_connection_select(cx);
+                this.show_active_input_caret(cx);
             },
+            cx,
         )
         .into_any_element()
     }
@@ -3828,6 +3809,7 @@ impl WorkspaceApp {
         label_key: &'static str,
         hint_key: &'static str,
         checked: bool,
+        disabled: bool,
         toggle: fn(&mut NewConnectionForm),
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -3837,7 +3819,20 @@ impl WorkspaceApp {
             .flex()
             .items_center()
             .gap(px(self.tokens.spacing.two))
-            .child(self.render_connection_checkbox(self.i18n.t(label_key), checked, toggle, cx))
+            .child(if disabled {
+                checkbox_with(
+                    &self.tokens,
+                    self.i18n.t(label_key),
+                    checked,
+                    CheckboxOptions {
+                        disabled: true,
+                        ..CheckboxOptions::default()
+                    },
+                )
+                .into_any_element()
+            } else {
+                self.render_connection_checkbox(self.i18n.t(label_key), checked, toggle, cx)
+            })
             .child(self.render_connection_help_icon(trigger_id, tooltip_id, hint_key, cx))
             .into_any_element()
     }
@@ -3952,11 +3947,12 @@ impl WorkspaceApp {
     pub(super) fn render_connection_terminal_options(&self, cx: &mut Context<Self>) -> AnyElement {
         // Saved host controls are optional overrides so application defaults
         // continue to govern legacy records and temporary local terminals.
-        let Some((terminal, dedicated_new_terminal_connection)) =
+        let Some((terminal, dedicated_new_terminal_connection, ssh_channel_strategy)) =
             self.connection_form_state(cx).form.as_ref().map(|form| {
                 (
                     form.terminal.clone(),
                     form.dedicated_new_terminal_connection,
+                    form.ssh_channel_strategy,
                 )
             })
         else {
@@ -4163,7 +4159,9 @@ impl WorkspaceApp {
                 "new-connection-dedicated-terminal",
                 "ssh.form.dedicated_new_terminal_connection",
                 "ssh.form.dedicated_new_terminal_connection_hint",
-                dedicated_new_terminal_connection,
+                dedicated_new_terminal_connection
+                    || ssh_channel_strategy.requires_dedicated_consumers(),
+                ssh_channel_strategy.requires_dedicated_consumers(),
                 |form| {
                     form.dedicated_new_terminal_connection =
                         !form.dedicated_new_terminal_connection;
@@ -4179,11 +4177,12 @@ impl WorkspaceApp {
         legacy_ssh_compatibility: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some((connect_timeout_seconds_text, x11_forwarding)) =
+        let Some((connect_timeout_seconds_text, x11_forwarding, ssh_channel_strategy)) =
             self.connection_form_state(cx).form.as_ref().map(|form| {
                 (
                     form.connect_timeout_seconds_text.clone(),
                     form.x11_forwarding,
+                    form.ssh_channel_strategy,
                 )
             })
         else {
@@ -4272,11 +4271,32 @@ impl WorkspaceApp {
                 ),
             ))
             .child(self.render_connection_checkbox_with_help(
+                "new-connection-single-channel-help",
+                "new-connection-single-channel",
+                "ssh.form.single_channel_mode",
+                "ssh.form.single_channel_mode_hint",
+                ssh_channel_strategy.requires_dedicated_consumers(),
+                false,
+                |form| {
+                    form.ssh_channel_strategy =
+                        if form.ssh_channel_strategy.requires_dedicated_consumers() {
+                            SshChannelStrategy::Multiplexed
+                        } else {
+                            // Unsupported shared consumers are disabled at the policy boundary.
+                            form.agent_forwarding = false;
+                            form.x11_forwarding.enabled = false;
+                            SshChannelStrategy::DedicatedPerConsumer
+                        };
+                },
+                cx,
+            ))
+            .child(self.render_connection_checkbox_with_help(
                 "new-connection-agent-forwarding-help",
                 "new-connection-agent-forwarding",
                 "ssh.form.agent_forwarding",
                 "ssh.form.agent_forwarding_hint",
                 agent_forwarding,
+                ssh_channel_strategy.requires_dedicated_consumers(),
                 |form| form.agent_forwarding = !form.agent_forwarding,
                 cx,
             ))
@@ -4286,24 +4306,29 @@ impl WorkspaceApp {
                 "ssh.form.x11_forwarding",
                 "ssh.form.x11_forwarding_hint",
                 x11_forwarding.enabled,
+                ssh_channel_strategy.requires_dedicated_consumers(),
                 |form| form.x11_forwarding.enabled = !form.x11_forwarding.enabled,
                 cx,
             ))
-            .when(x11_forwarding.enabled, |content| {
-                content.child(form_field(
-                    &self.tokens,
-                    self.render_connection_label_with_help(
-                        "new-connection-x11-mode-help",
-                        "new-connection-x11-mode",
-                        "ssh.form.x11_mode",
-                        "ssh.form.x11_mode_hint",
-                        cx,
-                    ),
-                    segmented_tabs(&self.tokens).children(x11_mode_options),
-                ))
-            })
+            .when(
+                x11_forwarding.enabled && !ssh_channel_strategy.requires_dedicated_consumers(),
+                |content| {
+                    content.child(form_field(
+                        &self.tokens,
+                        self.render_connection_label_with_help(
+                            "new-connection-x11-mode-help",
+                            "new-connection-x11-mode",
+                            "ssh.form.x11_mode",
+                            "ssh.form.x11_mode_hint",
+                            cx,
+                        ),
+                        segmented_tabs(&self.tokens).children(x11_mode_options),
+                    ))
+                },
+            )
             .when(
                 x11_forwarding.enabled
+                    && !ssh_channel_strategy.requires_dedicated_consumers()
                     && x11_forwarding.mode == ConnectionX11ForwardingMode::Untrusted,
                 |content| {
                     content.child(form_field(
@@ -4325,6 +4350,7 @@ impl WorkspaceApp {
                 "ssh.form.legacy_ssh_compatibility",
                 "ssh.form.legacy_ssh_compatibility_hint",
                 legacy_ssh_compatibility,
+                false,
                 |form| form.legacy_ssh_compatibility = !form.legacy_ssh_compatibility,
                 cx,
             ))

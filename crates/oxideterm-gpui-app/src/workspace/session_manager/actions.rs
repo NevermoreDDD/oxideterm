@@ -2,11 +2,17 @@ use super::*;
 use crate::workspace::new_connection::{
     NewConnectionTransport, form_from_mosh_profile, form_from_remote_desktop_profile,
     form_from_serial_profile, form_from_telnet_profile, terminal_serial_flow_from_profile,
-    terminal_serial_parity_from_profile,
+    terminal_serial_parity_from_profile, terminal_serial_runtime_options_from_profile,
 };
 use oxideterm_remote_desktop::{
     RemoteDesktopConnectionProfile, RemoteDesktopEndpoint, RemoteDesktopSecret,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionManagerMoveInteraction {
+    BatchMenu,
+    DragDrop,
+}
 
 impl WorkspaceApp {
     pub(super) fn connection_count_for_group(&self, group: &str) -> usize {
@@ -465,20 +471,6 @@ impl WorkspaceApp {
         });
     }
 
-    pub(super) fn open_session_group_manager(&mut self, cx: &mut Context<Self>) {
-        self.session_manager.update(cx, |session_manager, cx| {
-            close_session_menu_state(session_manager);
-            session_manager.show_group_manager = true;
-            session_manager.group_editor = None;
-            session_manager.group_name_draft.clear();
-            session_manager.group_editor_error = None;
-            session_manager.group_manager_error = None;
-            session_manager.focused_input = None;
-            session_manager.focused_basic_dialog_footer_action = None;
-            cx.notify();
-        });
-    }
-
     pub(in crate::workspace) fn close_session_group_manager(&mut self, cx: &mut Context<Self>) {
         self.session_manager.update(cx, |session_manager, cx| {
             if session_manager.show_group_manager {
@@ -921,6 +913,7 @@ impl WorkspaceApp {
             stop_bits: profile.stop_bits,
             parity: terminal_serial_parity_from_profile(&profile.parity),
             flow_control: terminal_serial_flow_from_profile(&profile.flow_control),
+            runtime_options: terminal_serial_runtime_options_from_profile(&profile),
         };
         match self.create_serial_terminal_tab(config, profile.terminal.clone(), window, cx) {
             Ok(session_id) => {
@@ -1038,11 +1031,25 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_saved_remote_desktop_profile_for_connection(id, None, window, cx);
+    }
+
+    pub(in crate::workspace) fn open_saved_remote_desktop_profile_for_connection(
+        &mut self,
+        id: &str,
+        runtime_connection_attempt_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(saved) = self
             .connection_store
             .get_remote_desktop_profile(id)
             .cloned()
         else {
+            if let Some(connection_attempt_id) = runtime_connection_attempt_id.as_deref() {
+                self.standalone_connections
+                    .mark_attempt_error(connection_attempt_id);
+            }
             return;
         };
         let password = match self.connection_store.get_remote_desktop_credential(id) {
@@ -1050,6 +1057,10 @@ impl WorkspaceApp {
                 .map(SecretString::into_zeroizing)
                 .map(RemoteDesktopSecret::from),
             Err(error) => {
+                if let Some(connection_attempt_id) = runtime_connection_attempt_id.as_deref() {
+                    self.standalone_connections
+                        .mark_attempt_error(connection_attempt_id);
+                }
                 let status = format!(
                     "{}: {error}",
                     self.i18n
@@ -1064,6 +1075,10 @@ impl WorkspaceApp {
         if saved.protocol == oxideterm_remote_desktop::RemoteDesktopProtocol::Rdp
             && password.is_none()
         {
+            if let Some(connection_attempt_id) = runtime_connection_attempt_id.as_deref() {
+                self.standalone_connections
+                    .mark_attempt_error(connection_attempt_id);
+            }
             // Synced and imported assets intentionally omit device-local credentials.
             // Reopen the regular form so the user can authenticate on this device.
             self.open_new_connection_form(window, cx);
@@ -1098,10 +1113,11 @@ impl WorkspaceApp {
             read_only: saved.read_only,
             session_options: saved.session_options,
         };
-        self.open_remote_desktop_connection_with_gateway(
+        self.open_remote_desktop_connection_for_connection(
             profile,
             password,
             saved.ssh_gateway_connection_id,
+            runtime_connection_attempt_id,
             window,
             cx,
         );
@@ -1325,23 +1341,74 @@ impl WorkspaceApp {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
+        self.move_session_targets_to_group(
+            &targets,
+            group,
+            SessionManagerMoveInteraction::BatchMenu,
+            cx,
+        );
+    }
+
+    pub(super) fn move_dragged_sessions_to_group(
+        &mut self,
+        targets: &[SessionManagerSelectionTarget],
+        group: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_session_targets_to_group(
+            targets,
+            group,
+            SessionManagerMoveInteraction::DragDrop,
+            cx,
+        );
+    }
+
+    fn move_session_targets_to_group(
+        &mut self,
+        targets: &[SessionManagerSelectionTarget],
+        group: Option<&str>,
+        interaction: SessionManagerMoveInteraction,
+        cx: &mut Context<Self>,
+    ) {
         let mut connection_ids = Vec::new();
         let mut serial_profile_ids = Vec::new();
         let mut telnet_profile_ids = Vec::new();
         let mut mosh_profile_ids = Vec::new();
         let mut standalone_sftp_profile_ids = Vec::new();
         let mut remote_desktop_ids = Vec::new();
-        for target in targets {
+        for target in targets.iter().filter(|target| {
+            // Drop evaluation never writes metadata; only assets whose group changes reach storage.
+            self.session_target_group(target)
+                .is_some_and(|current_group| current_group != group)
+        }) {
             match target {
-                SessionManagerSelectionTarget::Connection(id) => connection_ids.push(id),
-                SessionManagerSelectionTarget::Serial(id) => serial_profile_ids.push(id),
-                SessionManagerSelectionTarget::Telnet(id) => telnet_profile_ids.push(id),
-                SessionManagerSelectionTarget::Mosh(id) => mosh_profile_ids.push(id),
+                SessionManagerSelectionTarget::Connection(id) => connection_ids.push(id.clone()),
+                SessionManagerSelectionTarget::Serial(id) => serial_profile_ids.push(id.clone()),
+                SessionManagerSelectionTarget::Telnet(id) => telnet_profile_ids.push(id.clone()),
+                SessionManagerSelectionTarget::Mosh(id) => mosh_profile_ids.push(id.clone()),
                 SessionManagerSelectionTarget::StandaloneSftp(id) => {
-                    standalone_sftp_profile_ids.push(id)
+                    standalone_sftp_profile_ids.push(id.clone())
                 }
-                SessionManagerSelectionTarget::RemoteDesktop(id) => remote_desktop_ids.push(id),
+                SessionManagerSelectionTarget::RemoteDesktop(id) => {
+                    remote_desktop_ids.push(id.clone())
+                }
             }
+        }
+        let has_group_changes = !connection_ids.is_empty()
+            || !serial_profile_ids.is_empty()
+            || !telnet_profile_ids.is_empty()
+            || !mosh_profile_ids.is_empty()
+            || !standalone_sftp_profile_ids.is_empty()
+            || !remote_desktop_ids.is_empty();
+        if !has_group_changes {
+            if interaction == SessionManagerMoveInteraction::BatchMenu {
+                self.session_manager.update(cx, |session_manager, cx| {
+                    session_manager.selected_items.clear();
+                    session_manager.show_batch_move = false;
+                    cx.notify();
+                });
+            }
+            return;
         }
         match self.connection_store.move_session_assets_to_group(
             &connection_ids,
@@ -1353,12 +1420,24 @@ impl WorkspaceApp {
             group,
         ) {
             Ok(count) => {
-                let status =
-                    connections_moved_label(&self.i18n, count, group_label(&self.i18n, group));
                 self.session_manager.update(cx, |session_manager, cx| {
-                    session_manager.status = Some(status);
-                    session_manager.selected_items.clear();
-                    session_manager.show_batch_move = false;
+                    match interaction {
+                        SessionManagerMoveInteraction::BatchMenu => {
+                            session_manager.status = Some(connections_moved_label(
+                                &self.i18n,
+                                count,
+                                group_label(&self.i18n, group),
+                            ));
+                            session_manager.selected_items.clear();
+                            session_manager.show_batch_move = false;
+                        }
+                        SessionManagerMoveInteraction::DragDrop => {
+                            // Keep moved rows selected and reveal their destination as direct feedback.
+                            if let Some(group) = group {
+                                expand_group_path(group, &mut session_manager.expanded_groups);
+                            }
+                        }
+                    }
                     cx.notify();
                 });
                 if count > 0 {
@@ -1371,6 +1450,43 @@ impl WorkspaceApp {
                     session_manager.set_status(Some(status), cx)
                 });
             }
+        }
+    }
+
+    fn session_target_group<'a>(
+        &'a self,
+        target: &SessionManagerSelectionTarget,
+    ) -> Option<Option<&'a str>> {
+        // Returning an outer Option distinguishes missing assets from the ungrouped root.
+        match target {
+            SessionManagerSelectionTarget::Connection(id) => self
+                .connection_store
+                .get(id)
+                .map(|connection| connection.group.as_deref()),
+            SessionManagerSelectionTarget::Serial(id) => self
+                .connection_store
+                .serial_profiles()
+                .iter()
+                .find(|profile| profile.id == id.as_str())
+                .map(|profile| profile.group.as_deref()),
+            SessionManagerSelectionTarget::Telnet(id) => self
+                .connection_store
+                .telnet_profiles()
+                .iter()
+                .find(|profile| profile.id == id.as_str())
+                .map(|profile| profile.group.as_deref()),
+            SessionManagerSelectionTarget::Mosh(id) => self
+                .connection_store
+                .get_mosh_profile(id)
+                .map(|profile| profile.group.as_deref()),
+            SessionManagerSelectionTarget::StandaloneSftp(id) => self
+                .connection_store
+                .get_standalone_sftp_profile(id)
+                .map(|profile| profile.group.as_deref()),
+            SessionManagerSelectionTarget::RemoteDesktop(id) => self
+                .connection_store
+                .get_remote_desktop_profile(id)
+                .map(|profile| profile.group.as_deref()),
         }
     }
 }

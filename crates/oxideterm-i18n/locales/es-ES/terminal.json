@@ -47,6 +47,16 @@
       "cancel": "Cancelar",
       "paste": "Pegar"
     },
+    "kitty_file_transmission": {
+      "title": "¿Permitir a Kitty acceder a archivos locales en esta sesión?",
+      "description": "La solicitud se bloqueó. Si la permites, OxideTerm crea un directorio privado para la sesión y copia su ruta. Reintenta la transferencia con un archivo tty-graphics-protocol directamente dentro de ese directorio.",
+      "cancel": "Denegar",
+      "allow": "Permitir en esta sesión",
+      "allowed_title": "Acceso de Kitty permitido en esta sesión",
+      "allowed_description": "El directorio privado de transferencia se copió al portapapeles. El permiso termina al cerrar esta sesión de terminal.",
+      "failed_title": "No se pudo activar el acceso de Kitty",
+      "failed_description": "OxideTerm no pudo crear el directorio privado de transferencia."
+    },
     "command_selection": {
       "actions": "Acciones de selección de comando",
       "copy": "Copiar",
@@ -81,7 +91,6 @@
       "port_missing": "Puerto ausente",
       "port_unknown": "Puerto desconocido",
       "refresh": "Actualizar",
-      "reconnect": "Reconectar",
       "send_break": "Break",
       "dtr": "DTR",
       "rts": "RTS",
@@ -92,7 +101,8 @@
       "flow_hardware": "RTS/CTS",
       "send_mode": "Enviar",
       "display_mode": "Vista",
-      "line_ending": "Final de línea",
+      "line_ending": "Final de línea TX",
+      "output_line_ending": "Final de línea RX",
       "local_echo": "Eco",
       "text_mode": "Texto",
       "hex_mode": "Hex",
@@ -100,8 +110,7 @@
       "line_ending_lf": "LF",
       "line_ending_crlf": "CRLF",
       "line_ending_cr": "CR",
-      "line_ending_none": "Sin cambios",
-      "reconnect_failed": "Error al reconectar serie"
+      "line_ending_none": "Sin cambios"
     },
     "recording": {
       "started": "Terminal recording started",
@@ -127,6 +136,8 @@
     },
     "session_log": {
       "title": "Registro de sesión",
+      "automatic_for_connection": "Guardar automáticamente los registros de sesión de esta conexión",
+      "profile_preferences_save_failed": "No se pudieron guardar los valores predeterminados del terminal de esta conexión",
       "started": "Registro de sesión iniciado",
       "start_failed": "No se pudo iniciar el registro de sesión",
       "write_failed": "El registro de sesión se detuvo porque no se pudo escribir el archivo",
@@ -244,6 +255,7 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
+      "delete_group_description": "Los comandos de «{{name}}» se moverán al grupo predeterminado antes de eliminarlo.",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",

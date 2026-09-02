@@ -25,7 +25,9 @@ use oxideterm_ssh::{
 use oxideterm_terminal_encoding::{
     EncodingMismatchDetector, TerminalEncoding, TerminalInputEncoder, TerminalOutputDecoder,
 };
-use oxideterm_terminal_graphics::{GraphicsIngress, GraphicsOptions, TerminalGraphicsSegment};
+use oxideterm_terminal_graphics::{
+    GraphicsIngress, GraphicsOptions, KittyFileTransmissionControl, TerminalGraphicsSegment,
+};
 use oxideterm_trzsz::{TrzszConsumer, TrzszConsumerEvent, TrzszTransfer, TrzszTransferPolicy};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
@@ -122,12 +124,11 @@ fn command_output_text_from_term<T: EventListener>(
 }
 
 pub(crate) fn clear_terminal_buffer<T: EventListener>(term: &mut Term<T>) {
-    // Tauri clear_buffer clears the host-owned scroll buffer rather than
-    // sending input to the shell. Native keeps the same boundary by mutating
-    // the emulator state directly: first blank the viewport, then discard saved
-    // scrollback so plugins cannot recover stale pre-clear output.
+    // Clear host-owned emulator state without sending control bytes to the process or device.
+    // New output must start at the cleared origin after viewport and scrollback removal.
     Handler::clear_screen(term, ansi::ClearMode::All);
     Handler::clear_screen(term, ansi::ClearMode::Saved);
+    Handler::goto(term, 0, 0);
 }
 
 fn apply_terminal_output_processor<'a>(
@@ -157,6 +158,7 @@ include!("session/serial.rs");
 mod tests {
     use alacritty_terminal::{
         event::{Event as AlacEvent, VoidListener},
+        index::{Column, Line, Point},
         vte::ansi::{Processor, StdSyncHandler},
     };
 
@@ -227,30 +229,22 @@ mod tests {
     }
 
     #[test]
-    fn ai_terminal_buffer_text_keeps_tauri_line_limit() {
+    fn clear_terminal_buffer_homes_cursor_for_followup_output() {
         let size = TerminalSize {
-            cols: 16,
-            rows: 5,
+            cols: 12,
+            rows: 4,
             cell_width: 8,
             cell_height: 17,
         };
-        let mut config = Config::default();
-        config.scrolling_history = 600;
-        let mut term = Term::new(config, &size, VoidListener);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
         let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut term, b"\x1b[3;5Hbefore");
 
-        // Tauri's registry getter caps AI terminal context to the last 500
-        // physical buffer rows to avoid copying unbounded scrollback.
-        for index in 0..520 {
-            let line = format!("row-{index:03}\r\n");
-            parser.advance(&mut term, line.as_bytes());
-        }
+        clear_terminal_buffer(&mut term);
 
-        let buffer = terminal_buffer_text_from_term(&term, size.cols);
-
-        assert_eq!(buffer.split('\n').count(), MAX_AI_TERMINAL_BUFFER_LINES);
-        assert!(!buffer.contains("row-000"));
-        assert!(buffer.contains("row-519"));
+        assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(0)));
+        parser.advance(&mut term, b"next");
+        assert_eq!(term.grid()[Line(0)][Column(0)].c, 'n');
     }
 
     #[test]

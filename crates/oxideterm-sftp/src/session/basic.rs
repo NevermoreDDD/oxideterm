@@ -19,10 +19,25 @@ impl SftpSession {
         Ok(Self {
             sftp: Arc::new(sftp),
             channel_factory,
+            _connection_owner: None,
+            single_channel_transport: false,
             session_id,
             home: cwd.clone(),
             cwd,
         })
+    }
+
+    pub fn with_connection_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+        // Short-lived dedicated transports must survive until the SFTP channel
+        // and every sibling channel opened by this session have been dropped.
+        self._connection_owner = Some(owner);
+        self
+    }
+
+    /// Prevents directory batching from opening sibling SSH channels.
+    pub fn with_single_channel_transport(mut self) -> Self {
+        self.single_channel_transport = true;
+        self
     }
 
     async fn open_sibling_sftp(&self) -> Result<RusshSftpSession, SftpError> {
@@ -134,6 +149,39 @@ impl SftpSession {
             .map(|filter| filter.sort)
             .unwrap_or_default();
         sort_entries(&mut entries, sort_order);
+        Ok(entries)
+    }
+
+    async fn list_tree_entries_resolved(
+        &self,
+        canonical_path: &str,
+    ) -> Result<Vec<RemoteTreeEntry>, SftpError> {
+        let read_dir = self
+            .sftp
+            .read_dir(canonical_path)
+            .await
+            .map_err(|error| self.map_sftp_error(error, canonical_path))?;
+        let mut entries = Vec::new();
+
+        for entry in read_dir {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            // Recursive operations need wire metadata only. Avoid canonicalizing,
+            // sorting, and resolving symlink targets on their latency-sensitive path.
+            validate_remote_entry_name(&name)?;
+            let metadata = entry.metadata();
+            let file_type = file_type_from_attrs(&metadata);
+            entries.push(RemoteTreeEntry {
+                path: join_remote_path(canonical_path, &name),
+                name,
+                file_type,
+                size: metadata.size.unwrap_or(0),
+                is_symlink: file_type == FileType::Symlink,
+            });
+        }
+
         Ok(entries)
     }
 

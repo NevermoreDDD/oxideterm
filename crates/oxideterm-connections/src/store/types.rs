@@ -209,6 +209,8 @@ pub struct ConnectionTerminalOptions {
     pub semantic_scheme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight_rule_set: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub timestamps_enabled: bool,
     #[serde(
         default,
         skip_serializing_if = "ConnectionTerminalSessionLogPolicy::is_inherit"
@@ -223,8 +225,17 @@ impl ConnectionTerminalOptions {
             && self.delete_sequence.is_none()
             && self.semantic_scheme.is_none()
             && self.highlight_rule_set.is_none()
+            && !self.timestamps_enabled
             && self.session_log_policy == ConnectionTerminalSessionLogPolicy::Inherit
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionTerminalProfileKind {
+    Ssh,
+    Serial,
+    Telnet,
+    Mosh,
 }
 
 pub const DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS: u32 = 20 * 60;
@@ -352,6 +363,9 @@ pub struct ConnectionOptions {
     /// Some SSH servers require a new authentication exchange for every terminal.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dedicated_new_terminal_connection: bool,
+    /// Single-channel appliances require every concurrent consumer to use its own transport.
+    #[serde(default, skip_serializing_if = "SshChannelStrategy::is_default")]
+    pub ssh_channel_strategy: SshChannelStrategy,
     /// X11 stores only portable policy; local display and cookies are resolved per shell.
     #[serde(
         default,
@@ -367,6 +381,24 @@ pub struct ConnectionOptions {
         skip_serializing_if = "ConnectionTerminalOptions::inherits_application_defaults"
     )]
     pub terminal: ConnectionTerminalOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshChannelStrategy {
+    #[default]
+    Multiplexed,
+    DedicatedPerConsumer,
+}
+
+impl SshChannelStrategy {
+    pub fn is_default(value: &Self) -> bool {
+        matches!(value, Self::Multiplexed)
+    }
+
+    pub fn requires_dedicated_consumers(self) -> bool {
+        matches!(self, Self::DedicatedPerConsumer)
+    }
 }
 
 impl ConnectionOptions {
@@ -823,6 +855,17 @@ pub enum SerialFlowControl {
     Hardware,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerialLineEnding {
+    Lf,
+    #[serde(rename = "crlf")]
+    CrLf,
+    Cr,
+    #[default]
+    None,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SerialProfile {
     pub id: String,
@@ -844,6 +887,10 @@ pub struct SerialProfile {
     pub stop_bits: u8,
     pub parity: SerialParity,
     pub flow_control: SerialFlowControl,
+    #[serde(default)]
+    pub input_line_ending: SerialLineEnding,
+    #[serde(default)]
+    pub output_line_ending: SerialLineEnding,
     #[serde(
         default,
         skip_serializing_if = "ConnectionTerminalOptions::inherits_application_defaults"
@@ -872,6 +919,8 @@ pub struct SaveSerialProfileRequest {
     pub stop_bits: Option<u8>,
     pub parity: Option<SerialParity>,
     pub flow_control: Option<SerialFlowControl>,
+    pub input_line_ending: Option<SerialLineEnding>,
+    pub output_line_ending: Option<SerialLineEnding>,
     pub terminal: ConnectionTerminalOptions,
     pub connect_on_open: Option<bool>,
 }
@@ -1413,6 +1462,8 @@ impl SerialProfile {
             stop_bits: 1,
             parity: SerialParity::None,
             flow_control: SerialFlowControl::None,
+            input_line_ending: SerialLineEnding::None,
+            output_line_ending: SerialLineEnding::None,
             terminal: ConnectionTerminalOptions::default(),
             connect_on_open: false,
             created_at: now,
@@ -1722,6 +1773,7 @@ pub struct SaveConnectionRequest {
     pub legacy_ssh_compatibility: bool,
     pub ssh_algorithms: SshAlgorithmPreferences,
     pub dedicated_new_terminal_connection: bool,
+    pub ssh_channel_strategy: SshChannelStrategy,
     pub x11_forwarding: ConnectionX11ForwardingOptions,
     pub post_connect_command: Option<String>,
     pub terminal: ConnectionTerminalOptions,

@@ -3,6 +3,12 @@
     "name": "OxideTerm",
     "shellLauncher": "Inicializador de shell"
   },
+  "window_controls": {
+    "minimize": "Minimizar",
+    "maximize": "Maximizar",
+    "restore": "Restaurar",
+    "close": "Fechar"
+  },
   "language": {
     "english": "English",
     "simplified_chinese": "简体中文",
@@ -139,7 +145,8 @@
       "cancel": "Cancelar",
       "confirm": "Confirmar",
       "do_not_ask_again": "Não perguntar novamente",
-      "delete": "Excluir"
+      "delete": "Excluir",
+      "retry": "Tentar novamente"
     },
     "cancel": "Cancelar",
     "delete": "Excluir",
@@ -978,8 +985,6 @@
     "security_desc": "Armazenamento em chaveiro, criptografia ChaCha20-Poly1305, SSH em Rust puro.",
     "local_file_manager": "Gerenciador de arquivos local",
     "local_file_manager_desc": "Navegador de arquivos com pré-visualização rápida, favoritos e arrastar e soltar.",
-    "launchpad": "Launchpad macOS",
-    "launchpad_desc": "Lançador nativo de apps — pesquise e abra apps de /Applications instantaneamente.",
     "wsl_graphics": "Gráficos WSL",
     "wsl_graphics_desc": "Execute apps Linux gráficos no Windows via VNC integrado — modo desktop ou app individual.",
     "plugin_system": "Sistema de plugins",
@@ -1196,7 +1201,6 @@
     "vnc_preview_title": "Prévia VNC",
     "provider_missing": "O provedor de área de trabalho remota está indisponível.",
     "session_missing": "A sessão de área de trabalho remota está indisponível.",
-    "force_recover": "Recuperar",
     "reconnect": "Reconectar",
     "resize_fixed": "Tamanho fixado pelo servidor",
     "resize_unknown": "Redimensionamento não detectado",

@@ -47,6 +47,9 @@ class WindowsInstallerScriptTests(unittest.TestCase):
         self.assertIn("WriteUninstaller", script)
         self.assertIn("WriteRegStr HKCU", script)
         self.assertIn('VIProductVersion "1.2.0.0"', script)
+        self.assertIn('"FileVersion" "1.2.0-gpui-preview.2"', script)
+        self.assertIn('"FileDescription" "OxideTerm GPUI Preview Installer"', script)
+        self.assertIn('"LegalCopyright" "Copyright (C) 2026 AnalyseDeCircuit"', script)
         self.assertIn('"ProductVersion" "1.2.0-gpui-preview.2"', script)
         self.assertIn("normal_install:", script)
         self.assertIn("!insertmacro MUI_PAGE_COMPONENTS", script)
@@ -446,6 +449,54 @@ class ReleaseDocumentTests(unittest.TestCase):
             self.assertIn("tools", manifest["managedEntries"])
             self.assertNotIn("data", manifest["managedEntries"])
             self.assertNotIn("portable.json", manifest["managedEntries"])
+
+
+class WindowsX11RuntimeTests(unittest.TestCase):
+    def test_runtime_copy_keeps_required_files_and_drops_unneeded_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            extracted = root / "extracted"
+            destination = root / "runtime"
+            extracted.mkdir()
+            for relative in package_native.WINDOWS_X11_REQUIRED_FILES:
+                path = extracted / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"runtime")
+            for name in package_native.WINDOWS_X11_EXCLUDED_ENTRIES:
+                path = extracted / name
+                if Path(name).suffix:
+                    path.write_bytes(b"excluded")
+                else:
+                    path.mkdir()
+            license_path = root / "COPYING"
+            license_path.write_text("GPL-3.0-or-later\n", encoding="utf-8")
+            manifest = {
+                "version": "21.1.16.1",
+                "releaseAsset": {"sha256": "a" * 64},
+                "source": {"commit": "pinned"},
+            }
+
+            package_native.copy_extracted_windows_x11_runtime(
+                extracted,
+                destination,
+                manifest,
+                license_path,
+            )
+
+            for relative in package_native.WINDOWS_X11_REQUIRED_FILES:
+                self.assertTrue((destination / relative).is_file())
+            for name in package_native.WINDOWS_X11_EXCLUDED_ENTRIES:
+                self.assertFalse((destination / name).exists())
+            self.assertEqual(
+                (destination / "COPYING").read_text(encoding="utf-8"),
+                "GPL-3.0-or-later\n",
+            )
+            provenance = package_native.json.loads(
+                (
+                    destination / package_native.WINDOWS_X11_PROVENANCE_FILENAME
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(provenance, manifest)
 
 
 class ReleaseVersionTests(unittest.TestCase):

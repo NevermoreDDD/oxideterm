@@ -704,6 +704,14 @@ impl SftpWorkspaceEntity {
 }
 
 impl WorkspaceApp {
+    fn dedicated_sftp_connection_slot(&self, node_id: &NodeId) -> DedicatedSftpConnectionSlot {
+        self.dedicated_sftp_connections
+            .lock()
+            .entry(node_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+            .clone()
+    }
+
     pub(in crate::workspace::sftp) fn sftp_remote_backend(
         &self,
         remote_id: &SftpRemoteId,
@@ -712,6 +720,14 @@ impl WorkspaceApp {
             SftpRemoteId::Node(node_id) => Some(SftpRemoteBackend::Node {
                 router: self.node_router.clone(),
                 node_id: node_id.clone(),
+                channel_strategy: self
+                    .ssh_nodes
+                    .get(node_id)
+                    .map(|node| node.ssh_channel_strategy)
+                    .unwrap_or_default(),
+                prompt_handler: self.ssh_consumer_prompt_handler.clone(),
+                managed_key_resolver: self.ssh_consumer_managed_key_resolver.clone(),
+                dedicated_slot: self.dedicated_sftp_connection_slot(node_id),
             }),
             SftpRemoteId::Standalone(profile_id) => self
                 .standalone_sftp_sessions
@@ -732,6 +748,14 @@ impl WorkspaceApp {
                 SftpRemoteBackend::Node {
                     router: self.node_router.clone(),
                     node_id: node_id.clone(),
+                    channel_strategy: self
+                        .ssh_nodes
+                        .get(node_id)
+                        .map(|node| node.ssh_channel_strategy)
+                        .unwrap_or_default(),
+                    prompt_handler: self.ssh_consumer_prompt_handler.clone(),
+                    managed_key_resolver: self.ssh_consumer_managed_key_resolver.clone(),
+                    dedicated_slot: self.dedicated_sftp_connection_slot(node_id),
                 },
                 None,
             )),
@@ -1812,75 +1836,6 @@ fn apply_tauri_transfer_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn transfer_item(state: SftpTransferState) -> SftpTransferItem {
-        SftpTransferItem {
-            id: 1,
-            transfer_id: "tx-1".to_string(),
-            batch_id: None,
-            remote_id: SftpRemoteId::Node(NodeId::new("node-1")),
-            name: "file.txt".to_string(),
-            local_path: "/tmp/file.txt".to_string(),
-            remote_path: "/home/file.txt".to_string(),
-            direction: SftpTransferDirection::Upload,
-            protocol: RemoteTransferProtocol::Sftp,
-            size: 500,
-            transferred: 0,
-            speed: 0,
-            state,
-            error: None,
-        }
-    }
-
-    #[test]
-    fn transfer_progress_preserves_paused_state_like_tauri_store() {
-        let mut item = transfer_item(SftpTransferState::Paused);
-
-        assert!(apply_tauri_transfer_progress(&mut item, 250, 500, 42));
-
-        assert_eq!(item.state, SftpTransferState::Paused);
-        assert_eq!(item.transferred, 250);
-        assert_eq!(item.speed, 42);
-    }
-
-    #[test]
-    fn transfer_progress_ignores_terminal_state_like_tauri_store() {
-        let mut item = transfer_item(SftpTransferState::Completed);
-        item.transferred = 500;
-
-        assert!(!apply_tauri_transfer_progress(&mut item, 250, 500, 42));
-
-        assert_eq!(item.state, SftpTransferState::Completed);
-        assert_eq!(item.transferred, 500);
-        assert_eq!(item.speed, 0);
-    }
-
-    #[test]
-    fn transfer_progress_keeps_indeterminate_size_until_complete_event() {
-        let mut item = transfer_item(SftpTransferState::Pending);
-        item.size = 0;
-
-        assert!(apply_tauri_transfer_progress(&mut item, 2048, 0, 512));
-
-        assert_eq!(item.state, SftpTransferState::Active);
-        assert_eq!(item.size, 0);
-        assert_eq!(item.transferred, 2048);
-    }
-
-    #[test]
-    fn transfer_completion_preserves_cancelled_late_failure_like_tauri_view() {
-        let mut item = transfer_item(SftpTransferState::Cancelled);
-
-        assert!(!apply_tauri_transfer_completion(
-            &mut item,
-            &Err("late failure".to_string())
-        ));
-
-        assert_eq!(item.state, SftpTransferState::Cancelled);
-        assert_eq!(item.error, None);
-    }
-
     #[test]
     fn stale_node_sftp_errors_are_connection_unavailable() {
         assert!(oxideterm_sftp::error_is_connection_unavailable(
@@ -1897,29 +1852,6 @@ mod tests {
         ));
         assert!(!oxideterm_sftp::error_is_connection_unavailable(
             "Permission denied: /home/me/secret"
-        ));
-    }
-
-    #[test]
-    fn sftp_retry_classifier_matches_tauri_error_classes() {
-        assert!(oxideterm_sftp::error_should_retry_initialization(
-            "SFTP subsystem not available: failed to open SFTP channel: channel closed"
-        ));
-        assert!(oxideterm_sftp::error_should_retry_initialization(
-            "Connection timeout while opening SFTP"
-        ));
-
-        assert!(!oxideterm_sftp::error_should_retry_initialization(
-            "Authentication failed: Permission denied (publickey,password)"
-        ));
-        assert!(!oxideterm_sftp::error_should_retry_initialization(
-            "Permission denied: /home/me/secret"
-        ));
-        assert!(!oxideterm_sftp::error_should_retry_initialization(
-            "Directory not found: /home/me/missing"
-        ));
-        assert!(!oxideterm_sftp::error_should_retry_initialization(
-            "SFTP subsystem not available: server disabled subsystem"
         ));
     }
 

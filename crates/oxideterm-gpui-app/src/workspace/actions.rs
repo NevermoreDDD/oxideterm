@@ -1,9 +1,7 @@
 use super::ime::WorkspaceImeTarget;
 use super::tabs::TabCloseConfirmKeyAction;
 use super::*;
-use oxideterm_gpui_ui::text_input::{
-    text_caret, text_input_anchor_probe, text_input_value_segments_with_color,
-};
+use oxideterm_gpui_ui::text_input::{text_caret, text_input_value_segments_with_color};
 use oxideterm_quick_commands::{
     PreparedQuickCommand, QuickCommand, QuickCommandContextValues, QuickCommandRisk,
     QuickCommandTargetContext, QuickCommandTargetProtocol,
@@ -20,6 +18,23 @@ const TERMINAL_FONT_SIZE_HUD_DURATION: Duration = Duration::from_millis(1200);
 fn adjusted_terminal_font_size(current: i64, delta: i64) -> Option<i64> {
     let next = (current + delta).clamp(TERMINAL_FONT_SIZE_MIN, TERMINAL_FONT_SIZE_MAX);
     (next != current).then_some(next)
+}
+
+fn connection_terminal_profile_kind(
+    kind: oxideterm_terminal_triggers::SavedConnectionKind,
+) -> ConnectionTerminalProfileKind {
+    match kind {
+        oxideterm_terminal_triggers::SavedConnectionKind::Ssh => ConnectionTerminalProfileKind::Ssh,
+        oxideterm_terminal_triggers::SavedConnectionKind::Serial => {
+            ConnectionTerminalProfileKind::Serial
+        }
+        oxideterm_terminal_triggers::SavedConnectionKind::Telnet => {
+            ConnectionTerminalProfileKind::Telnet
+        }
+        oxideterm_terminal_triggers::SavedConnectionKind::Mosh => {
+            ConnectionTerminalProfileKind::Mosh
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -821,15 +836,6 @@ impl WorkspaceApp {
                 .is_some_and(|tab| tab.kind == TabKind::Sftp)
         {
             let _ = self.handle_sftp_key(event, window, cx);
-            return;
-        }
-
-        if self
-            .active_tab(cx)
-            .is_some_and(|tab| tab.kind == TabKind::Launcher)
-            && self.launcher.read(cx).focused_input().is_some()
-        {
-            let _ = self.handle_launcher_key(event, cx);
             return;
         }
 
@@ -1977,6 +1983,54 @@ impl WorkspaceApp {
             .is_some_and(|pane| pane.read(cx).session_log_available())
     }
 
+    pub(super) fn active_terminal_session_log_automatic_default(&self, cx: &App) -> Option<bool> {
+        let saved = self.active_terminal_saved_connection(cx)?;
+        let terminal = self.connection_store.terminal_options_for_profile(
+            connection_terminal_profile_kind(saved.kind),
+            &saved.id,
+        )?;
+        Some(match terminal.session_log_policy {
+            ConnectionTerminalSessionLogPolicy::Automatic => true,
+            ConnectionTerminalSessionLogPolicy::Inherit => {
+                self.settings_store
+                    .settings()
+                    .terminal
+                    .session_log
+                    .automatic
+            }
+            ConnectionTerminalSessionLogPolicy::Manual
+            | ConnectionTerminalSessionLogPolicy::Disabled => false,
+        })
+    }
+
+    pub(super) fn toggle_active_terminal_session_log_automatic_default(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss_terminal_recording_menu();
+        let Some(saved) = self.active_terminal_saved_connection(cx) else {
+            return;
+        };
+        let Some(current) = self.active_terminal_session_log_automatic_default(cx) else {
+            return;
+        };
+        let policy = if current {
+            ConnectionTerminalSessionLogPolicy::Manual
+        } else {
+            ConnectionTerminalSessionLogPolicy::Automatic
+        };
+        match self.connection_store.set_terminal_session_log_policy(
+            connection_terminal_profile_kind(saved.kind),
+            &saved.id,
+            policy,
+        ) {
+            Ok(true) => self.queue_cloud_sync_dirty_refresh(cx),
+            Ok(false) => {}
+            Err(_) => self.push_terminal_profile_preferences_save_failed(cx),
+        }
+        cx.notify();
+    }
+
     pub(super) fn start_active_terminal_session_log(&mut self, cx: &mut Context<Self>) {
         self.dismiss_terminal_recording_menu();
         let Some(pane) = self.active_pane(cx) else {
@@ -2134,10 +2188,54 @@ impl WorkspaceApp {
     }
 
     pub(super) fn toggle_active_terminal_timestamps(&mut self, cx: &mut Context<Self>) {
-        if let Some(pane) = self.active_pane(cx) {
-            let _ = pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+        let Some(pane) = self.active_pane(cx) else {
+            return;
+        };
+        let enabled = !pane.read(cx).terminal_timestamps_enabled();
+        let Some(saved) = self.active_terminal_saved_connection(cx) else {
+            pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+            return;
+        };
+        match self.connection_store.set_terminal_timestamps_enabled(
+            connection_terminal_profile_kind(saved.kind),
+            &saved.id,
+            enabled,
+        ) {
+            Ok(true) => {
+                pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+                self.queue_cloud_sync_dirty_refresh(cx);
+            }
+            Ok(false) => {
+                pane.update(cx, |pane, cx| pane.toggle_terminal_timestamps(cx));
+            }
+            Err(_) => self.push_terminal_profile_preferences_save_failed(cx),
         }
         cx.notify();
+    }
+
+    fn active_terminal_saved_connection(
+        &self,
+        cx: &App,
+    ) -> Option<oxideterm_terminal_triggers::SavedConnectionRef> {
+        let session_id = self.active_terminal_session_id(cx)?;
+        self.terminal_saved_connection_refs
+            .get(&session_id)
+            .cloned()
+    }
+
+    fn push_terminal_profile_preferences_save_failed(&mut self, cx: &mut Context<Self>) {
+        self.push_workspace_notice(
+            TerminalNotice {
+                title: self
+                    .i18n
+                    .t("terminal.session_log.profile_preferences_save_failed"),
+                description: None,
+                status_text: None,
+                progress: None,
+                variant: TerminalNoticeVariant::Error,
+            },
+            cx,
+        );
     }
 
     pub(super) fn start_active_terminal_recording(&mut self, cx: &mut Context<Self>) {
@@ -2592,7 +2690,6 @@ impl WorkspaceApp {
 
         let theme = self.tokens.ui;
         let target = WorkspaceImeTarget::Search;
-        let workspace = cx.entity();
         let has_query = !self.search.query.is_empty();
         let marked_text = self.marked_text_for_target(target, cx);
         let selected_range = self.ime_selected_range_for_target(target, cx);
@@ -2653,78 +2750,63 @@ impl WorkspaceApp {
                         15.0,
                         rgb(theme.text_muted),
                     ))
-                    .child(text_input_anchor_probe(
-                        target.anchor_id(),
-                        div()
-                            .h(px(28.0))
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .items_center()
-                            .overflow_hidden()
-                            .rounded(px(self.tokens.radii.sm))
-                            .px(px(2.0))
-                            .cursor_text()
-                            .text_color(if has_query {
-                                rgb(theme.text)
-                            } else {
-                                rgb(theme.text_muted)
-                            })
-                            .when(!has_query && marked_text.is_none(), |input| {
-                                input.child(text_caret(&self.tokens, self.input_caret.visible()))
-                            })
-                            .child(if has_query {
-                                text_input_value_segments_with_color(
-                                    &self.tokens,
-                                    &query,
-                                    false,
-                                    selection_range,
-                                    caret_offset,
-                                    self.input_caret.visible(),
-                                    Some(theme.text),
-                                )
-                                .into_any_element()
-                            } else {
-                                div().child(query).into_any_element()
-                            })
-                            .when_some(marked_text, |input, marked| {
-                                input.child(
-                                    div()
-                                        .underline()
-                                        .text_color(rgb(theme.text))
-                                        .child(marked.to_string()),
-                                )
-                            })
-                            .when(
-                                has_query && !shows_selection && !shows_positioned_caret,
-                                |input| {
+                    .child(
+                        self.text_input_with_workspace_ime(
+                            target,
+                            div()
+                                .h(px(28.0))
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex()
+                                .items_center()
+                                .overflow_hidden()
+                                .rounded(px(self.tokens.radii.sm))
+                                .px(px(2.0))
+                                .cursor_text()
+                                .text_color(if has_query {
+                                    rgb(theme.text)
+                                } else {
+                                    rgb(theme.text_muted)
+                                })
+                                .when(!has_query && marked_text.is_none(), |input| {
                                     input
                                         .child(text_caret(&self.tokens, self.input_caret.visible()))
-                                },
-                            )
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event, window, cx| {
-                                    this.ime_marked_text = None;
-                                    window.focus(&this.focus_handle, cx);
-                                    this.begin_ime_selection_from_mouse_down(
-                                        WorkspaceImeTarget::Search,
-                                        event,
-                                        window,
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .on_mouse_move(cx.listener(|this, event, window, cx| {
-                                this.update_ime_selection_drag_from_mouse_move(event, window, cx);
-                            })),
-                        move |anchor, _window, cx| {
-                            let _ = workspace.update(cx, |this, cx| {
-                                this.update_text_input_anchor(anchor, cx);
-                            });
-                        },
-                    ))
+                                })
+                                .child(if has_query {
+                                    text_input_value_segments_with_color(
+                                        &self.tokens,
+                                        &query,
+                                        false,
+                                        selection_range,
+                                        caret_offset,
+                                        self.input_caret.visible(),
+                                        Some(theme.text),
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    div().child(query).into_any_element()
+                                })
+                                .when_some(marked_text, |input, marked| {
+                                    input.child(
+                                        div()
+                                            .underline()
+                                            .text_color(rgb(theme.text))
+                                            .child(marked.to_string()),
+                                    )
+                                })
+                                .when(
+                                    has_query && !shows_selection && !shows_positioned_caret,
+                                    |input| {
+                                        input.child(text_caret(
+                                            &self.tokens,
+                                            self.input_caret.visible(),
+                                        ))
+                                    },
+                                ),
+                            |_this, _cx| {},
+                            cx,
+                        ),
+                    )
                     .when(has_query, |row| {
                         row.child(
                             div()

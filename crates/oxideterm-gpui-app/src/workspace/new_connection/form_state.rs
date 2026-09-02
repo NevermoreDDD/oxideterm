@@ -4,9 +4,9 @@ use oxideterm_connections::{
     AuthType, ConnectionInfo, ConnectionTerminalOptions, ConnectionX11ForwardingOptions,
     DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS, MoshIpFamily, MoshPredictionMode, MoshProfile,
     MoshUdpPortSelection, RemoteDesktopProfile, SavedAuth, SavedConnection, SavedProxyHop,
-    SavedUpstreamProxyProtocol, SerialProfile, SshAlgorithmPreferences, StandaloneSftpTransferMode,
-    TelnetProfile, TransportUsernameTransition, transport_port_replacement,
-    transport_username_transition,
+    SavedUpstreamProxyProtocol, SerialProfile, SshAlgorithmPreferences, SshChannelStrategy,
+    StandaloneSftpTransferMode, TelnetProfile, TransportUsernameTransition,
+    transport_port_replacement, transport_username_transition,
 };
 pub(in crate::workspace) use oxideterm_connections::{
     ConnectionTransport as NewConnectionTransport, RDP_DEFAULT_PORT_TEXT, SSH_DEFAULT_PORT_TEXT,
@@ -851,6 +851,7 @@ pub(in crate::workspace) struct NewConnectionForm {
     /// Preserves transient invalid input while the numeric value fails closed at zero.
     pub(in crate::workspace) connect_timeout_seconds_text: String,
     pub(in crate::workspace) dedicated_new_terminal_connection: bool,
+    pub(in crate::workspace) ssh_channel_strategy: SshChannelStrategy,
     pub(in crate::workspace) x11_forwarding: ConnectionX11ForwardingOptions,
     pub(in crate::workspace) terminal: ConnectionTerminalOptions,
     pub(in crate::workspace) agent_available: Option<bool>,
@@ -1022,6 +1023,7 @@ impl fmt::Debug for NewConnectionForm {
                 "dedicated_new_terminal_connection",
                 &self.dedicated_new_terminal_connection,
             )
+            .field("ssh_channel_strategy", &self.ssh_channel_strategy)
             .field("x11_forwarding", &self.x11_forwarding)
             .field("terminal", &self.terminal)
             .field("agent_available", &self.agent_available)
@@ -1137,6 +1139,7 @@ impl Default for NewConnectionForm {
             connect_timeout_seconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
             connect_timeout_seconds_text: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS.to_string(),
             dedicated_new_terminal_connection: false,
+            ssh_channel_strategy: SshChannelStrategy::default(),
             x11_forwarding: ConnectionX11ForwardingOptions::default(),
             terminal: ConnectionTerminalOptions::default(),
             agent_available: None,
@@ -1325,6 +1328,27 @@ pub(in crate::workspace) fn terminal_serial_flow_from_profile(
         oxideterm_connections::SerialFlowControl::Hardware => {
             oxideterm_terminal::SerialFlowControl::Hardware
         }
+    }
+}
+
+pub(in crate::workspace) fn terminal_serial_runtime_options_from_profile(
+    profile: &SerialProfile,
+) -> oxideterm_terminal::SerialRuntimeOptions {
+    oxideterm_terminal::SerialRuntimeOptions {
+        line_ending: terminal_serial_line_ending_from_profile(profile.input_line_ending),
+        output_line_ending: terminal_serial_line_ending_from_profile(profile.output_line_ending),
+        ..Default::default()
+    }
+}
+
+fn terminal_serial_line_ending_from_profile(
+    line_ending: oxideterm_connections::SerialLineEnding,
+) -> oxideterm_terminal::SerialLineEnding {
+    match line_ending {
+        oxideterm_connections::SerialLineEnding::Lf => oxideterm_terminal::SerialLineEnding::Lf,
+        oxideterm_connections::SerialLineEnding::CrLf => oxideterm_terminal::SerialLineEnding::CrLf,
+        oxideterm_connections::SerialLineEnding::Cr => oxideterm_terminal::SerialLineEnding::Cr,
+        oxideterm_connections::SerialLineEnding::None => oxideterm_terminal::SerialLineEnding::None,
     }
 }
 
@@ -1554,53 +1578,53 @@ pub(in crate::workspace) fn next_connection_field(
     let mut fields: Vec<NewConnectionField> = match auth_tab {
         SshAuthTab::Password => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::Password,
             NewConnectionField::PostConnectCommand,
         ],
         SshAuthTab::DefaultKey => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::Passphrase,
             NewConnectionField::PostConnectCommand,
         ],
         SshAuthTab::SshKey => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::KeyPath,
             NewConnectionField::Passphrase,
             NewConnectionField::PostConnectCommand,
         ],
         SshAuthTab::ManagedKey => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::ManagedKeyId,
             NewConnectionField::Passphrase,
             NewConnectionField::PostConnectCommand,
         ],
         SshAuthTab::Certificate => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::KeyPath,
             NewConnectionField::CertPath,
             NewConnectionField::Passphrase,
@@ -1608,21 +1632,21 @@ pub(in crate::workspace) fn next_connection_field(
         ],
         SshAuthTab::Agent => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::IdentityAgent,
             NewConnectionField::PostConnectCommand,
         ],
         SshAuthTab::TwoFactor => vec![
             NewConnectionField::Name,
-            NewConnectionField::Group,
-            NewConnectionField::Notes,
             NewConnectionField::Host,
             NewConnectionField::Port,
             NewConnectionField::Username,
+            NewConnectionField::Group,
+            NewConnectionField::Notes,
             NewConnectionField::PostConnectCommand,
         ],
     };

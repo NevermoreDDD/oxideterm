@@ -47,6 +47,16 @@
       "cancel": "Annuler",
       "paste": "Coller"
     },
+    "kitty_file_transmission": {
+      "title": "Autoriser Kitty à accéder aux fichiers locaux pour cette session ?",
+      "description": "La demande a été bloquée. Si vous l’autorisez, OxideTerm crée un dossier privé pour la session et copie son chemin. Relancez le transfert avec un fichier tty-graphics-protocol placé directement dans ce dossier.",
+      "cancel": "Refuser",
+      "allow": "Autoriser pour cette session",
+      "allowed_title": "Accès de Kitty autorisé pour cette session",
+      "allowed_description": "Le dossier privé de transfert a été copié dans le presse-papiers. L’autorisation prend fin à la fermeture de cette session de terminal.",
+      "failed_title": "Impossible d’activer l’accès de Kitty",
+      "failed_description": "OxideTerm n’a pas pu créer le dossier privé de transfert."
+    },
     "command_selection": {
       "actions": "Actions de sélection de commande",
       "copy": "Copier",
@@ -81,7 +91,6 @@
       "port_missing": "Port absent",
       "port_unknown": "Port inconnu",
       "refresh": "Actualiser",
-      "reconnect": "Reconnecter",
       "send_break": "Break",
       "dtr": "DTR",
       "rts": "RTS",
@@ -92,7 +101,8 @@
       "flow_hardware": "RTS/CTS",
       "send_mode": "Envoi",
       "display_mode": "Affichage",
-      "line_ending": "Fin de ligne",
+      "line_ending": "Fin de ligne TX",
+      "output_line_ending": "Fin de ligne RX",
       "local_echo": "Écho",
       "text_mode": "Texte",
       "hex_mode": "Hex",
@@ -100,8 +110,7 @@
       "line_ending_lf": "LF",
       "line_ending_crlf": "CRLF",
       "line_ending_cr": "CR",
-      "line_ending_none": "Brut",
-      "reconnect_failed": "Échec de la reconnexion série"
+      "line_ending_none": "Brut"
     },
     "recording": {
       "started": "Terminal recording started",
@@ -127,6 +136,8 @@
     },
     "session_log": {
       "title": "Journal de session",
+      "automatic_for_connection": "Enregistrer automatiquement les journaux de session pour cette connexion",
+      "profile_preferences_save_failed": "Impossible d’enregistrer les paramètres de terminal par défaut de cette connexion",
       "started": "Journal de session démarré",
       "start_failed": "Impossible de démarrer le journal de session",
       "write_failed": "Le journal de session a été arrêté car le fichier ne pouvait pas être écrit",
@@ -244,6 +255,7 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
+      "delete_group_description": "Les commandes de « {{name}} » seront déplacées vers le groupe par défaut avant sa suppression.",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",

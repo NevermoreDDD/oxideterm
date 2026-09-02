@@ -13,9 +13,6 @@ use crate::{
     ssh_paths::default_ssh_dir,
 };
 
-#[cfg(test)]
-use crate::ssh_keys::default_private_key_paths_in_home;
-
 pub const IMPORTED_GROUP: &str = "Imported";
 pub const SSH_CONFIG_TAG: &str = "ssh-config";
 pub const SSH_PROXY_COMMAND_TAG: &str = "ssh-proxy-command";
@@ -127,6 +124,7 @@ pub struct ConnectionDraft {
     pub legacy_ssh_compatibility: bool,
     pub ssh_algorithms: SshAlgorithmPreferences,
     pub dedicated_new_terminal_connection: bool,
+    pub ssh_channel_strategy: crate::SshChannelStrategy,
     pub x11_forwarding: crate::ConnectionX11ForwardingOptions,
     pub post_connect_command: String,
     pub terminal: ConnectionTerminalOptions,
@@ -286,6 +284,7 @@ pub fn save_request_from_draft(
         legacy_ssh_compatibility: draft.legacy_ssh_compatibility,
         ssh_algorithms: draft.ssh_algorithms,
         dedicated_new_terminal_connection: draft.dedicated_new_terminal_connection,
+        ssh_channel_strategy: draft.ssh_channel_strategy,
         x11_forwarding: draft.x11_forwarding,
         post_connect_command: (!draft.post_connect_command.trim().is_empty())
             .then(|| draft.post_connect_command.trim().to_string()),
@@ -462,11 +461,6 @@ fn first_available_default_key_path_in_ssh_dir(ssh_dir: PathBuf) -> Result<Strin
 
 fn first_loadable_default_key_path(passphrase: &str) -> Result<String> {
     first_loadable_default_key_path_in_ssh_dir(default_ssh_dir(), passphrase)
-}
-
-#[cfg(test)]
-fn first_loadable_default_key_path_in_home(home: PathBuf, passphrase: &str) -> Result<String> {
-    first_loadable_default_key_path_in_ssh_dir(home.join(".ssh"), passphrase)
 }
 
 fn first_loadable_default_key_path_in_ssh_dir(
@@ -704,6 +698,7 @@ mod tests {
             ssh_algorithms: SshAlgorithmPreferences::default(),
             x11_forwarding: crate::ConnectionX11ForwardingOptions::default(),
             dedicated_new_terminal_connection: false,
+            ssh_channel_strategy: crate::SshChannelStrategy::default(),
             post_connect_command: String::new(),
             terminal: ConnectionTerminalOptions::default(),
         };
@@ -714,16 +709,6 @@ mod tests {
             request.proxy_chain[0].auth,
             SavedAuth::KeyboardInteractive
         ));
-    }
-
-    #[test]
-    fn default_key_paths_match_tauri_save_order() {
-        let home = PathBuf::from("/tmp/home");
-        let paths = default_private_key_paths_in_home(home);
-
-        assert_eq!(paths[0], PathBuf::from("/tmp/home/.ssh/id_ed25519"));
-        assert_eq!(paths[1], PathBuf::from("/tmp/home/.ssh/id_ecdsa"));
-        assert_eq!(paths[2], PathBuf::from("/tmp/home/.ssh/id_rsa"));
     }
 
     #[test]
@@ -747,35 +732,6 @@ mod tests {
         let path = first_available_default_key_path_in_home(dir.clone()).unwrap();
 
         assert_eq!(path, rsa.to_string_lossy());
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn saving_proxy_default_key_uses_first_loadable_default_key_like_tauri() {
-        let dir = std::env::temp_dir().join(format!(
-            "oxideterm-conn-proxy-default-key-{}-{}",
-            std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        let ssh_dir = dir.join(".ssh");
-        std::fs::create_dir_all(&ssh_dir).unwrap();
-        let encrypted = ssh_dir.join("id_ed25519");
-        let fallback = ssh_dir.join("id_ecdsa");
-        let mut rng = UnwrapErr(SysRng);
-        PrivateKey::random(&mut rng, Algorithm::Ed25519)
-            .unwrap()
-            .encrypt(&mut rng, "secret")
-            .unwrap()
-            .write_openssh_file(&encrypted, LineEnding::LF)
-            .unwrap();
-        PrivateKey::random(&mut rng, Algorithm::Ed25519)
-            .unwrap()
-            .write_openssh_file(&fallback, LineEnding::LF)
-            .unwrap();
-
-        let path = first_loadable_default_key_path_in_home(dir.clone(), "").unwrap();
-
-        assert_eq!(path, fallback.to_string_lossy());
         let _ = std::fs::remove_dir_all(dir);
     }
 

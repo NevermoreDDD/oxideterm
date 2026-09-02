@@ -106,6 +106,61 @@ Every source file changed by OxideTerm should retain an English modification
 notice near the top. The sections below define the behavior to preserve; line
 numbers are intentionally omitted because upstream refreshes move code.
 
+### Benchmark frame-cost reporting
+
+`crates/gpui-ce/gpui/src/app/bench_context.rs` extends renderer benchmark reports with the
+platform presentation duration and final-frame scene primitive, GPU batch, and replay-operation
+counts. Scene accounting runs after Criterion's timed iteration loop because walking the batch
+iterator again is diagnostic work rather than product rendering. Preserve that separation so
+terminal render benchmarks expose CPU draw, GPU submission, presentation, and scene-complexity
+changes without measuring the reporter itself. `BenchAppContext::assert_no_rendered_frames`
+supports idle benchmarks whose contract is the absence of draw and presentation events after
+setup has settled. Named stage samples are merged only after a timed iterator returns, keeping
+histogram aggregation outside the measurement while allowing product benchmarks to split their
+own synchronous pipelines.
+
+### Pointer capture and Windows cursor recovery
+
+`crates/gpui-ce/gpui/src/window.rs` cancels logical pointer capture and application drag state when
+a platform window loses focus or hover ownership. Native platforms may revoke capture without a
+final mouse-up event, and retaining the old hitbox makes a text input remain globally hovered and
+consume later clicks. `crates/gpui-ce/gpui_windows/src/events.rs` immediately applies a changed
+cursor handle to the currently hovered window while respecting cursor hiding, clears an unreleased
+non-client caption press when the pointer leaves the window, and converts `WM_CAPTURECHANGED` or
+`WM_CANCELMODE` into exactly one deferred mouse-up event. The deferred delivery is required because
+Win32 can revoke capture re-entrantly while GPUI's input callback is borrowed. Every client mouse
+move also reconciles the captured button against the authoritative Win32 message flags and emits a
+missing mouse-up before the move when they disagree. Preserve all three parts: capture recovery
+restores hit testing on every desktop backend, while the Windows updates prevent an I-beam, drag,
+or pressed caption control from surviving native pointer ownership loss or a dropped release.
+
+`Window::request_close` routes programmatic close controls through the same stored
+`on_window_should_close` handler as an operating-system close event before marking the window for
+removal. Client-decorated close buttons must use this request path so future unsaved-work or
+close-to-background policies cannot be bypassed.
+
+### Windows DirectX blur state restoration
+
+`crates/gpui-ce/gpui_windows/src/directx_renderer.rs` restores the scene batch constant buffer
+after each completed blur composite. The blur shaders and ordinary scene vertex shaders both use
+constant-buffer slot `b1`; leaving `BlurParams` bound makes primitives after a backdrop read an
+invalid batch offset, so a modal backdrop can appear while its foreground panel is blank. Preserve
+the restoration when changing blur passes or batch submission.
+
+### Native window movement, resizing, and ownership
+
+Windows client-decorated windows perform eight-direction outer-frame hit testing instead of
+leaving the left, right, and bottom resize targets at the system's minimal fallback width.
+`gpui_windows::WindowsWindow` also implements the platform resize entry point and packs screen
+coordinates into `WM_NCLBUTTONDOWN` according to the Win32 message contract. Floating windows are
+owned by the active application window. Modal parents are disabled only after renderer and window
+setup succeeds, and are restored if the final placement operation fails.
+
+X11 and Wayland retain their native compositor move and resize protocols. Dialog and anchored-popup
+ownership is added to the parent registry only after renderer and platform setup succeeds. Keep
+registration at that commit boundary: registering earlier can leave a destroyed child recorded as
+blocking, causing the parent window to reject all later input.
+
 ### Transparent border-only quad overdraw
 
 `crates/gpui-ce/gpui/src/window.rs` limits transparent, border-only quads to four clipped
@@ -233,7 +288,9 @@ decorations, and subpixel mode. Preserve every component: omitting atlas
 identity can reuse tiles after moving a pane between windows, while omitting
 generation can replay tiles invalidated by device recovery. Prepared batches
 must also remain one replay operation so GPUI view caching does not expand them
-into persistent per-glyph paint operations.
+into persistent per-glyph paint operations. `LineLayout::paint_cached_in_current_layer` lets the
+terminal group adjacent style runs under one row-scoped layer; callers must establish a bounded
+layer before using it so draw ordering does not collapse across unrelated rows.
 
 ### Scheduler-owned animation clock
 

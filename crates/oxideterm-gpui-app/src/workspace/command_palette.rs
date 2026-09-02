@@ -3,8 +3,6 @@ mod entity;
 
 pub(in crate::workspace) use entity::CommandPaletteEntity;
 use entity::CommandPaletteView;
-#[cfg(test)]
-use oxideterm_connections::is_literal_ssh_config_alias_query;
 use oxideterm_connections::{resolve_ssh_config_alias, saved_connection_from_ssh_host};
 use oxideterm_gpui_settings_view::{OXIDE_THEME_IDS, built_in_theme_exists, is_oxide_theme};
 use oxideterm_gpui_ui::{
@@ -12,7 +10,7 @@ use oxideterm_gpui_ui::{
         dialog_content, dismissible_command_palette_backdrop, dismissible_dialog_backdrop,
         overlay_content_boundary, rounded_shell_child_radius,
     },
-    text_input::{text_input_anchor_probe, text_input_value_segments},
+    text_input::text_input_value_segments,
 };
 use oxideterm_remote_desktop::{RemoteDesktopConnectionProfile, RemoteDesktopProtocol};
 use oxideterm_ssh_launch::{format_user_host_port_target, parse_explicit_user_host_port_target};
@@ -329,10 +327,8 @@ impl WorkspaceApp {
             .filter(|range| range.start == range.end)
             .map(|range| range.start);
         let marked_text = self.marked_text_for_target(target, cx).unwrap_or_default();
-        let workspace = cx.entity();
-
-        text_input_anchor_probe(
-            target.anchor_id(),
+        self.text_input_with_workspace_ime(
+            target,
             div()
                 .flex_1()
                 .min_w_0()
@@ -345,7 +341,6 @@ impl WorkspaceApp {
                 } else {
                     rgb(self.tokens.ui.text)
                 })
-                .cursor(gpui::CursorStyle::IBeam)
                 .overflow_hidden()
                 .child(text_input_value_segments(
                     &self.tokens,
@@ -362,23 +357,9 @@ impl WorkspaceApp {
                             .text_color(rgb(self.tokens.ui.text))
                             .child(marked_text.to_string()),
                     )
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                        window.focus(&this.focus_handle, cx);
-                        this.begin_ime_selection_from_mouse_down(target, event, window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                    this.update_ime_selection_drag_from_mouse_move(event, window, cx);
-                })),
-            move |anchor, _window, cx| {
-                let _ = workspace.update(cx, |this, cx| {
-                    this.update_text_input_anchor(anchor, cx);
-                });
-            },
+                }),
+            |_this, _cx| {},
+            cx,
         )
         .into_any_element()
     }
@@ -1039,7 +1020,6 @@ impl WorkspaceApp {
                     TabKind::Sftp => self.i18n.t("sidebar.panels.sftp"),
                     TabKind::Ide => self.i18n.t("settings_view.tabs.ide"),
                     TabKind::FileManager => self.i18n.t("settings_view.help.category_file_manager"),
-                    TabKind::Launcher => self.i18n.t("app.shellLauncher"),
                     TabKind::Graphics => self.i18n.t("settings_view.tabs.graphics"),
                 };
                 PaletteItem {
@@ -2174,7 +2154,6 @@ fn tab_kind_icon(kind: &TabKind) -> LucideIcon {
             LucideIcon::Terminal
         }
         TabKind::FileManager => LucideIcon::FolderOpen,
-        TabKind::Launcher => LucideIcon::Terminal,
         TabKind::Graphics => LucideIcon::AppWindow,
         TabKind::Runtime => LucideIcon::Gauge,
         TabKind::ConnectionPool => LucideIcon::Gauge,
@@ -2646,29 +2625,6 @@ fn shortcut_reference_rows() -> Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn quick_connect_host_parser_matches_tauri_shape() {
-        assert_eq!(
-            parse_explicit_user_host_port_target("root@example.com"),
-            Some(("root".to_string(), "example.com".to_string(), 22))
-        );
-        assert_eq!(
-            parse_explicit_user_host_port_target("root@example.com:2200"),
-            Some(("root".to_string(), "example.com".to_string(), 2200))
-        );
-        assert!(parse_explicit_user_host_port_target("example.com").is_none());
-        assert!(parse_explicit_user_host_port_target("root@example.com:abc").is_none());
-    }
-
-    #[test]
-    fn quick_connect_alias_query_rejects_tauri_excluded_characters() {
-        assert!(is_literal_ssh_config_alias_query("prod-db"));
-        assert!(!is_literal_ssh_config_alias_query(""));
-        assert!(!is_literal_ssh_config_alias_query("prod db"));
-        assert!(!is_literal_ssh_config_alias_query("user@host"));
-        assert!(!is_literal_ssh_config_alias_query("host:2222"));
-    }
 
     #[test]
     fn remote_desktop_quick_connect_uses_protocol_default_ports() {

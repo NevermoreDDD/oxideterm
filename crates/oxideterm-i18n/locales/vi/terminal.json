@@ -47,6 +47,16 @@
       "cancel": "Hủy",
       "paste": "Dán"
     },
+    "kitty_file_transmission": {
+      "title": "Cho phép Kitty truy cập tệp cục bộ trong phiên này?",
+      "description": "Yêu cầu đã bị chặn. Nếu cho phép, OxideTerm sẽ tạo thư mục riêng cho phiên và sao chép đường dẫn. Hãy thử lại quá trình truyền với tệp tty-graphics-protocol nằm trực tiếp trong thư mục đó.",
+      "cancel": "Từ chối",
+      "allow": "Cho phép trong phiên này",
+      "allowed_title": "Đã cho phép Kitty truy cập tệp trong phiên này",
+      "allowed_description": "Thư mục truyền riêng đã được sao chép vào bảng tạm. Quyền này hết hiệu lực khi phiên terminal đóng.",
+      "failed_title": "Không thể bật quyền truy cập tệp cho Kitty",
+      "failed_description": "OxideTerm không thể tạo thư mục truyền riêng."
+    },
     "command_selection": {
       "actions": "Thao tác chọn lệnh",
       "copy": "Sao chép",
@@ -81,7 +91,6 @@
       "port_missing": "Thiếu cổng",
       "port_unknown": "Chưa rõ cổng",
       "refresh": "Làm mới",
-      "reconnect": "Kết nối lại",
       "send_break": "Break",
       "dtr": "DTR",
       "rts": "RTS",
@@ -92,7 +101,8 @@
       "flow_hardware": "RTS/CTS",
       "send_mode": "Gửi",
       "display_mode": "Hiển thị",
-      "line_ending": "Kết dòng",
+      "line_ending": "Kết dòng gửi",
+      "output_line_ending": "Kết dòng nhận",
       "local_echo": "Echo",
       "text_mode": "Văn bản",
       "hex_mode": "Hex",
@@ -100,8 +110,7 @@
       "line_ending_lf": "LF",
       "line_ending_crlf": "CRLF",
       "line_ending_cr": "CR",
-      "line_ending_none": "Thô",
-      "reconnect_failed": "Kết nối lại serial thất bại"
+      "line_ending_none": "Thô"
     },
     "recording": {
       "started": "Terminal recording started",
@@ -127,6 +136,8 @@
     },
     "session_log": {
       "title": "Nhật ký phiên",
+      "automatic_for_connection": "Tự động lưu nhật ký phiên cho kết nối này",
+      "profile_preferences_save_failed": "Không thể lưu giá trị mặc định của terminal cho kết nối này",
       "started": "Đã bắt đầu nhật ký phiên",
       "start_failed": "Không thể bắt đầu nhật ký phiên",
       "write_failed": "Nhật ký phiên đã dừng vì không thể ghi tệp",
@@ -244,6 +255,7 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
+      "delete_group_description": "Các lệnh trong “{{name}}” sẽ được chuyển sang nhóm mặc định trước khi xóa nhóm.",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",

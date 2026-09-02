@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.24-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.0.26-blue" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License">
   <img src="https://img.shields.io/badge/rust-2024%20edition-orange" alt="Rust 2024">
@@ -210,7 +210,7 @@ OxideSens is BYOK-first, with context building performed in-process:
 The entire UI is written in Rust using GPUI (Zed's GPU-backed UI framework):
 
 - **No CSS, no DOM, no JavaScript** in the rendering pipeline
-- **Workspace tab types**: local terminal, SSH, Telnet, Serial, RDP, VNC, SFTP, IDE, port forwards, session manager, cloud sync, settings, plugins, topology, monitoring, file manager, launcher, graphics, and custom plugin tabs
+- **Workspace tab types**: local terminal, SSH, Telnet, Serial, RDP, VNC, SFTP, IDE, port forwards, session manager, cloud sync, settings, plugins, topology, monitoring, file manager, graphics, and custom plugin tabs
 - **Split pane system**: binary pane tree, draggable dividers, up to 4 panes per terminal tab
 - **Command palette**, global key bindings, sidebar panels — all GPUI primitives
 - **Immediate-mode rendering**: UI reflects Rust state changes without a serialization round-trip
