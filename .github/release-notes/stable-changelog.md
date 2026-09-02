@@ -46,6 +46,7 @@ The following terminal, desktop, Keychain, and package-compatibility improvement
 #### 🧩 Fork-specific Changes
 
 - This fork additionally carries its maintained SSH pane splitting, saved-connection defaults, standalone reconnect controls, managed Windows X server, and optional compatible-provider discovery work.
+- Added a fork-owned updater signing key so NevermoreDDD/oxideterm releases use an independent verification chain instead of trusting official upstream release signatures.
 - Release assets, support links, and update endpoints are owned by NevermoreDDD/oxideterm.
 
 ### 中文
@@ -89,6 +90,7 @@ The following terminal, desktop, Keychain, and package-compatibility improvement
 #### 🧩 Fork 自有更新
 
 - 本 fork 额外包含持续维护的 SSH 窗格分割、已保存连接默认值、独立会话重连控制、受管 Windows X server，以及可选兼容服务商发现功能。
+- 新增归本 fork 所有的更新签名密钥，使 NevermoreDDD/oxideterm 发布使用独立验签链，不再信任官方上游发布签名。
 - 发布资产、支持链接与更新端点均归 NevermoreDDD/oxideterm 所有。
 
 ## 2.0.25
