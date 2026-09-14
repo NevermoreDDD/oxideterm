@@ -7,6 +7,86 @@ section as the detailed changelog attached to the corresponding GitHub Release.
 
 ### English
 
+This NevermoreDDD community fork release integrates official upstream changes through `ad4dc1879`, covering the full upgrade from this fork's 2.0.26 to upstream 2.0.29 plus the subsequent AI-history shutdown fix.
+
+#### ✨ Upstream changes
+
+##### AI conversations and execution
+
+- Added OpenAI Responses API with stateless replay, native xAI Grok discovery, and updated DeepSeek Flash model support.
+- Added resumable agent checkpoints, automatic context budgets, clarification questions, queued messages, steering, and interrupt-and-send controls. Optional native subagent collaboration scopes access to assigned resources; ACP is not a subagent backend.
+- Removed the conversation message cap and added incremental persistent history, on-demand content loading, archive/restore, and separately paginated active and archived lists. Archiving does not cancel running work.
+- Migrates existing history while retaining the original database. New history is not copied back into the old database, so downgrading does not expose conversations created after migration.
+- Fixed history flushing on application quit when GPUI polls shutdown outside a Tokio runtime; improved chat scrolling, draft preservation, and completed-tool display.
+- Improved command completion and cancellation ownership, kept privilege input local, and preserved command tracking when visual marks are disabled. Stopping observation does not guarantee a remote command has exited.
+
+##### Terminal and desktop
+
+- Expanded command-aware semantic colors for compiler output, Git, systemd, containers, tests, permissions, and system utilities while preserving explicit shell colors.
+- Added merging existing terminal tabs into split panes, unlimited session logs (`0` size limit), timestamp-column scrolling, configurable padding, Shift-click selection extension, and optional selected-text match highlighting. Unlimited logs can continue consuming disk space.
+- Improved selection stability, command-mark coordinates, transfer-handshake detection, alternate-screen IME positioning, and Windows fallback-font rendering. Native Windows Chinese IME behavior has not been manually verified for this fork release.
+- Moved SSH parsing into an owned background worker and reduced copying and UI waits during continuous output; corrected unread activity and command-sender focus.
+- Fixed Windows input/quit starvation and detached-window cleanup, plus macOS fullscreen tab interaction and keychain text preservation.
+
+##### Connections, files, and settings
+
+- Restored standalone serial, Telnet, Mosh, RDP, and VNC session entries after restart as disconnected entries. Temporary credentials and previous terminal output are not restored.
+- Added RDP SOCKS5 routing and improved acknowledged clipboard pasting and server Font Map compatibility. An SSH gateway's proxy settings take precedence when a gateway is used.
+- Expanded optional encrypted credential sync to standalone SFTP/Mosh, RDP/VNC, and supported proxy credentials; receiving devices store restored secrets in protected storage.
+- Preserved SSH algorithm preferences in preflight and connection setup, improved channel cleanup and authentication prompts, and restored saved-password reveal.
+- Made SFTP follow the active SSH terminal with optional pinning and preserved existing full-tab views.
+- Raised IDE editing capacity to 100 MiB, preserved encoding/BOM/line endings, and added reopen/save-format controls. Large-file mode disables syntax work and wrapping; unrepresentable characters cannot be silently saved lossily.
+- Added independent IDE fonts and reduced retained document memory and redundant syntax work through shared snapshots and cancellable background processing.
+- Reorganized settings/search, exposed context and plugin shortcuts, added knowledge-document pagination, and updated all 11 language catalogs.
+
+#### 🛠️ Fork-specific changes
+
+- Adapted local terminal-profile exports and timestamp preferences to the upstream credential and timestamp-store changes. Existing fork identity, update endpoints, and signing trust remain in place.
+- Release notes use this fork's last published 2.0.26 as the user-facing baseline; upstream 2.0.27–2.0.29 tags are not prior releases of this fork.
+
+### 中文
+
+本次 NevermoreDDD 社区 fork 发布合并官方上游至 `ad4dc1879`，覆盖本 fork 2.0.26 之后到上游 2.0.29 的完整更新，以及随后修复的 AI 历史退出保存问题。
+
+#### ✨ 上游更新
+
+##### AI 对话与执行
+
+- 新增 OpenAI Responses API 无状态历史重放、原生 xAI Grok 模型发现，并更新 DeepSeek Flash 模型支持。
+- 新增可恢复任务检查点、自动上下文预算、澄清提问、消息队列、运行中补充指令和打断后发送。可选原生子代理协作限定分配资源的访问范围；ACP 不作为子代理后端。
+- 移除对话消息数量上限，增加增量历史持久化、正文按需加载、归档与恢复，以及普通和归档列表的独立分页。归档不会取消正在运行的任务。
+- 迁移现有历史时保留原数据库；新历史不会回写旧数据库，因此降级后无法看到迁移后新增的对话。
+- 修复 GPUI 在 Tokio 运行时之外处理退出时的历史保存，改善聊天滚动、草稿保留和已完成工具活动展示。
+- 改进命令完成与取消的所有权处理，保持特权输入本地处理，关闭可视标记后仍可跟踪命令。停止观察不代表远端命令已经退出。
+
+##### 终端与桌面
+
+- 扩展编译器、Git、systemd、容器、测试、权限及系统工具的命令感知语义着色，同时保留 Shell 显式颜色。
+- 新增将已有标签合并为分屏、无限制会话日志（大小上限设为 `0`）、时间戳列横向滚动、自定义边距、Shift-click 扩展选区和可选同词高亮。无限制日志可能持续占用磁盘空间。
+- 改善选区稳定性、命令标记坐标、文件传输握手识别、备用屏幕输入法定位及 Windows 后备字体渲染。本次 fork 发布尚未人工验证 Windows 原生中文输入法。
+- 将 SSH 解析移至具有明确所有权的后台线程，减少持续输出时的复制和界面等待；修复未读活动判定及命令发送栏焦点。
+- 修复 Windows 输入和退出消息被动画挤占、分离窗口清理，以及 macOS 全屏标签交互和钥匙串密码原文保留。
+
+##### 连接、文件与设置
+
+- 重启后恢复独立串口、Telnet、Mosh、RDP 和 VNC 会话条目，恢复时处于断开状态；不恢复临时凭据和过去的终端输出。
+- 新增 RDP SOCKS5 路由，改善带确认的剪贴板粘贴和服务器 Font Map 兼容性；使用 SSH 网关时以网关代理设置为准。
+- 将可选的加密凭据同步扩展到独立 SFTP/Mosh、RDP/VNC 和受支持的代理凭据；接收设备使用受保护存储保存恢复的秘密。
+- SSH 预检与正式连接均保留算法偏好，改善通道清理和认证提示，恢复查看已保存密码。
+- SFTP 跟随当前 SSH 终端并支持固定服务器，重新打开时保留已有完整标签页。
+- IDE 编辑上限提高至 100 MiB，保留编码、BOM 和换行格式，增加重新打开及保存格式控制。大文件模式关闭语法处理和折行；无法表示的字符不会被静默有损保存。
+- 新增独立 IDE 字体设置，通过共享快照和可取消后台语法处理减少文档常驻内存及重复计算。
+- 整理设置与搜索，展示上下文和插件快捷键，增加知识库文档分页，并同步更新全部 11 种语言。
+
+#### 🛠️ Fork 自有更新
+
+- 将本地终端配置类型导出和时间戳偏好适配到上游凭据与时间戳存储变更，保留现有 fork 身份、更新地址和签名信任。
+- 面向用户的发布说明以上次实际发布的 2.0.26 为基线；上游 2.0.27–2.0.29 标签不是本 fork 的历史发布。
+
+## 2.0.29 (official upstream notes)
+
+### English
+
 OxideTerm 2.0.29 expands OxideSens with more AI providers, resumable task execution, complete persistent history, and conversation archiving. It also improves terminal responsiveness and command observation, reduces editor memory and background work, and adds independent IDE typography settings.
 
 #### 🤖 AI Providers and Task Execution
