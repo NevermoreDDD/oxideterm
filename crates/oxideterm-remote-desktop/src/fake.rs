@@ -49,6 +49,7 @@ impl RemoteDesktopFakeBackend {
                 protocol,
                 endpoint,
                 transport_endpoint: _,
+                socks_proxy: _,
                 size,
                 scale_factor: _,
                 read_only,
@@ -119,6 +120,7 @@ impl RemoteDesktopFakeBackend {
             | RemoteDesktopHelperRequest::Key { .. }
             | RemoteDesktopHelperRequest::Text { .. }
             | RemoteDesktopHelperRequest::ClipboardText { .. }
+            | RemoteDesktopHelperRequest::PasteText { .. }
             | RemoteDesktopHelperRequest::ClipboardData { .. }
             | RemoteDesktopHelperRequest::ClipboardFiles { .. }
             | RemoteDesktopHelperRequest::VncListRemoteFiles { .. }

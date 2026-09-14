@@ -153,10 +153,11 @@ impl WorkspaceApp {
                                 .child(self.render_ai_sidebar_chat_body(cx)),
                         ),
                 )
+                .children(self.render_ai_history_status(cx))
                 .child(self.render_ai_context_warning_banners(cx))
                 .child(self.render_ai_sidebar_model_bar(cx))
                 .child(
-                    self.render_ai_sidebar_input(self.ai_entity.read(cx).chat_initialization_error().is_none(), cx),
+                    self.render_ai_sidebar_input(self.ai_entity.read(cx).history_ready(), cx),
                 )
                 .into_any_element()
         };
@@ -191,6 +192,7 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(detail) = self.render_ai_agent_detail(cx) { return detail; }
         if let Some(error) = self.ai_entity.read(cx).chat_initialization_error().copied() {
             return self.render_ai_sidebar_initialization_error(error, cx);
         }
@@ -205,6 +207,11 @@ impl WorkspaceApp {
                 let mut items = Vec::with_capacity(conversation.messages.len().saturating_add(2));
                 let mut signatures =
                     Vec::with_capacity(conversation.messages.len().saturating_add(2));
+                let page = ai.history.pages.get(&conversation.id);
+                if page.is_some_and(|page| page.before.is_some()) {
+                    items.push(AiChatListItem::HistoryPage { older: true });
+                    signatures.push(0x686973746f727901);
+                }
                 if let Some(count) = chat_ui.context_trim_notice_count {
                     let sequence = chat_ui.context_trim_notice_sequence;
                     items.push(AiChatListItem::TrimNotice { count });
@@ -221,7 +228,8 @@ impl WorkspaceApp {
                         ai_chat_message_base_signature(message)
                     });
                     let signature = ai_chat_message_list_signature(
-                        base_signature,
+                        base_signature ^ ai.agents.parent_revisions.get(&message.id).copied().unwrap_or_default() ^ ai.history.archives.get(&(conversation.id.clone(),message.id.clone())).map(|view| view.revision.rotate_left(16)).unwrap_or_default()
+                            ^ page.and_then(|page| page.body_revisions.get(&message.id)).copied().unwrap_or_default().rotate_left(24),
                         chat_ui.thinking_expansion_state.get(&message.id),
                     );
                     items.push(AiChatListItem::Message {
@@ -229,6 +237,10 @@ impl WorkspaceApp {
                         last_assistant: last_assistant_index == Some(index),
                     });
                     signatures.push(signature);
+                }
+                if page.is_some_and(|page| page.after.is_some()) {
+                    items.push(AiChatListItem::HistoryPage { older: false });
+                    signatures.push(0x686973746f727902);
                 }
                 if signature_cache.needs_prune(conversation.messages.len()) {
                     let retained_message_ids = conversation
@@ -252,7 +264,8 @@ impl WorkspaceApp {
         let entity = cx.entity();
         let state = self.ai_entity.read(cx).chat_ui().message_list_state.clone();
         let viewport = self.ai_chat_list_viewport_snapshot(cx);
-        tauri_virtual_list(state, virtual_spec, move |index, _window, cx| {
+        let scrollbar = oxideterm_gpui_ui::scroll::Scrollbar::for_list(&state).id("ai-chat-scrollbar");
+        let list = tauri_virtual_list(state, virtual_spec, move |index, _window, cx| {
             let Some(item) = items.get(index).cloned() else {
                 return div().into_any_element();
             };
@@ -262,8 +275,8 @@ impl WorkspaceApp {
             })
         })
         .w_full()
-        .h_full()
-        .into_any_element()
+        .h_full();
+        div().relative().size_full().min_h_0().child(list).child(scrollbar).into_any_element()
     }
 
     pub(in crate::workspace) fn render_ai_chat_list_item(
@@ -273,11 +286,30 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match item {
+            AiChatListItem::HistoryPage { older } => {
+                let ai = self.ai_entity.read(cx);
+                let Some(id) = ai.conversation_state().active_conversation_id.clone() else { return div().into_any_element(); };
+                let loading = ai.history.pages.get(&id).is_some_and(|page| page.loading);
+                let label = self.i18n.t(if loading { "ai.history.loading" } else if older { "ai.history.older" } else { "ai.history.newer" });
+                if !loading && ai.history.pages.get(&id).is_some_and(|page| !page.failed) {
+                    self.ai_entity.update(cx, |ai, cx| ai.request_visible_history_page(id.clone(), older, cx));
+                }
+                ai_message_action(&self.tokens, label, Self::render_lucide_icon(if older { LucideIcon::ChevronLeft } else { LucideIcon::ChevronDown }, 14.0, rgb(self.tokens.ui.text_muted)), false)
+                    .id(if older { "ai-history-older" } else { "ai-history-newer" }).on_click(cx.listener(move |this, _, _, cx| { this.ai_entity.update(cx, |ai, _| ai.request_history_page(id.clone(), older)); cx.notify(); })).into_any_element()
+            }
             AiChatListItem::TrimNotice { count, .. } => self.render_ai_trim_notice(count, cx),
             AiChatListItem::Message {
                 index,
                 last_assistant,
             } => {
+                let live = {
+                    let ai = self.ai_entity.read(cx);
+                    ai.conversation_state().active_conversation().and_then(|conversation| conversation.messages.get(index).and_then(|message| {
+                        let owner = crate::workspace::ai_state::history::HistoryViewOwner::Main(conversation.id.clone());
+                        ai.live_history_view(&owner, &message.id).map(|view| (owner, view))
+                    }))
+                };
+                if let Some((owner, view)) = live { return self.render_ai_owned_message(owner, view, last_assistant, viewport, cx); }
                 let (message, last_assistant) = {
                     let ai = self.ai_entity.read(cx);
                     let Some(conversation) = ai.conversation_state().active_conversation() else {
@@ -290,6 +322,23 @@ impl WorkspaceApp {
                     // its context; only the visible message is copied.
                     (message.clone(), last_assistant)
                 };
+                let stored = {
+                    let ai = self.ai_entity.read(cx);
+                    let id = ai.conversation_state().active_conversation_id.clone().unwrap_or_default();
+                    ai.history.pages.get(&id).filter(|page| page.descriptions.contains_key(&message.id))
+                        .filter(|_| !message.is_streaming && !ai.history_message_is_pending(&id, &message.id))
+                        .map(|page| (id, page.bodies.get(&message.id).and_then(std::sync::Weak::upgrade), page.body_errors.contains(&message.id)))
+                };
+                if let Some((conversation, view, failed)) = stored {
+                    if let Some(view) = view { return self.render_ai_stored_message(&conversation, view, last_assistant, viewport, cx); }
+                    if !failed { self.ai_entity.update(cx, |ai, _| ai.request_history_body(conversation.clone(), message.id.clone(), None, false)); }
+                    let id = message.id.clone();
+                    return div().flex().flex_col().child(self.render_ai_history_message(&message, false, viewport, true, cx))
+                        .child(ai_message_action(&self.tokens, self.i18n.t(if failed { "common.actions.retry" } else { "ai.history.loading" }),
+                            Self::render_lucide_icon(LucideIcon::RefreshCw, 12.0, rgb(self.tokens.ui.text_muted)), false)
+                            .id(gpui::SharedString::from(format!("ai-history-retry-{}", message.id))).on_click(cx.listener(move |this, _, _, cx| { this.ai_entity.update(cx, |ai, _| ai.request_history_body(conversation.clone(), id.clone(), None, true)); cx.notify(); })))
+                        .into_any_element();
+                }
                 self.render_ai_message(&message, last_assistant, viewport, cx)
             }
             AiChatListItem::BottomSpacer => div().h(px(16.0)).into_any_element(),
@@ -342,6 +391,7 @@ impl WorkspaceApp {
             // Opening a conversation starts at its newest message. GPUI's tail
             // mode then pauses automatically while the user reads older content.
             ai.sync_chat_message_list(conversation_id, signatures, spec);
+            ai.restore_history_scroll_anchor(conversation_id);
         });
     }
 
@@ -455,6 +505,21 @@ impl WorkspaceApp {
                     ),
             )
             .into_any_element()
+    }
+
+    fn render_ai_history_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ai = self.ai_entity.read(cx);
+        let failed = matches!(ai.history.status, crate::workspace::ai_state::HistoryStatus::Failed) && ai.history.writer.is_some();
+        let loading = !failed && ai.chat_initialization_error().is_none() && !ai.history_ready();
+        if !failed && !loading { return None; }
+        let mut text = self.i18n.t(if failed { "ai.history.unsaved" } else { "ai.history.loading" });
+        if loading { if let Some((done,total)) = ai.history.progress { text = format!("{text} ({done}/{total})"); } }
+        Some(div().w_full().flex_none().p(px(12.0)).gap(px(8.0)).flex().flex_col()
+            .text_size(px(12.0)).text_color(rgb(self.tokens.ui.text_muted)).child(text)
+            .when(failed,|row| row.child(div().id("ai-history-retry").cursor_pointer().text_color(rgb(self.tokens.ui.accent))
+                .child(self.i18n.t("common.actions.retry"))
+                .on_click(cx.listener(|this,_,_,cx| { this.ai_entity.update(cx,|ai,_| ai.retry_history_write()); }))))
+            .into_any_element())
     }
 
     pub(in crate::workspace) fn render_ai_sidebar_initialization_error(

@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+oxideterm-network-proxy = { path = "../oxideterm-network-proxy" }
 base64.workspace = true
 dashmap.workspace = true
 dirs.workspace = true
@@ -34,4 +35,5 @@ libgssapi.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 rand10.workspace = true

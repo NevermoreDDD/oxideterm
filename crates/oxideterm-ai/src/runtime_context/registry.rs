@@ -102,6 +102,7 @@ impl std::fmt::Debug for ValidatedRuntimeHandle {
 pub struct RuntimeCapabilityRegistry {
     epoch: RuntimeRegistryEpoch,
     active_sessions: HashSet<ToolSessionId>,
+    session_scopes: HashMap<ToolSessionId, HashSet<RuntimeOwnerKey>>,
     owners: HashMap<RuntimeOwnerKey, RuntimeOwnerRecord>,
     handles: HashMap<RuntimeHandleId, RuntimeHandleRecord>,
 }
@@ -138,6 +139,7 @@ impl RuntimeCapabilityRegistry {
         Self {
             epoch: RuntimeRegistryEpoch::new(),
             active_sessions: HashSet::new(),
+            session_scopes: HashMap::new(),
             owners: HashMap::new(),
             handles: HashMap::new(),
         }
@@ -165,6 +167,7 @@ impl RuntimeCapabilityRegistry {
         _reason: RuntimeRevocationReason,
     ) {
         self.active_sessions.remove(tool_session_id);
+        self.session_scopes.remove(tool_session_id);
         self.handles
             .retain(|_, handle| handle.tool_session_id != *tool_session_id);
     }
@@ -238,6 +241,9 @@ impl RuntimeCapabilityRegistry {
     ) -> Result<RuntimeHandleProjection, RuntimeContextError> {
         if !self.active_sessions.contains(tool_session_id) {
             return Err(RuntimeContextError::ToolSessionInactive);
+        }
+        if !self.owner_in_scope(tool_session_id, owner_key) {
+            return Err(RuntimeContextError::OwnerNotFound);
         }
         let owner = self
             .owners
@@ -317,6 +323,11 @@ impl RuntimeCapabilityRegistry {
                 RuntimeValidationFailure::UnknownHandle,
             ));
         };
+        if !self.owner_in_scope(tool_session_id, &handle.owner_key) {
+            return Err(RuntimeValidationError::new(
+                RuntimeValidationFailure::CapabilityUnavailable,
+            ));
+        }
         if handle.tool_session_id != *tool_session_id {
             return Err(RuntimeValidationError::new(
                 RuntimeValidationFailure::WrongToolSession,
@@ -412,6 +423,7 @@ impl RuntimeCapabilityRegistry {
         let mut owner_keys = self
             .owners
             .iter()
+            .filter(|(key, _)| self.owner_in_scope(tool_session_id, key))
             .map(|(key, owner)| {
                 (
                     owner.label.clone(),
@@ -434,6 +446,61 @@ impl RuntimeCapabilityRegistry {
                 .then_with(|| format!("{:?}", left.kind).cmp(&format!("{:?}", right.kind)))
         });
         Ok(handles)
+    }
+
+    pub fn restrict_tool_session(
+        &mut self,
+        session: &ToolSessionId,
+        owners: HashSet<RuntimeOwnerKey>,
+    ) -> Result<(), RuntimeContextError> {
+        if !self.active_sessions.contains(session) {
+            return Err(RuntimeContextError::ToolSessionInactive);
+        }
+        let owners = match self.session_scopes.get(session) {
+            Some(previous) => owners.intersection(previous).cloned().collect(),
+            None => owners,
+        };
+        self.handles.retain(|_, handle| {
+            handle.tool_session_id != *session || owners.contains(&handle.owner_key)
+        });
+        self.session_scopes.insert(session.clone(), owners);
+        Ok(())
+    }
+
+    fn owner_in_scope(&self, session: &ToolSessionId, owner: &RuntimeOwnerKey) -> bool {
+        self.session_scopes
+            .get(session)
+            .is_none_or(|owners| owners.contains(owner))
+    }
+
+    pub fn delegated_owner(
+        &self,
+        session: &ToolSessionId,
+        handle: &RuntimeHandleId,
+    ) -> Result<RuntimeOwnerKey, RuntimeValidationError> {
+        self.validate_handle_projection(session, Some(handle))?;
+        Ok(self.handles[handle].owner_key.clone())
+    }
+
+    pub fn is_restricted_session(&self, session: &ToolSessionId) -> bool {
+        self.session_scopes.contains_key(session)
+    }
+
+    pub fn permits_owner(&self, session: &ToolSessionId, owner: &RuntimeOwnerKey) -> bool {
+        self.active_sessions.contains(session)
+            && self.owners.contains_key(owner)
+            && self.owner_in_scope(session, owner)
+    }
+
+    pub fn session_owners(&self, session: &ToolSessionId) -> HashSet<RuntimeOwnerKey> {
+        if !self.active_sessions.contains(session) {
+            return HashSet::new();
+        }
+        self.owners
+            .keys()
+            .filter(|key| self.owner_in_scope(session, key))
+            .cloned()
+            .collect()
     }
 
     /// Returns only leases already issued by authoritative discovery. This

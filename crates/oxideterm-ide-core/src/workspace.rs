@@ -1,7 +1,10 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use thiserror::Error;
 
@@ -291,9 +294,9 @@ impl IdeWorkspace {
     pub fn replace_buffer_text(
         &mut self,
         tab_id: EditorTabId,
-        text: impl Into<String>,
+        text: impl Into<Arc<str>>,
     ) -> Result<(), WorkspaceError> {
-        let text = text.into();
+        let text: Arc<str> = text.into();
         let buffer = self
             .buffers
             .get_mut(&tab_id)
@@ -303,6 +306,21 @@ impl IdeWorkspace {
         }
         buffer.text = text;
         buffer.revision += 1;
+        Ok(())
+    }
+
+    pub fn set_file_format(
+        &mut self,
+        tab_id: EditorTabId,
+        format: crate::TextFileFormat,
+    ) -> Result<(), WorkspaceError> {
+        let buffer = self
+            .buffers
+            .get_mut(&tab_id)
+            .ok_or(WorkspaceError::UnknownTab)?;
+        if buffer.format != format {
+            buffer.format = format;
+        }
         Ok(())
     }
 
@@ -316,6 +334,7 @@ impl IdeWorkspace {
             .get_mut(&tab_id)
             .ok_or(WorkspaceError::UnknownTab)?;
         buffer.saved_text = buffer.text.clone();
+        buffer.saved_format = buffer.format.clone();
         buffer.version = version;
         buffer.saved_revision = buffer.revision;
         Ok(())
@@ -324,8 +343,9 @@ impl IdeWorkspace {
     pub fn complete_save_at_revision(
         &mut self,
         tab_id: EditorTabId,
-        saved_text: impl Into<String>,
+        saved_text: impl Into<Arc<str>>,
         saved_revision: u64,
+        saved_format: crate::TextFileFormat,
         version: SavedFileVersion,
     ) -> Result<bool, WorkspaceError> {
         let buffer = self
@@ -334,6 +354,7 @@ impl IdeWorkspace {
             .ok_or(WorkspaceError::UnknownTab)?;
         buffer.saved_text = saved_text.into();
         buffer.saved_revision = saved_revision;
+        buffer.saved_format = saved_format;
         buffer.version = version;
         Ok(!buffer.is_dirty())
     }
@@ -343,11 +364,12 @@ impl IdeWorkspace {
         fs: &dyn IdeFileSystem,
         tab_id: EditorTabId,
     ) -> Result<SavedFileVersion, SaveError> {
-        let (location, text, revision, expected_version) = {
+        let (location, text, format, revision, expected_version) = {
             let buffer = self.buffers.get(&tab_id).ok_or(SaveError::UnknownTab)?;
             (
                 buffer.location.clone(),
                 buffer.text.clone(),
+                buffer.format.clone(),
                 buffer.revision,
                 buffer.version.clone(),
             )
@@ -357,8 +379,8 @@ impl IdeWorkspace {
         } else {
             WriteMode::CreateOrReplace
         };
-        let version = fs.write_file(&location, &text, Some(&expected_version), mode)?;
-        self.complete_save_at_revision(tab_id, text, revision, version.clone())
+        let version = fs.write_file(&location, &text, &format, Some(&expected_version), mode)?;
+        self.complete_save_at_revision(tab_id, text, revision, format, version.clone())
             .map_err(|_| SaveError::UnknownTab)?;
         Ok(version)
     }
@@ -368,11 +390,12 @@ impl IdeWorkspace {
         fs: &dyn AsyncIdeFileSystem,
         tab_id: EditorTabId,
     ) -> Result<SavedFileVersion, SaveError> {
-        let (location, text, revision, expected_version) = {
+        let (location, text, format, revision, expected_version) = {
             let buffer = self.buffers.get(&tab_id).ok_or(SaveError::UnknownTab)?;
             (
                 buffer.location.clone(),
                 buffer.text.clone(),
+                buffer.format.clone(),
                 buffer.revision,
                 buffer.version.clone(),
             )
@@ -383,9 +406,9 @@ impl IdeWorkspace {
             WriteMode::CreateOrReplace
         };
         let version = fs
-            .write_file(&location, &text, Some(&expected_version), mode)
+            .write_file(&location, &text, &format, Some(&expected_version), mode)
             .await?;
-        self.complete_save_at_revision(tab_id, text, revision, version.clone())
+        self.complete_save_at_revision(tab_id, text, revision, format, version.clone())
             .map_err(|_| SaveError::UnknownTab)?;
         Ok(version)
     }
@@ -393,7 +416,7 @@ impl IdeWorkspace {
     pub fn reload_clean_buffer(
         &mut self,
         tab_id: EditorTabId,
-        text: impl Into<String>,
+        text: impl Into<Arc<str>>,
         version: SavedFileVersion,
     ) -> Result<(), ReloadError> {
         let Some(buffer) = self.buffers.get_mut(&tab_id) else {
@@ -402,12 +425,13 @@ impl IdeWorkspace {
         if buffer.is_dirty() {
             return Err(ReloadError::DirtyBuffer);
         }
-        let text = text.into();
+        let text: Arc<str> = text.into();
         buffer.text = text.clone();
         buffer.saved_text = text;
         buffer.version = version;
         buffer.revision += 1;
         buffer.saved_revision = buffer.revision;
+        buffer.saved_format = buffer.format.clone();
         Ok(())
     }
 
@@ -416,10 +440,10 @@ impl IdeWorkspace {
         fs: &dyn IdeFileSystem,
         tab_id: EditorTabId,
     ) -> Result<(), ReloadError> {
-        let location = self
+        let (location, encoding) = self
             .buffers
             .get(&tab_id)
-            .map(|buffer| buffer.location.clone())
+            .map(|buffer| (buffer.location.clone(), buffer.format.encoding.clone()))
             .ok_or(ReloadError::UnknownTab)?;
         if self
             .buffers
@@ -428,8 +452,19 @@ impl IdeWorkspace {
         {
             return Err(ReloadError::DirtyBuffer);
         }
-        let data = fs.read_file(&location).map_err(ReloadError::File)?;
-        self.reload_clean_buffer(tab_id, data.text, data.version)
+        let data = fs
+            .read_file(&location, Some(&encoding))
+            .map_err(ReloadError::File)?;
+        self.reload_clean_buffer(tab_id, data.text, data.version)?;
+        self.set_file_format(tab_id, data.format)
+            .map_err(|_| ReloadError::UnknownTab)?;
+        let buffer = self
+            .buffers
+            .get_mut(&tab_id)
+            .ok_or(ReloadError::UnknownTab)?;
+        buffer.saved_revision = buffer.revision;
+        buffer.saved_format = buffer.format.clone();
+        Ok(())
     }
 
     pub async fn reload_tab_with_async(
@@ -437,10 +472,10 @@ impl IdeWorkspace {
         fs: &dyn AsyncIdeFileSystem,
         tab_id: EditorTabId,
     ) -> Result<(), ReloadError> {
-        let location = self
+        let (location, encoding) = self
             .buffers
             .get(&tab_id)
-            .map(|buffer| buffer.location.clone())
+            .map(|buffer| (buffer.location.clone(), buffer.format.encoding.clone()))
             .ok_or(ReloadError::UnknownTab)?;
         if self
             .buffers
@@ -449,8 +484,20 @@ impl IdeWorkspace {
         {
             return Err(ReloadError::DirtyBuffer);
         }
-        let data = fs.read_file(&location).await.map_err(ReloadError::File)?;
-        self.reload_clean_buffer(tab_id, data.text, data.version)
+        let data = fs
+            .read_file(&location, Some(&encoding))
+            .await
+            .map_err(ReloadError::File)?;
+        self.reload_clean_buffer(tab_id, data.text, data.version)?;
+        self.set_file_format(tab_id, data.format)
+            .map_err(|_| ReloadError::UnknownTab)?;
+        let buffer = self
+            .buffers
+            .get_mut(&tab_id)
+            .ok_or(ReloadError::UnknownTab)?;
+        buffer.saved_revision = buffer.revision;
+        buffer.saved_format = buffer.format.clone();
+        Ok(())
     }
 
     pub fn request_close_tab(
@@ -600,8 +647,9 @@ impl IdeWorkspace {
     pub fn complete_dirty_close_after_save_at_revision(
         &mut self,
         request_id: CloseRequestId,
-        saved_text: impl Into<String>,
+        saved_text: impl Into<Arc<str>>,
         saved_revision: u64,
+        saved_format: crate::TextFileFormat,
         version: SavedFileVersion,
     ) -> Result<bool, WorkspaceError> {
         let request = self
@@ -609,8 +657,13 @@ impl IdeWorkspace {
             .clone()
             .filter(|request| request.id == request_id)
             .ok_or(WorkspaceError::UnknownCloseRequest)?;
-        let is_clean =
-            self.complete_save_at_revision(request.tab_id, saved_text, saved_revision, version)?;
+        let is_clean = self.complete_save_at_revision(
+            request.tab_id,
+            saved_text,
+            saved_revision,
+            saved_format,
+            version,
+        )?;
         self.pending_close = None;
         if is_clean {
             self.close_tab_now(request.tab_id);
@@ -629,6 +682,8 @@ impl IdeWorkspace {
                     location: buffer.location.clone(),
                     text: buffer.text.clone(),
                     saved_text: buffer.saved_text.clone(),
+                    format: buffer.format.clone(),
+                    saved_format: buffer.saved_format.clone(),
                     version: buffer.version.clone(),
                     revision: buffer.revision,
                     saved_revision: buffer.saved_revision,
@@ -673,7 +728,10 @@ impl IdeWorkspace {
         self.buffers.clear();
         self.tab_by_location.clear();
 
-        for buffer in snapshot.buffers {
+        for mut buffer in snapshot.buffers {
+            if buffer.text == buffer.saved_text {
+                buffer.saved_text = buffer.text.clone();
+            }
             self.tab_by_location
                 .insert(buffer.location.stable_key(), buffer.tab_id);
             self.buffers.insert(
@@ -682,6 +740,8 @@ impl IdeWorkspace {
                     location: buffer.location,
                     text: buffer.text,
                     saved_text: buffer.saved_text,
+                    format: buffer.format,
+                    saved_format: buffer.saved_format,
                     version: buffer.version,
                     revision: buffer.revision,
                     saved_revision: buffer.saved_revision,

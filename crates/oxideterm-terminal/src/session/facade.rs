@@ -5,7 +5,7 @@ pub struct TerminalSession {
     kitty_file_transmission: Option<KittyFileTransmissionControl>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TelnetSessionConfig {
     pub host: String,
     pub port: u16,
@@ -281,6 +281,10 @@ impl TerminalSession {
         self.backend.read_pending_with_budget(budget)
     }
 
+    pub fn pending_output_flush_delay(&self) -> Option<Duration> {
+        self.backend.pending_output_flush_delay()
+    }
+
     pub fn activity_receiver(&self) -> TerminalActivityReceiver {
         self.backend.activity_receiver()
     }
@@ -384,11 +388,11 @@ impl TerminalSession {
         self.backend.finish_trzsz_transfer();
     }
 
-    pub fn start_modem_transfer(
+    pub fn begin_modem_transfer(
         &mut self,
         request: TerminalModemTransferRequest,
-    ) -> Option<ModemTransfer> {
-        self.backend.start_modem_transfer(request)
+    ) -> Result<Option<ModemTransfer>> {
+        self.backend.begin_modem_transfer(request)
     }
 
     pub fn interrupt_modem_transfer(&mut self) {
@@ -443,8 +447,8 @@ impl TerminalSession {
         self.backend.mode()
     }
 
-    pub fn select_tmux_pane_at(&mut self, col: usize, row: usize) -> Result<bool> {
-        self.backend.select_tmux_pane_at(col, row)
+    pub fn begin_tmux_pane_selection(&mut self, col: usize, row: usize) -> Result<Option<bool>> {
+        self.backend.begin_tmux_pane_selection(col, row)
     }
 
     pub fn tmux_local_point(&self, col: usize, row: usize) -> (usize, usize) {
@@ -527,6 +531,14 @@ impl TerminalSession {
         self.backend.search_source()
     }
 
+    pub fn set_selection(&self, selection: Option<crate::TerminalSelectionRange>) {
+        self.backend.set_selection(selection);
+    }
+
+    pub fn selection(&self) -> Option<crate::TerminalSelectionRange> {
+        self.backend.selection()
+    }
+
     pub fn clear_buffer(&mut self) {
         self.backend.clear_buffer();
     }
@@ -545,6 +557,14 @@ impl TerminalSession {
 
     pub fn snapshot_incremental(&self, previous: &TerminalSnapshot) -> TerminalSnapshot {
         self.backend.snapshot_incremental(previous)
+    }
+
+    pub fn try_render_snapshot(
+        &self,
+        previous: &TerminalSnapshot,
+        allow_defer: bool,
+    ) -> Option<(TerminalSnapshot, Option<crate::TerminalSelectionRange>, TermMode)> {
+        self.backend.try_render_snapshot(previous, allow_defer)
     }
 
     pub fn snapshot_with_display_offset(

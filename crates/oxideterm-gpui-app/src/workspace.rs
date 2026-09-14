@@ -16,6 +16,8 @@ mod file_manager;
 mod forwards;
 mod graphics;
 mod graphics_vnc;
+mod history_quit;
+pub(crate) use history_quit::request_app_quit;
 mod ide;
 mod ime;
 mod local_shell_launcher;
@@ -179,7 +181,8 @@ use oxideterm_gpui_terminal::{
     TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
     TerminalUiPreferenceOverrides, TerminalUiPreferences, TerminalUiTheme,
     TerminalWorkingDirectorySource, detect_custom_privilege_prompt, prune_terminal_session_logs,
-    resolved_terminal_semantic_scheme,
+    resolved_terminal_semantic_scheme, terminal_semantic_line_band,
+    terminal_semantic_variant_color,
 };
 use oxideterm_gpui_ui::scroll::ScrollableElement;
 use oxideterm_gpui_ui::{
@@ -444,19 +447,16 @@ const AI_CHAT_FOOTER_ACTIONS: [AiChatFooterAction; 1] = [AiChatFooterAction::Sub
 const CONFIRM_DIALOG_FOOTER_ACTIONS: [ConfirmDialogAction; 2] =
     [ConfirmDialogAction::Cancel, ConfirmDialogAction::Confirm];
 
-#[derive(Default)]
-struct AiMarkdownDocumentCache {
-    documents: HashMap<String, AiCachedMarkdownDocument>,
-    insertion_order: VecDeque<String>,
+struct AiMarkdownProjection {
+    source: String,
+    document: MarkdownDocument,
 }
 
-#[derive(Clone)]
 struct AiCachedMarkdownDocument {
-    document: MarkdownDocument,
+    projection: Arc<AiMarkdownProjection>,
     layout: MarkdownBlockLayout,
 }
 
-const AI_MARKDOWN_DOCUMENT_CACHE_MAX_ENTRIES: usize = 128;
 const AI_CHAT_LIST_ROW_HEIGHT_ESTIMATE: f32 = 80.0;
 const AI_CHAT_LIST_VIRTUAL_OVERSCAN: usize = 8;
 
@@ -481,6 +481,7 @@ const AI_MARKDOWN_CONTENT_OFFSET_PX: f32 = 56.0;
 
 #[derive(Clone, Debug)]
 enum AiChatListItem {
+    HistoryPage { older: bool },
     TrimNotice { count: usize },
     Message { index: usize, last_assistant: bool },
     BottomSpacer,
@@ -760,6 +761,7 @@ pub(crate) struct WorkspaceApp {
     terminal_semantic_highlight_section_expanded: bool,
     terminal_rule_highlight_section_expanded: bool,
     terminal_command_context_highlight_section_expanded: bool,
+    terminal_selection_highlight_section_expanded: bool,
     terminal_command_sender: Entity<terminal_command_sender::TerminalCommandSenderEntity>,
     _terminal_command_sender_observation: Subscription,
     local_terminal_command_history: SharedTerminalCommandHistory,
@@ -895,6 +897,7 @@ pub(crate) struct WorkspaceApp {
     pending_standalone_sftp_pair_launches:
         HashMap<String, new_connection::PendingStandaloneSftpPairLaunch>,
     embedded_sftp_node_id: Option<NodeId>,
+    embedded_sftp_pinned: bool,
     sftp_presentation_request: Option<sftp::SftpPresentationRequest>,
     ide_workspace: Entity<ide::IdeWorkspaceEntity>,
     _ide_workspace_subscription: Subscription,

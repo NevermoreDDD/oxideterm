@@ -15,9 +15,9 @@ use oxideterm_ai::{
 use oxideterm_settings::{
     DEFAULT_AI_TOOL_MAX_CALLS_PER_ROUND, DEFAULT_AI_TOOL_MAX_ROUNDS,
     MAX_AI_TOOL_MAX_CALLS_PER_ROUND, MAX_AI_TOOL_MAX_ROUNDS, MAX_TERMINAL_FONT_WEIGHT,
-    MIN_AI_TOOL_MAX_CALLS_PER_ROUND, MIN_AI_TOOL_MAX_ROUNDS, MIN_TERMINAL_FONT_WEIGHT,
-    PersistedSettings, RECOMMENDED_FOCUS_HANDOFF_COMMANDS, SettingsUpstreamProxyAuth,
-    UpdateProxyMode, parse_terminal_session_log_content_template,
+    MAX_TERMINAL_PADDING, MIN_AI_TOOL_MAX_CALLS_PER_ROUND, MIN_AI_TOOL_MAX_ROUNDS,
+    MIN_TERMINAL_FONT_WEIGHT, PersistedSettings, RECOMMENDED_FOCUS_HANDOFF_COMMANDS,
+    SettingsUpstreamProxyAuth, UpdateProxyMode, parse_terminal_session_log_content_template,
     parse_terminal_session_log_directory_template, parse_terminal_session_log_file_name_template,
     reindex_highlight_rules,
 };
@@ -25,7 +25,7 @@ use oxideterm_terminal_semantic::SEMANTIC_CLASSES;
 
 use crate::{
     SettingsInput, ai_update_provider, edit_custom_semantic_scheme,
-    parse_focus_handoff_command_list, set_ai_model_max_response_tokens, set_ai_user_context_window,
+    parse_focus_handoff_command_list, set_ai_user_context_window,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +45,16 @@ pub fn persisted_settings_input_value(
         SettingsInput::TerminalFontWeight => settings.terminal.font_weight.to_string(),
         SettingsInput::TerminalScrollback => settings.terminal.scrollback.to_string(),
         SettingsInput::TerminalLineHeight => compact_decimal(settings.terminal.line_height),
+        SettingsInput::TerminalPaddingHorizontal => {
+            settings.terminal.padding_horizontal.to_string()
+        }
+        SettingsInput::TerminalPaddingVertical => settings.terminal.padding_vertical.to_string(),
+        SettingsInput::IdeCustomFontFamily => settings.ide.custom_font_family.clone(),
+        SettingsInput::IdeFontWeight => settings
+            .ide
+            .font_weight
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
         SettingsInput::IdeFontSize => settings
             .ide
             .font_size
@@ -305,21 +315,6 @@ pub fn persisted_settings_input_value(
                     .map(|value| value.to_string())
             })
             .unwrap_or_default(),
-        SettingsInput::AiActiveModelMaxResponseTokens => settings
-            .ai
-            .active_provider_id
-            .as_ref()
-            .zip(settings.ai.active_model.as_ref())
-            .and_then(|(provider_id, model)| {
-                settings
-                    .ai
-                    .model_max_response_tokens
-                    .get(provider_id)
-                    .and_then(|models| models.get(model))
-                    .and_then(serde_json::Value::as_i64)
-            })
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
         SettingsInput::AiEmbeddingModel => settings
             .ai
             .embedding_config
@@ -358,6 +353,28 @@ pub fn apply_persisted_settings_input_draft(
         SettingsInput::TerminalLineHeight => parse_f64(draft)
             .map(|value| settings.terminal.line_height = value.clamp(0.8, 2.0))
             .into(),
+        SettingsInput::TerminalPaddingHorizontal => parse_i64(draft)
+            .map(|value| {
+                settings.terminal.padding_horizontal = value.clamp(0, MAX_TERMINAL_PADDING)
+            })
+            .into(),
+        SettingsInput::TerminalPaddingVertical => parse_i64(draft)
+            .map(|value| settings.terminal.padding_vertical = value.clamp(0, MAX_TERMINAL_PADDING))
+            .into(),
+        SettingsInput::IdeCustomFontFamily => {
+            settings.ide.custom_font_family = draft.trim().to_string();
+            SettingsInputDraftApply::Applied
+        }
+        SettingsInput::IdeFontWeight => {
+            if draft.trim().is_empty() {
+                settings.ide.font_weight = None;
+                SettingsInputDraftApply::Applied
+            } else {
+                parse_i64(draft)
+                    .map(|value| settings.ide.font_weight = Some(value.clamp(100, 900)))
+                    .into()
+            }
+        }
         SettingsInput::IdeFontSize => {
             let value = draft.trim();
             if value.is_empty() {
@@ -458,7 +475,7 @@ pub fn apply_persisted_settings_input_draft(
             .map(|value| settings.terminal.session_log.retention_days = value.clamp(0, 3650))
             .into(),
         SettingsInput::TerminalSessionLogMaxFileSizeMib => parse_i64(draft)
-            .map(|value| settings.terminal.session_log.max_file_size_mib = value.clamp(1, 4096))
+            .map(|value| settings.terminal.session_log.max_file_size_mib = value.clamp(0, 4096))
             .into(),
         SettingsInput::TerminalSessionLogDirectory => {
             let directory = draft.trim();
@@ -682,21 +699,6 @@ pub fn apply_persisted_settings_input_draft(
             set_ai_user_context_window(settings, &provider_id, &model, draft.trim().parse().ok());
             SettingsInputDraftApply::Applied
         }
-        SettingsInput::AiActiveModelMaxResponseTokens => {
-            let Some(provider_id) = settings.ai.active_provider_id.clone() else {
-                return SettingsInputDraftApply::Applied;
-            };
-            let Some(model) = settings.ai.active_model.clone() else {
-                return SettingsInputDraftApply::Applied;
-            };
-            set_ai_model_max_response_tokens(
-                settings,
-                &provider_id,
-                &model,
-                draft.trim().parse().ok(),
-            );
-            SettingsInputDraftApply::Applied
-        }
         SettingsInput::AiEmbeddingModel => {
             let value = draft.trim().to_string();
             let mut config = settings
@@ -873,6 +875,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ide_font_preferences_persist_and_legacy_settings_inherit() {
+        let old = serde_json::json!({"autoSave":false,"fontSize":14,"lineHeight":1.2,"agentMode":"ask","wordWrap":false});
+        let inherited: oxideterm_settings::IdeSettings = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            (
+                inherited.font_family,
+                inherited.cjk_font_family,
+                inherited.font_weight
+            ),
+            (None, None, None)
+        );
+        let settings = oxideterm_settings::IdeSettings {
+            font_family: Some(oxideterm_settings::FontFamily::Maple),
+            cjk_font_family: Some("PingFang SC".into()),
+            font_weight: Some(600),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(settings).unwrap(),
+            serde_json::json!({
+                "autoSave":false,"fontFamily":"maple","customFontFamily":"","cjkFontFamily":"PingFang SC","fontWeight":600,
+                "fontSize":null,"lineHeight":null,"agentMode":"ask","wordWrap":false
+            })
+        );
+    }
+
+    #[test]
+    fn ide_font_weight_supports_independent_values_and_inheritance() {
+        let mut settings = PersistedSettings::default();
+        settings.terminal.font_weight = 400;
+        for (draft, expected) in [
+            ("650", Some(650)),
+            ("950", Some(900)),
+            ("50", Some(100)),
+            ("", None),
+        ] {
+            assert_eq!(
+                apply_persisted_settings_input_draft(
+                    &mut settings,
+                    SettingsInput::IdeFontWeight,
+                    draft
+                ),
+                SettingsInputDraftApply::Applied
+            );
+            assert_eq!(settings.ide.font_weight, expected);
+            assert_eq!(settings.terminal.font_weight, 400);
+        }
+        assert_eq!(
+            apply_persisted_settings_input_draft(
+                &mut settings,
+                SettingsInput::IdeFontWeight,
+                "invalid"
+            ),
+            SettingsInputDraftApply::Invalid
+        );
+        assert_eq!(settings.ide.font_weight, None);
+    }
+
+    #[test]
+    fn terminal_padding_inputs_preserve_the_other_axis_and_reject_invalid_text() {
+        let mut settings = PersistedSettings::default();
+        assert_eq!(
+            apply_persisted_settings_input_draft(
+                &mut settings,
+                SettingsInput::TerminalPaddingHorizontal,
+                "0"
+            ),
+            SettingsInputDraftApply::Applied
+        );
+        assert_eq!(
+            apply_persisted_settings_input_draft(
+                &mut settings,
+                SettingsInput::TerminalPaddingVertical,
+                "12"
+            ),
+            SettingsInputDraftApply::Applied
+        );
+        assert_eq!(
+            (
+                settings.terminal.padding_horizontal,
+                settings.terminal.padding_vertical
+            ),
+            (0, 12)
+        );
+        assert_eq!(
+            persisted_settings_input_value(&settings, SettingsInput::TerminalPaddingVertical)
+                .as_deref(),
+            Some("12")
+        );
+        assert_eq!(
+            apply_persisted_settings_input_draft(
+                &mut settings,
+                SettingsInput::TerminalPaddingVertical,
+                "abc"
+            ),
+            SettingsInputDraftApply::Invalid
+        );
+        assert_eq!(settings.terminal.padding_vertical, 12);
+    }
+
+    #[test]
     fn persisted_number_drafts_clamp_in_model_layer() {
         let mut settings = PersistedSettings::default();
 
@@ -909,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn session_log_limits_accept_forever_retention_and_bound_file_size() {
+    fn session_log_limits_accept_unlimited_retention_and_file_size() {
         let mut settings = PersistedSettings::default();
 
         assert_eq!(
@@ -931,6 +1034,16 @@ mod tests {
             SettingsInputDraftApply::Applied
         );
         assert_eq!(settings.terminal.session_log.max_file_size_mib, 4096);
+
+        assert_eq!(
+            apply_persisted_settings_input_draft(
+                &mut settings,
+                SettingsInput::TerminalSessionLogMaxFileSizeMib,
+                "0",
+            ),
+            SettingsInputDraftApply::Applied
+        );
+        assert_eq!(settings.terminal.session_log.max_file_size_mib, 0);
     }
 
     #[test]

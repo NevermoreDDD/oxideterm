@@ -1,48 +1,54 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
+
+use oxideterm_editor_core::{BufferOffset, TextRange};
 use tree_sitter::{Language, Parser, Query, Tree};
 
 use crate::{
-    BracketPair, FoldRange, HighlightSpan, LanguageId, SyntaxEdit, SyntaxError, brackets, folding,
-    highlight, indent,
+    BracketPair, FoldRange, HighlightSpan, LanguageId, SyntaxChange, SyntaxEdit, SyntaxError,
+    brackets, folding, highlight, indent,
 };
 
 pub struct SyntaxSession {
-    language_id: LanguageId,
+    pub(crate) language_id: LanguageId,
     language: Language,
     parser: Parser,
-    highlight_query: Query,
-    markdown_inline_query: Option<Query>,
-    tree: Tree,
+    pub(crate) queries: Arc<LanguageQueries>,
+    pub(crate) tree: Tree,
+    pub(crate) cache_owner: Arc<()>,
+    pub(crate) revision: u64,
 }
 
 impl SyntaxSession {
     pub fn parse(language_id: LanguageId, source: &str) -> Result<Self, SyntaxError> {
+        Self::parse_controlled(language_id, source, None)
+    }
+
+    pub fn parse_controlled(
+        language_id: LanguageId,
+        source: &str,
+        work: Option<&crate::SyntaxWork>,
+    ) -> Result<Self, SyntaxError> {
+        crate::work::checkpoint(work)?;
         let language = language_id.tree_sitter_language();
         let mut parser = Parser::new();
         parser.set_language(&language)?;
-        let highlight_query = Query::new(&language, language_id.highlight_query())?;
-        let markdown_inline_query = if language_id == LanguageId::Markdown {
-            let inline_language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
-            Some(Query::new(
-                &inline_language,
-                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
-            )?)
-        } else {
-            None
-        };
-        let tree = parser
-            .parse(source, None)
-            .ok_or(SyntaxError::ParseCancelled)?;
+        let queries = LanguageQueries::shared(language_id, &language)?;
+        let tree = crate::work::parse(&mut parser, source, None, work)?;
 
         Ok(Self {
             language_id,
             language,
             parser,
-            highlight_query,
-            markdown_inline_query,
+            queries,
             tree,
+            cache_owner: Arc::new(()),
+            revision: 0,
         })
     }
 
@@ -54,18 +60,41 @@ impl SyntaxSession {
         self.tree.root_node().has_error()
     }
 
-    pub fn apply_edit(&mut self, source_after: &str, edit: SyntaxEdit) -> Result<(), SyntaxError> {
+    pub fn apply_edit(
+        &mut self,
+        source_after: &str,
+        edit: SyntaxEdit,
+    ) -> Result<SyntaxChange, SyntaxError> {
+        self.apply_edit_controlled(source_after, edit, None)
+    }
+
+    /// On cancellation, discard the session or fully reparse before reuse.
+    pub fn apply_edit_controlled(
+        &mut self,
+        source_after: &str,
+        edit: SyntaxEdit,
+        work: Option<&crate::SyntaxWork>,
+    ) -> Result<SyntaxChange, SyntaxError> {
+        crate::work::checkpoint(work)?;
         // tree-sitter incremental parsing requires the old tree to be edited
         // with the same byte/point delta before it is passed back as a hint.
         self.tree.edit(&edit.as_input_edit());
-        self.tree = self
-            .parser
-            .parse(source_after, Some(&self.tree))
-            .ok_or(SyntaxError::ParseCancelled)?;
-        Ok(())
+        let tree = crate::work::parse(&mut self.parser, source_after, Some(&self.tree), work)?;
+        let old_tree = std::mem::replace(&mut self.tree, tree);
+        self.revision += 1;
+        Ok(SyntaxChange {
+            edit,
+            owner: self.cache_owner.clone(),
+            revision: self.revision,
+            structural_ranges: Default::default(),
+            old_tree,
+            new_tree: self.tree.clone(),
+        })
     }
 
     pub fn reparse(&mut self, source: &str) -> Result<(), SyntaxError> {
+        self.cache_owner = Arc::new(());
+        self.revision = 0;
         self.parser.set_language(&self.language)?;
         self.tree = self
             .parser
@@ -75,17 +104,54 @@ impl SyntaxSession {
     }
 
     pub fn highlight_spans(&self, source: &str) -> Vec<HighlightSpan> {
+        self.highlight_spans_in_range(
+            source,
+            TextRange::new(BufferOffset(0), BufferOffset(source.len())),
+        )
+    }
+
+    /// Return full, absolute spans intersecting a half-open byte range, without
+    /// clipping captures that cross its edges. Source must match this session's tree.
+    pub fn highlight_spans_in_range(&self, source: &str, range: TextRange) -> Vec<HighlightSpan> {
+        self.highlights_controlled(source, range, None)
+            .expect("uncontrolled highlight queries cannot be cancelled")
+    }
+
+    pub fn highlights_controlled(
+        &self,
+        source: &str,
+        range: TextRange,
+        work: Option<&crate::SyntaxWork>,
+    ) -> Result<Vec<HighlightSpan>, SyntaxError> {
         highlight::highlight_spans(
             self.language_id,
             &self.tree,
-            &self.highlight_query,
-            self.markdown_inline_query.as_ref(),
+            &self.queries.highlight,
+            self.queries.markdown_inline.as_ref(),
             source,
+            range.start.0..range.end.0,
+            work,
         )
     }
 
     pub fn bracket_pairs(&self, source: &str) -> Vec<BracketPair> {
         brackets::bracket_pairs(source)
+    }
+
+    pub fn bracket_index_controlled(
+        &self,
+        source: &str,
+        work: Option<&crate::SyntaxWork>,
+    ) -> Result<crate::BracketIndex, SyntaxError> {
+        crate::BracketIndex::new(self.brackets_controlled(source, work)?, work)
+    }
+
+    pub fn brackets_controlled(
+        &self,
+        source: &str,
+        work: Option<&crate::SyntaxWork>,
+    ) -> Result<Vec<BracketPair>, SyntaxError> {
+        brackets::bracket_pairs_controlled(source, work)
     }
 
     pub fn fold_ranges(&self) -> Vec<FoldRange> {
@@ -94,5 +160,43 @@ impl SyntaxSession {
 
     pub fn indent_guides(&self, source: &str, tab_size: usize) -> Vec<crate::IndentGuide> {
         indent::indent_guides(self.tree.root_node(), source, tab_size)
+    }
+}
+
+/// Queries are immutable language data; parsers, trees and cursors stay per document.
+pub(crate) struct LanguageQueries {
+    pub(crate) highlight: Query,
+    markdown_inline: Option<Query>,
+}
+
+impl LanguageQueries {
+    fn shared(language_id: LanguageId, language: &Language) -> Result<Arc<Self>, SyntaxError> {
+        static QUERIES: OnceLock<Mutex<HashMap<LanguageId, Weak<LanguageQueries>>>> =
+            OnceLock::new();
+        let mut queries = QUERIES
+            .get_or_init(Mutex::default)
+            .lock()
+            .expect("language query cache poisoned");
+        if let Some(existing) = queries.get(&language_id).and_then(Weak::upgrade) {
+            return Ok(existing);
+        }
+        let highlight = Query::new(language, language_id.highlight_query())?;
+        let markdown_inline = if language_id == LanguageId::Markdown {
+            let language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
+            Some(Query::new(
+                &language,
+                tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
+            )?)
+        } else {
+            None
+        };
+        let compiled = Arc::new(Self {
+            highlight,
+            markdown_inline,
+        });
+        // Idle languages retain only a weak entry; closing the last document
+        // releases the compiled queries along with its syntax state.
+        queries.insert(language_id, Arc::downgrade(&compiled));
+        Ok(compiled)
     }
 }

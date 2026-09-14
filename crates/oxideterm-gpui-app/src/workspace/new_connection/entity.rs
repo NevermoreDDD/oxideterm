@@ -10,7 +10,7 @@ use std::{
 };
 
 use gpui::{Context, EventEmitter, Task, Timer};
-use oxideterm_connections::SaveConnectionRequest;
+use oxideterm_connections::{SaveConnectionRequest, SecretString};
 use oxideterm_editor_core::utf16::replace_utf16;
 use oxideterm_gpui_ui::select::{OverlayAnchor, SelectAnchorId};
 use oxideterm_ssh::{
@@ -86,6 +86,8 @@ pub(in crate::workspace) struct ConnectionFlowEntity {
     cancelled_proxy_connect_runs: VecDeque<NativeProxyConnectRun>,
     next_proxy_connect_generation: u64,
     path_picker_task: Option<Task<()>>,
+    password_load_task: Option<Task<()>>,
+    next_password_load_id: u64,
     connection_form_exit_task: Option<Task<()>>,
     jump_server_exit_task: Option<Task<()>>,
     host_key_challenge: Option<HostKeyChallenge>,
@@ -161,6 +163,8 @@ impl ConnectionFlowEntity {
             cancelled_proxy_connect_runs: VecDeque::new(),
             next_proxy_connect_generation: 0,
             path_picker_task: None,
+            password_load_task: None,
+            next_password_load_id: 0,
             connection_form_exit_task: None,
             jump_server_exit_task: None,
             host_key_challenge: None,
@@ -376,6 +380,16 @@ impl ConnectionFlowEntity {
             return false;
         };
         self.form.close_select();
+        self.password_load_task = None;
+        if let Some(form) = self.form.form.as_mut() {
+            form.password_load_id = None;
+            if form.password_from_store {
+                zeroize::Zeroize::zeroize(&mut form.password);
+                form.password_from_store = false;
+                form.password_loaded = false;
+                form.password_visible = false;
+            }
+        }
         self.connection_form_exit_task = None;
         if delay.is_zero() {
             self.finish_connection_form_exit(generation, cx);
@@ -468,6 +482,72 @@ impl ConnectionFlowEntity {
                 cx.notify();
             });
         }));
+        true
+    }
+
+    pub(in crate::workspace) fn start_password_load(
+        &mut self,
+        load: impl std::future::Future<Output = Result<SecretString, ()>> + 'static,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(form) = self.form.form.as_mut() else {
+            return false;
+        };
+        if form.password_loaded
+            || form.password_load_id.is_some()
+            || self.form.presence.phase() == oxideterm_gpui_ui::motion::ExitPhase::Exiting
+        {
+            return false;
+        }
+        let Some(keychain_id) = form.saved_password_keychain_id.clone() else {
+            return false;
+        };
+        self.next_password_load_id = self.next_password_load_id.wrapping_add(1);
+        let load_id = self.next_password_load_id;
+        form.password_load_id = Some(load_id);
+        form.password_load_failed = false;
+        // The form owner cancels the waiter on close or another reveal. A late result
+        // owns a zeroizing value and cannot enter a replacement form or edited draft.
+        self.password_load_task = Some(cx.spawn(async move |entity, cx| {
+            let result = load.await;
+            let _ = entity.update(cx, |entity, cx| {
+                if entity.next_password_load_id != load_id {
+                    return;
+                }
+                entity.password_load_task = None;
+                let Some(form) = entity.form.form.as_mut() else {
+                    return;
+                };
+                if form.password_load_id != Some(load_id) {
+                    return;
+                }
+                form.password_load_id = None;
+                if form.password_loaded
+                    || form.saved_password_keychain_id.as_ref() != Some(&keychain_id)
+                    || form.auth_tab != super::SshAuthTab::Password
+                    || entity.form.presence.phase() == oxideterm_gpui_ui::motion::ExitPhase::Exiting
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(password) => {
+                        let mut password = password.into_zeroizing();
+                        zeroize::Zeroize::zeroize(&mut form.password);
+                        form.password = std::mem::take(&mut *password);
+                        form.password_loaded = true;
+                        form.password_from_store = true;
+                        form.password_visible = true;
+                        if form.focused_field == NewConnectionField::Password {
+                            clear_connection_selection(form);
+                        }
+                    }
+                    Err(()) => form.password_load_failed = true,
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
         true
     }
 
@@ -693,6 +773,10 @@ impl ConnectionFlowEntity {
         response_tx: oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.clear_inactive_keyboard_interactive_challenge(cx);
+        if response_tx.is_closed() {
+            return false;
+        }
         if let Some(existing) = self.keyboard_interactive_challenge.as_ref()
             && existing.request.flow_id != request.flow_id
         {
@@ -717,22 +801,44 @@ impl ConnectionFlowEntity {
         true
     }
 
+    fn clear_inactive_keyboard_interactive_challenge(&mut self, cx: &mut Context<Self>) {
+        let Some(challenge) = self.keyboard_interactive_challenge.as_ref() else {
+            return;
+        };
+        // An exiting dialog retains its payload only until its existing animation completes.
+        if challenge.presence.phase() == oxideterm_gpui_ui::motion::ExitPhase::Exiting {
+            return;
+        }
+        let timed_out = challenge.timed_out();
+        let waiter_closed = challenge
+            .response_tx
+            .as_ref()
+            .is_none_or(|tx| tx.is_closed());
+        if !timed_out && !waiter_closed {
+            return;
+        }
+        if let Some(mut challenge) = self.keyboard_interactive_challenge.take()
+            && timed_out
+            && let Some(response_tx) = challenge.response_tx.take()
+        {
+            let _ = response_tx.send(Err(SshPromptError::Timeout));
+        }
+        // The transport waiter and the UI answer buffer must end together, including retries.
+        cx.notify();
+    }
+
     fn schedule_keyboard_interactive_timer(&mut self, generation: u64, cx: &mut Context<Self>) {
         self.keyboard_interactive_timer_task = Some(cx.spawn(async move |connection_flow, cx| {
             loop {
                 Timer::after(Duration::from_secs(1)).await;
                 let keep_ticking = connection_flow
                     .update(cx, |connection_flow, cx| {
-                        let Some(challenge) =
-                            connection_flow.keyboard_interactive_challenge.as_ref()
-                        else {
-                            return false;
-                        };
                         if connection_flow.keyboard_interactive_timer_generation != generation {
                             return false;
                         }
+                        connection_flow.clear_inactive_keyboard_interactive_challenge(cx);
                         cx.notify();
-                        !challenge.timed_out()
+                        connection_flow.has_keyboard_interactive_challenge()
                     })
                     .unwrap_or(false);
                 if !keep_ticking {
@@ -1231,6 +1337,64 @@ mod tests {
     }
 
     #[gpui::test]
+    fn abandoned_keyboard_interactive_request_does_not_block_next_prompt(cx: &mut TestAppContext) {
+        let entity = cx.new(ConnectionFlowEntity::new);
+        let (first_tx, first_rx) = oneshot::channel();
+        let (next_tx, mut next_rx) = oneshot::channel();
+
+        entity.update(cx, |entity, cx| {
+            assert!(entity.open_keyboard_interactive_challenge(
+                keyboard_interactive_request("expired-flow"),
+                first_tx,
+                cx,
+            ));
+        });
+        // The transport drops its waiter when authentication times out or is cancelled.
+        drop(first_rx);
+        entity.update(cx, |entity, cx| {
+            assert!(entity.open_keyboard_interactive_challenge(
+                keyboard_interactive_request("next-flow"),
+                next_tx,
+                cx,
+            ));
+            assert!(entity.replace_keyboard_interactive_response(0, None, "123456", cx));
+            assert!(matches!(
+                entity.submit_keyboard_interactive_challenge(cx),
+                super::KeyboardInteractiveSubmitResult::Submitted
+            ));
+        });
+        assert_eq!(next_rx.try_recv().unwrap().unwrap().as_slice(), ["123456"]);
+    }
+
+    #[gpui::test]
+    fn expired_keyboard_interactive_prompt_rejects_waiter_and_releases_input(
+        cx: &mut TestAppContext,
+    ) {
+        let entity = cx.new(ConnectionFlowEntity::new);
+        let (response_tx, mut response_rx) = oneshot::channel();
+        entity.update(cx, |entity, cx| {
+            assert!(entity.open_keyboard_interactive_challenge(
+                keyboard_interactive_request("expired-flow"),
+                response_tx,
+                cx,
+            ));
+            assert!(entity.replace_keyboard_interactive_response(0, None, "123456", cx));
+            entity
+                .keyboard_interactive_challenge
+                .as_mut()
+                .unwrap()
+                .expires_at = std::time::Instant::now();
+            entity.clear_inactive_keyboard_interactive_challenge(cx);
+            assert!(!entity.has_keyboard_interactive_challenge());
+            assert!(entity.focused_keyboard_interactive_prompt().is_none());
+        });
+        assert!(matches!(
+            response_rx.try_recv(),
+            Ok(Err(SshPromptError::Timeout))
+        ));
+    }
+
+    #[gpui::test]
     fn cancelling_keyboard_interactive_challenge_rejects_waiter_and_drops_answers(
         cx: &mut TestAppContext,
     ) {
@@ -1332,6 +1496,137 @@ mod tests {
             assert!(form.jump_server_form.is_none());
             assert_eq!(form.proxy_hops.len(), 1);
             assert_eq!(form.proxy_hops[0].host, "jump.example.test");
+        });
+    }
+}
+
+#[cfg(test)]
+mod saved_password_tests {
+    use super::*;
+    use crate::workspace::new_connection::form_state::{
+        clear_current_connection_field, insert_text_into_current_connection_field,
+        toggle_connection_secret_field_visibility,
+    };
+    use crate::workspace::new_connection::{NewConnectionForm, SshAuthTab};
+    use gpui::{AppContext, TestAppContext};
+
+    fn saved_form() -> NewConnectionForm {
+        let mut form = NewConnectionForm::default();
+        form.saved_password_keychain_id = Some("test-password-owner".into());
+        form.password_loaded = false;
+        form.auth_tab = SshAuthTab::Password;
+        form.focused_field = NewConnectionField::Password;
+        form
+    }
+
+    #[gpui::test]
+    fn saved_password_reveal_and_hide_preserve_the_stored_reference(cx: &mut TestAppContext) {
+        let entity = cx.new(ConnectionFlowEntity::new);
+        entity.update(cx, |entity, cx| {
+            entity.form.replace_with_new_form(saved_form());
+            assert!(
+                entity
+                    .start_password_load(async { Ok(SecretString::from("saved-test-secret")) }, cx)
+            );
+        });
+        cx.run_until_parked();
+        entity.update(cx, |entity, _| {
+            let form = entity.form.form.as_mut().unwrap();
+            assert_eq!(form.password, "saved-test-secret");
+            assert!(form.password_loaded && form.password_visible && form.password_from_store);
+            assert!(!format!("{form:?}").contains("saved-test-secret"));
+            toggle_connection_secret_field_visibility(form, NewConnectionField::Password);
+            assert!(form.password.is_empty());
+            assert!(!form.password_loaded && !form.password_visible);
+            assert_eq!(
+                form.saved_password_keychain_id.as_deref(),
+                Some("test-password-owner")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn saved_password_load_cannot_overwrite_edits_or_a_replacement_form(cx: &mut TestAppContext) {
+        for scenario in 0..3 {
+            let entity = cx.new(ConnectionFlowEntity::new);
+            let (tx, rx) = oneshot::channel();
+            entity.update(cx, |entity, cx| {
+                entity.form.replace_with_new_form(saved_form());
+                entity.start_password_load(async move { rx.await.unwrap() }, cx);
+            });
+            cx.run_until_parked();
+            entity.update(cx, |entity, _| {
+                if scenario == 2 {
+                    entity.form.replace_with_new_form(saved_form());
+                } else {
+                    let form = entity.form.form.as_mut().unwrap();
+                    insert_text_into_current_connection_field(form, "replacement");
+                    if scenario == 1 {
+                        clear_current_connection_field(form);
+                        form.password_loaded = false;
+                    }
+                }
+            });
+            tx.send(Ok(SecretString::from("stale-test-secret")))
+                .unwrap();
+            cx.run_until_parked();
+            entity.read_with(cx, |entity, _| {
+                let form = entity.form.form.as_ref().unwrap();
+                assert_eq!(
+                    form.password,
+                    if scenario == 0 { "replacement" } else { "" }
+                );
+                assert!(!form.password_from_store);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn closing_form_cancels_pending_password_load_before_exit_animation(cx: &mut TestAppContext) {
+        let entity = cx.new(ConnectionFlowEntity::new);
+        let (tx, rx) = oneshot::channel::<Result<SecretString, ()>>();
+        entity.update(cx, |entity, cx| {
+            entity.form.replace_with_new_form(saved_form());
+            entity.start_password_load(async move { rx.await.unwrap() }, cx);
+        });
+        cx.run_until_parked();
+        entity.update(cx, |entity, cx| {
+            entity.begin_connection_form_exit(Duration::from_millis(200), cx);
+            assert!(entity.password_load_task.is_none());
+            assert!(
+                entity
+                    .form
+                    .form
+                    .as_ref()
+                    .unwrap()
+                    .password_load_id
+                    .is_none()
+            );
+        });
+        cx.run_until_parked();
+        assert!(tx.is_closed());
+    }
+
+    #[gpui::test]
+    fn saved_password_read_failure_can_be_retried(cx: &mut TestAppContext) {
+        let entity = cx.new(ConnectionFlowEntity::new);
+        entity.update(cx, |entity, cx| {
+            entity.form.replace_with_new_form(saved_form());
+            entity.start_password_load(async { Err(()) }, cx);
+        });
+        cx.run_until_parked();
+        entity.update(cx, |entity, cx| {
+            let form = entity.form.form.as_ref().unwrap();
+            assert!(form.password_load_failed && form.password.is_empty() && !form.password_loaded);
+            assert!(
+                entity.start_password_load(async { Ok(SecretString::from("retry-secret")) }, cx)
+            );
+        });
+        cx.run_until_parked();
+        entity.read_with(cx, |entity, _| {
+            let form = entity.form.form.as_ref().unwrap();
+            assert_eq!(form.password, "retry-secret");
+            assert!(!form.password_load_failed);
         });
     }
 }

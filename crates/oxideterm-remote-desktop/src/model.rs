@@ -379,6 +379,37 @@ impl RemoteDesktopEndpoint {
     }
 }
 
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDesktopSocksProxy {
+    pub host: String,
+    pub port: u16,
+    pub remote_dns: bool,
+    pub no_proxy: String,
+    pub auth: Option<RemoteDesktopProxyAuth>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoteDesktopProxyAuth {
+    pub username: String,
+    pub password: crate::RemoteDesktopSecret,
+}
+
+impl RemoteDesktopSocksProxy {
+    pub fn duplicate_for_connect(&self) -> Self {
+        Self {
+            host: self.host.clone(),
+            port: self.port,
+            remote_dns: self.remote_dns,
+            no_proxy: self.no_proxy.clone(),
+            auth: self.auth.as_ref().map(|auth| RemoteDesktopProxyAuth {
+                username: auth.username.clone(),
+                password: auth.password.duplicate_for_reauthentication(),
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteDesktopConnectionProfile {
@@ -389,6 +420,9 @@ pub struct RemoteDesktopConnectionProfile {
     /// Optional loopback tunnel endpoint; the public endpoint remains the server identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_endpoint: Option<RemoteDesktopEndpoint>,
+    /// Runtime-only proxy credentials belong to the session, never to profile exports.
+    #[serde(skip)]
+    pub socks_proxy: Option<std::sync::Arc<RemoteDesktopSocksProxy>>,
     pub username: Option<String>,
     pub domain: Option<String>,
     pub credential_ref: Option<String>,
@@ -420,6 +454,7 @@ impl RemoteDesktopConnectionProfile {
             protocol,
             endpoint,
             transport_endpoint: None,
+            socks_proxy: None,
             username: None,
             domain: None,
             credential_ref: None,
@@ -487,28 +522,66 @@ mod quick_connect_tests {
     use super::*;
 
     #[test]
-    fn quick_connect_uses_protocol_default_ports() {
-        let vnc = RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com").unwrap();
-        let rdp = RemoteDesktopConnectionProfile::parse_quick_connect("rdp://example.com").unwrap();
-
-        assert_eq!(vnc.protocol, RemoteDesktopProtocol::Vnc);
-        assert_eq!(
-            vnc.endpoint,
-            RemoteDesktopEndpoint::new("example.com", 5900)
-        );
-        assert_eq!(vnc.label, "vnc://example.com:5900");
-        assert_eq!(rdp.endpoint.port, 3389);
+    fn runtime_proxy_secret_is_redacted_and_excluded_from_profile_exports() {
+        let mut profile =
+            RemoteDesktopConnectionProfile::parse_quick_connect("rdp://desktop.test").unwrap();
+        profile.socks_proxy = Some(std::sync::Arc::new(RemoteDesktopSocksProxy {
+            host: "proxy.test".into(),
+            port: 1080,
+            remote_dns: true,
+            no_proxy: String::new(),
+            auth: Some(RemoteDesktopProxyAuth {
+                username: "proxy-user".into(),
+                password: "proxy-secret".into(),
+            }),
+        }));
+        assert!(!format!("{profile:?}").contains("proxy-secret"));
+        let encoded = serde_json::to_string(&profile).unwrap();
+        assert!(!encoded.contains("proxy-secret"));
+        assert!(!encoded.contains("socksProxy"));
+        let restored: RemoteDesktopConnectionProfile = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.socks_proxy.is_none());
+        assert_eq!(restored.endpoint, profile.endpoint);
     }
 
     #[test]
-    fn quick_connect_accepts_explicit_port_and_ipv6() {
-        let explicit =
-            RemoteDesktopConnectionProfile::parse_quick_connect("vnc://example.com:5901").unwrap();
-        let ipv6 = RemoteDesktopConnectionProfile::parse_quick_connect("vnc://[::1]:5902").unwrap();
-
-        assert_eq!(explicit.endpoint.port, 5901);
-        assert_eq!(ipv6.endpoint, RemoteDesktopEndpoint::new("::1", 5902));
-        assert_eq!(ipv6.quick_connect_target(), "vnc://[::1]:5902");
+    fn quick_connect_resolves_protocol_ports_and_ipv6_authorities() {
+        for (query, protocol, host, port, target) in [
+            (
+                "vnc://example.com",
+                RemoteDesktopProtocol::Vnc,
+                "example.com",
+                5900,
+                "vnc://example.com:5900",
+            ),
+            (
+                "rdp://example.com",
+                RemoteDesktopProtocol::Rdp,
+                "example.com",
+                3389,
+                "rdp://example.com:3389",
+            ),
+            (
+                "vnc://example.com:5901",
+                RemoteDesktopProtocol::Vnc,
+                "example.com",
+                5901,
+                "vnc://example.com:5901",
+            ),
+            (
+                "vnc://[::1]:5902",
+                RemoteDesktopProtocol::Vnc,
+                "::1",
+                5902,
+                "vnc://[::1]:5902",
+            ),
+        ] {
+            let profile = RemoteDesktopConnectionProfile::parse_quick_connect(query).unwrap();
+            assert_eq!(profile.protocol, protocol);
+            assert_eq!(profile.endpoint, RemoteDesktopEndpoint::new(host, port));
+            assert_eq!(profile.label, target);
+            assert_eq!(profile.quick_connect_target(), target);
+        }
     }
 
     #[test]

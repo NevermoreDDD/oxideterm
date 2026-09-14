@@ -181,6 +181,14 @@ impl TerminalSessionBackend for LocalPtySession {
         Some(LocalPtySession::search_source(self))
     }
 
+    fn set_selection(&self, selection: Option<crate::TerminalSelectionRange>) {
+        LocalPtySession::set_selection(self, selection);
+    }
+
+    fn selection(&self) -> Option<crate::TerminalSelectionRange> {
+        LocalPtySession::selection(self)
+    }
+
     fn clear_buffer(&mut self) {
         LocalPtySession::clear_buffer(self);
     }
@@ -203,6 +211,14 @@ impl TerminalSessionBackend for LocalPtySession {
 
     fn snapshot_incremental(&self, previous: &TerminalSnapshot) -> TerminalSnapshot {
         LocalPtySession::snapshot_incremental(self, previous)
+    }
+
+    fn try_render_snapshot(
+        &self,
+        previous: &TerminalSnapshot,
+        allow_defer: bool,
+    ) -> Option<(TerminalSnapshot, Option<crate::TerminalSelectionRange>, TermMode)> {
+        LocalPtySession::try_render_snapshot(self, previous, allow_defer)
     }
 
     fn snapshot_with_display_offset(

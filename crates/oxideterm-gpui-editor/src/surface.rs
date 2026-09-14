@@ -6,14 +6,17 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Dura
 use gpui::{
     AnyElement, App, Bounds, Context, Div, Element, ElementId, ElementInputHandler, Entity,
     FocusHandle, Focusable, GlobalElementId, InspectorElementId, IntoColor, IntoElement, LayoutId,
-    ParentElement, Pixels, Point, ScrollWheelEvent, SharedString, Task, TextRun, Timer, Window,
-    div, point, prelude::*, px, rgb,
+    ParentElement, Pixels, Point, ScrollWheelEvent, SharedString, Task, TextRun, Window, div,
+    point, prelude::*, px, rgb,
 };
 use oxideterm_editor_core::{
     BufferOffset, Cursor, EditTransaction, FindMatch, LineCol, Selection, TextBuffer, TextEdit,
     TextRange, word_at,
 };
-use oxideterm_editor_syntax::{BracketPair, HighlightSpan, LanguageId, SyntaxEdit, SyntaxSession};
+use oxideterm_editor_syntax::{
+    BracketIndex, BracketPair, HighlightCache, LanguageId, StructureCache, SyntaxEdit,
+    SyntaxSession,
+};
 use oxideterm_theme::ThemeTokens;
 
 use crate::{
@@ -23,21 +26,30 @@ use crate::{
 mod commands;
 mod coords;
 mod fold;
-mod indent_index;
 mod input;
 mod render;
 mod search;
+mod syntax_task;
 mod wrap;
 
-pub use commands::EditorCommand;
+pub use commands::{EditorCommand, EditorKeybindings, EditorShortcut};
 use coords::{byte_column_for_visual_column, visual_column_for_byte_column};
-use indent_index::IndentGuideIndex;
 use wrap::DisplayRow;
 
 pub type SaveCallback =
-    Box<dyn FnMut(&str, &mut Window, &mut Context<TextEditorView>) -> Result<(), String>>;
+    Box<dyn FnMut(Arc<str>, &mut Window, &mut Context<TextEditorView>) -> Result<(), String>>;
 pub type ModifiedWordClickCallback =
     Box<dyn FnMut(String, &mut Window, &mut Context<TextEditorView>) -> Result<(), String>>;
+
+pub const LARGE_FILE_THRESHOLD: usize = 10 * 1024 * 1024;
+
+fn normalize_editor_text(text: String) -> String {
+    if text.contains('\r') {
+        text.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        text
+    }
+}
 
 const EDITOR_CARET_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
@@ -204,7 +216,7 @@ struct DisplayRowsCache {
     wrap_column: Option<usize>,
     fold_revision: u64,
     max_width_columns: usize,
-    rows: Arc<Vec<DisplayRow>>,
+    rows: Arc<wrap::DisplayRows>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -278,12 +290,16 @@ pub struct TextEditorView {
     on_save: Option<SaveCallback>,
     on_modified_word_click: Option<ModifiedWordClickCallback>,
     save_status: EditorSaveStatus,
+    language: Option<LanguageId>,
     syntax: Option<SyntaxSession>,
-    highlight_spans: Vec<HighlightSpan>,
-    highlight_line_spans: Vec<Range<usize>>,
-    // Cursor movement queries bracket matches on every frame. Index every
-    // accepted caret slot so lookup does not rescan the document's pairs.
-    bracket_pair_by_caret: HashMap<usize, BracketPair>,
+    syntax_version: Option<u64>,
+    syntax_generation: Arc<std::sync::atomic::AtomicU64>,
+    syntax_executor: gpui::BackgroundExecutor,
+    syntax_task: Option<Task<()>>,
+    pending_syntax: Option<syntax_task::SyntaxRequest>,
+    highlight_spans: HighlightCache,
+    structure_cache: StructureCache,
+    bracket_index: BracketIndex,
     content_bounds: Option<Bounds<Pixels>>,
     marked_text: Option<MarkedText>,
     secondary_selections: Vec<Selection>,
@@ -294,9 +310,7 @@ pub struct TextEditorView {
     // indexed by line so each row does not scan every match in a large file.
     find_line_matches: Vec<Range<usize>>,
     active_find_index: Option<usize>,
-    foldable_ranges: Vec<FoldRange>,
     folded_ranges: Vec<FoldRange>,
-    indent_guide_index: IndentGuideIndex,
     fold_revision: u64,
     display_rows_cache: RefCell<Option<DisplayRowsCache>>,
     highlight_chunk_cache: RefCell<HighlightChunkCache>,
@@ -312,9 +326,15 @@ pub struct TextEditorView {
 }
 
 impl TextEditorView {
-    pub fn new(text: impl Into<String>, tokens: &ThemeTokens, cx: &mut Context<Self>) -> Self {
+    pub fn new(text: impl Into<Arc<str>>, tokens: &ThemeTokens, cx: &mut Context<Self>) -> Self {
         let metrics = EditorMetrics::from_theme(tokens);
         let settings = EditorSettings::default();
+        let text: Arc<str> = text.into();
+        let text = if text.contains('\r') {
+            normalize_editor_text(text.to_string()).into()
+        } else {
+            text
+        };
         let buffer = TextBuffer::new(text);
         Self {
             buffer,
@@ -328,9 +348,15 @@ impl TextEditorView {
             on_modified_word_click: None,
             save_status: EditorSaveStatus::Clean,
             syntax: None,
-            highlight_spans: Vec::new(),
-            highlight_line_spans: Vec::new(),
-            bracket_pair_by_caret: HashMap::new(),
+            syntax_version: None,
+            syntax_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            syntax_executor: cx.background_executor().clone(),
+            syntax_task: None,
+            pending_syntax: None,
+            language: None,
+            highlight_spans: HighlightCache::default(),
+            structure_cache: StructureCache::default(),
+            bracket_index: BracketIndex::default(),
             content_bounds: None,
             marked_text: None,
             secondary_selections: Vec::new(),
@@ -339,9 +365,7 @@ impl TextEditorView {
             find_matches: Vec::new(),
             find_line_matches: Vec::new(),
             active_find_index: None,
-            foldable_ranges: Vec::new(),
             folded_ranges: Vec::new(),
-            indent_guide_index: IndentGuideIndex::default(),
             fold_revision: 0,
             display_rows_cache: RefCell::new(None),
             highlight_chunk_cache: RefCell::new(HighlightChunkCache::default()),
@@ -388,9 +412,11 @@ impl TextEditorView {
         self.caret_blink_task = None;
         self.caret_visible = true;
         let generation = self.caret_blink_generation;
+        // Use the owning GPUI scheduler so tests can control time and local task wakeups.
+        let executor = cx.background_executor().clone();
         self.caret_blink_task = Some(cx.spawn(async move |editor, cx| {
             loop {
-                Timer::after(EDITOR_CARET_BLINK_INTERVAL).await;
+                executor.timer(EDITOR_CARET_BLINK_INTERVAL).await;
                 let should_continue = editor
                     .update(cx, |editor, cx| {
                         if editor.caret_blink_generation != generation
@@ -438,7 +464,7 @@ impl TextEditorView {
     }
 
     pub fn replace_text_external(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        let text = text.into();
+        let text = normalize_editor_text(text.into());
         if self.buffer.text() == text {
             return;
         }
@@ -453,7 +479,7 @@ impl TextEditorView {
             self.secondary_selections.clear();
             self.marked_text = None;
             self.save_status = EditorSaveStatus::Dirty;
-            self.reparse_syntax();
+            self.request_syntax(None, true, cx);
             self.clear_folds_after_buffer_change();
             self.refresh_find_matches();
             self.viewport
@@ -511,8 +537,13 @@ impl TextEditorView {
     }
 
     pub fn set_settings(&mut self, settings: EditorSettings, cx: &mut Context<Self>) {
+        let tab_changed = self.settings.tab_size != settings.tab_size;
         self.settings = settings;
-        self.refresh_foldable_ranges();
+        if tab_changed {
+            self.request_syntax(None, false, cx);
+        } else if self.syntax_task.is_none() {
+            self.refresh_foldable_ranges();
+        }
         self.viewport
             .clamp(self.document_row_count(), self.metrics.line_height);
         self.refresh_find_matches();
@@ -522,6 +553,8 @@ impl TextEditorView {
     pub fn apply_ide_runtime_settings(
         &mut self,
         tokens: &ThemeTokens,
+        font_family: String,
+        font_weight: f32,
         font_fallback_family: Option<String>,
         font_size: f32,
         line_height: f32,
@@ -531,7 +564,7 @@ impl TextEditorView {
     ) {
         self.apply_runtime_settings_with_fallback(
             tokens,
-            tokens.metrics.markdown_code_font_family.to_string(),
+            font_family,
             font_fallback_family,
             font_size,
             line_height,
@@ -539,6 +572,7 @@ impl TextEditorView {
             background_active,
             cx,
         );
+        self.appearance.font_weight = font_weight.clamp(100.0, 900.0);
     }
 
     pub fn apply_runtime_settings(
@@ -591,20 +625,21 @@ impl TextEditorView {
     }
 
     pub fn set_language(&mut self, language: Option<LanguageId>, cx: &mut Context<Self>) {
-        self.syntax = language.and_then(|language| {
-            self.buffer
-                .with_text(|text| SyntaxSession::parse(language, text).ok())
-        });
-        self.refresh_highlights();
+        self.language = language;
+        self.request_syntax(None, true, cx);
         self.refresh_foldable_ranges();
         cx.notify();
+    }
+
+    pub fn is_large_file(&self) -> bool {
+        self.buffer.len() > LARGE_FILE_THRESHOLD
     }
 
     pub fn insert_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         if self.read_only {
             return;
         }
-        self.replace_all_selections_with_caret(text, cx);
+        self.replace_all_selections_with_caret(normalize_editor_text(text.into()), cx);
     }
 
     pub fn delete_backward(&mut self, cx: &mut Context<Self>) {
@@ -721,22 +756,24 @@ impl TextEditorView {
         if range.is_empty() && replacement.is_empty() {
             return;
         }
+        let row_edit = self.unwrapped_row_edit(range, &replacement);
         let caret = BufferOffset(range.start.0 + replacement.len());
-        let syntax_edit = self.syntax.as_ref().map(|_| {
-            self.buffer
-                .with_text(|text| SyntaxEdit::replace(text, range, &replacement))
-        });
+        let syntax_edit = self
+            .language
+            .filter(|_| self.syntax_task.is_none() && !self.is_large_file())
+            .and_then(|_| SyntaxEdit::from_buffer(&self.buffer, range, &replacement).ok());
         if self
             .buffer
             .apply_transaction(EditTransaction::single(TextEdit::new(range, replacement)))
             .is_ok()
         {
-            self.apply_syntax_edit(syntax_edit);
+            self.request_syntax(syntax_edit, false, cx);
             self.cursor.set_selection(Selection::caret(caret));
             self.secondary_selections.clear();
             self.marked_text = None;
             self.save_status = EditorSaveStatus::Dirty;
             self.clear_folds_after_buffer_change();
+            self.restore_unwrapped_rows_after_edit(row_edit);
             self.refresh_find_matches();
             self.viewport
                 .clamp(self.document_row_count(), self.metrics.line_height);
@@ -796,7 +833,7 @@ impl TextEditorView {
             self.secondary_selections.clear();
             self.marked_text = None;
             self.save_status = EditorSaveStatus::Dirty;
-            self.reparse_syntax();
+            self.request_syntax(None, true, cx);
             self.clear_folds_after_buffer_change();
             self.refresh_find_matches();
             self.viewport
@@ -811,7 +848,7 @@ impl TextEditorView {
             cx.notify();
             return;
         };
-        let result = self.buffer.with_text(|text| on_save(text, window, cx));
+        let result = on_save(self.buffer.text_snapshot(), window, cx);
         match result {
             Ok(()) => {
                 // The IDE save path is asynchronous, matching Tauri's
@@ -829,63 +866,6 @@ impl TextEditorView {
         }
         self.on_save = Some(on_save);
         cx.notify();
-    }
-
-    fn apply_syntax_edit(&mut self, edit: Option<SyntaxEdit>) {
-        if let (Some(syntax), Some(edit)) = (self.syntax.as_mut(), edit)
-            && self
-                .buffer
-                .with_text(|text| syntax.apply_edit(text, edit))
-                .is_err()
-        {
-            let language = syntax.language_id();
-            self.syntax = self
-                .buffer
-                .with_text(|text| SyntaxSession::parse(language, text).ok());
-        }
-        self.refresh_highlights();
-    }
-
-    fn reparse_syntax(&mut self) {
-        if let Some(syntax) = self.syntax.as_mut()
-            && self.buffer.with_text(|text| syntax.reparse(text)).is_err()
-        {
-            let language = syntax.language_id();
-            self.syntax = self
-                .buffer
-                .with_text(|text| SyntaxSession::parse(language, text).ok());
-        }
-        self.refresh_highlights();
-    }
-
-    fn refresh_highlights(&mut self) {
-        self.highlight_spans = self.buffer.with_text(|text| {
-            self.syntax
-                .as_ref()
-                .map(|syntax| syntax.highlight_spans(text))
-                .unwrap_or_default()
-        });
-        self.highlight_spans
-            .sort_by_key(|span| (span.range.start.0, span.range.end.0));
-        self.highlight_line_spans = self.build_highlight_line_spans();
-        let bracket_pairs = self.buffer.with_text(|text| {
-            self.syntax
-                .as_ref()
-                .map(|syntax| syntax.bracket_pairs(text))
-                .unwrap_or_default()
-        });
-        self.bracket_pair_by_caret = build_bracket_pair_index(&bracket_pairs);
-        self.highlight_chunk_cache.borrow_mut().clear();
-    }
-
-    pub(super) fn refresh_indent_guides(&mut self) {
-        let guides = self.buffer.with_text(|text| {
-            self.syntax
-                .as_ref()
-                .map(|syntax| syntax.indent_guides(text, self.settings.tab_size))
-                .unwrap_or_default()
-        });
-        self.indent_guide_index = IndentGuideIndex::new(guides);
     }
 
     fn active_selections(&self) -> Vec<Selection> {
@@ -908,40 +888,6 @@ impl TextEditorView {
             selections.dedup();
         }
         selections
-    }
-
-    fn build_highlight_line_spans(&self) -> Vec<Range<usize>> {
-        let mut ranges = Vec::with_capacity(self.buffer.line_count());
-        let mut first_span = 0;
-        let mut last_span = 0;
-
-        for line in 0..self.buffer.line_count() {
-            let Some(line_start) = self.buffer.line_start_offset(line).map(|offset| offset.0)
-            else {
-                ranges.push(0..0);
-                continue;
-            };
-            let line_end = self
-                .buffer
-                .line_end_offset(line)
-                .map(|offset| offset.0)
-                .unwrap_or(line_start);
-
-            while first_span < self.highlight_spans.len()
-                && self.highlight_spans[first_span].range.end.0 <= line_start
-            {
-                first_span += 1;
-            }
-            last_span = last_span.max(first_span);
-            while last_span < self.highlight_spans.len()
-                && self.highlight_spans[last_span].range.start.0 < line_end
-            {
-                last_span += 1;
-            }
-            ranges.push(first_span..last_span);
-        }
-
-        ranges
     }
 
     fn build_find_line_matches(&self) -> Vec<Range<usize>> {
@@ -1058,6 +1004,7 @@ impl TextEditorView {
             window,
             &self.appearance.font_family,
             self.appearance.font_fallback_family.as_deref(),
+            self.appearance.font_weight,
         ) {
             self.viewport
                 .clamp(self.document_row_count(), self.metrics.line_height);
@@ -1242,6 +1189,7 @@ impl TextEditorView {
             font: editor_code_font(
                 &self.appearance.font_family,
                 self.appearance.font_fallback_family.as_deref(),
+                self.appearance.font_weight,
             ),
             color: rgb(self.appearance.text_hex).into_color(),
             background_color: None,
@@ -1293,25 +1241,8 @@ impl TextEditorView {
 
     fn matching_bracket_pair(&self) -> Option<BracketPair> {
         let head = self.cursor.selection().head.0;
-        self.bracket_pair_by_caret.get(&head).cloned()
+        self.bracket_index.pair_at(head).cloned()
     }
-}
-
-fn build_bracket_pair_index(pairs: &[BracketPair]) -> HashMap<usize, BracketPair> {
-    let mut index = HashMap::with_capacity(pairs.len().saturating_mul(4));
-    for pair in pairs {
-        for caret in [
-            pair.open.0,
-            pair.open.0.saturating_add(1),
-            pair.close.0,
-            pair.close.0.saturating_add(1),
-        ] {
-            // Preserve the syntax provider's first-match behavior when two
-            // bracket pairs share the caret slot between adjacent tokens.
-            index.entry(caret).or_insert_with(|| pair.clone());
-        }
-    }
-    index
 }
 
 impl Focusable for TextEditorView {
@@ -1326,9 +1257,193 @@ fn colored_text(text: &str, color: u32) -> Div {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext;
     use std::sync::Arc;
 
     use super::{HighlightChunkCache, HighlightChunkCacheKey, LineChunkSpec};
+
+    #[gpui::test]
+    fn editor_caret_blink_uses_scheduled_time_and_stops_when_released(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use super::{EDITOR_CARET_BLINK_INTERVAL, TextEditorView};
+        let editor =
+            cx.new(|cx| TextEditorView::new("text", &oxideterm_theme::default_tokens(), cx));
+        editor.update(cx, |editor, cx| editor.sync_caret_blink_focus(true, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(EDITOR_CARET_BLINK_INTERVAL);
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| assert!(!editor.caret_visible));
+        editor.update(cx, |editor, cx| editor.sync_caret_blink_focus(false, cx));
+        cx.executor().advance_clock(EDITOR_CARET_BLINK_INTERVAL * 2);
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| {
+            assert!(editor.caret_visible);
+            assert!(editor.caret_blink_task.is_none());
+        });
+        editor.update(cx, |editor, cx| editor.sync_caret_blink_focus(true, cx));
+        cx.run_until_parked();
+        let weak = editor.downgrade();
+        drop(editor);
+        cx.update(|_| {});
+        cx.executor().advance_clock(EDITOR_CARET_BLINK_INTERVAL * 2);
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn folds_and_guides_follow_newlines_and_history(cx: &mut gpui::TestAppContext) {
+        use super::{BufferOffset, LanguageId, Selection, TextEditorView};
+        let source = "fn first() {\n    call();\n}\nfn second() {\n    call();\n}\n";
+        let editor =
+            cx.new(|cx| TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx));
+        editor.update(cx, |editor, cx| {
+            editor.set_language(Some(LanguageId::Rust), cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            editor
+                .cursor
+                .set_selection(Selection::caret(BufferOffset(0)));
+            editor.insert_text("// 🙂\n", cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(
+                editor.structure_cache.fold_lines().collect::<Vec<_>>(),
+                [(1, 3), (4, 6)]
+            );
+            assert_eq!(editor.structure_cache.columns_for_line(2), [0]);
+            assert_eq!(editor.structure_cache.columns_for_line(5), [0]);
+            editor.undo(cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.buffer.text(), source);
+            assert_eq!(
+                editor.structure_cache.fold_lines().collect::<Vec<_>>(),
+                [(0, 2), (3, 5)]
+            );
+            editor.redo(cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(
+                editor.structure_cache.fold_lines().collect::<Vec<_>>(),
+                [(1, 3), (4, 6)]
+            );
+            editor.set_language(None, cx);
+            assert!(editor.structure_cache.fold_lines().next().is_none());
+            assert!(editor.structure_cache.columns_for_line(2).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn highlight_cache_tracks_typing_and_history(cx: &mut gpui::TestAppContext) {
+        use super::{BufferOffset, LanguageId, Selection, TextEditorView, TextRange};
+        use oxideterm_editor_syntax::SyntaxScope;
+        let source = "fn first() { let value = foo; }\nfn second() {}\n";
+        let start = source.find("foo").unwrap();
+        let editor =
+            cx.new(|cx| TextEditorView::new(source, &oxideterm_theme::default_tokens(), cx));
+        editor.update(cx, |editor, cx| {
+            editor.set_language(Some(LanguageId::Rust), cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            editor
+                .cursor
+                .set_selection(Selection::new(BufferOffset(start), BufferOffset(start + 3)));
+            editor.insert_text("Foo", cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(
+                editor.buffer.text(),
+                "fn first() { let value = Foo; }\nfn second() {}\n"
+            );
+            assert!(
+                editor
+                    .highlight_spans
+                    .spans_in_range(start..start + 3)
+                    .any(|span| span.range
+                        == TextRange::new(BufferOffset(start), BufferOffset(start + 3))
+                        && span.scope == SyntaxScope::Type)
+            );
+            editor.undo(cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.buffer.text(), source);
+            assert!(
+                !editor
+                    .highlight_spans
+                    .spans_in_range(start..start + 3)
+                    .any(|span| span.scope == SyntaxScope::Type)
+            );
+            editor.redo(cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert!(
+                editor
+                    .highlight_spans
+                    .spans_in_range(start..start + 3)
+                    .any(|span| span.scope == SyntaxScope::Type)
+            );
+            editor.set_language(None, cx);
+            assert!(editor.highlight_spans.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn disabling_syntax_and_search_clears_presented_metadata(cx: &mut gpui::TestAppContext) {
+        use super::{BufferOffset, LanguageId, Selection, TextEditorView};
+        let editor = cx.new(|cx| {
+            TextEditorView::new(
+                "fn main() {\n    let value = 1;\n}\n",
+                &oxideterm_theme::default_tokens(),
+                cx,
+            )
+        });
+        editor.update(cx, |editor, cx| {
+            editor.set_language(Some(LanguageId::Rust), cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            editor.set_find_query("value", cx);
+            assert!(
+                editor
+                    .highlight_spans
+                    .spans_in_range(0..usize::MAX)
+                    .any(|s| s.range.start.0 == 0 && s.range.end.0 == 2)
+            );
+            assert_eq!(
+                editor
+                    .find_matches
+                    .iter()
+                    .map(|m| (m.range.start.0, m.range.end.0))
+                    .collect::<Vec<_>>(),
+                [(20, 25)]
+            );
+            assert_eq!(editor.structure_cache.columns_for_line(1), [0]);
+            editor.set_language(None, cx);
+            editor.set_find_query("", cx);
+            editor
+                .cursor
+                .set_selection(Selection::caret(BufferOffset(0)));
+            editor.insert_text("z", cx);
+        });
+        cx.run_until_parked();
+        editor.update(cx, |editor, _cx| {
+            assert!(editor.highlight_spans.is_empty());
+            assert!(editor.bracket_index.is_empty());
+            assert!(editor.structure_cache.columns_for_line(1).is_empty());
+            assert!(editor.find_matches.is_empty());
+            assert!(editor.find_line_matches.is_empty());
+            assert_eq!(editor.buffer.line_text(0).as_deref(), Some("zfn main() {"));
+        });
+    }
 
     fn cache_key(line: usize) -> HighlightChunkCacheKey {
         HighlightChunkCacheKey {
@@ -1377,3 +1492,18 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod line_ending_tests {
+    use super::*;
+    #[test]
+    fn clipboard_crlf_and_cr_become_single_newlines() {
+        assert_eq!(
+            normalize_editor_text("first\r\nsecond\rthird\n".into()),
+            "first\nsecond\nthird\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod performance;

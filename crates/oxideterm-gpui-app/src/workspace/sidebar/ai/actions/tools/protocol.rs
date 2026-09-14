@@ -425,7 +425,7 @@ pub(in crate::workspace) fn ai_terminal_wait_match(
                 .find(|record| {
                     record.command_id == command_id
                         && record.status
-                            != oxideterm_gpui_terminal::TerminalCommandFactStatus::Open
+                            == oxideterm_gpui_terminal::TerminalCommandFactStatus::Closed
                 })
                 .map(|record| {
                     serde_json::json!({
@@ -875,5 +875,65 @@ mod tests {
             )
             .is_none()
         );
+    }
+}
+
+struct AiTerminalCommandWait {
+    deadline: std::time::Instant,
+}
+
+impl AiTerminalCommandWait {
+    #[cfg(test)]
+    fn new(now: std::time::Instant) -> Self {
+        Self::with_timeout(now, Duration::from_secs(30 * 60))
+    }
+
+    fn with_timeout(now: std::time::Instant, timeout: Duration) -> Self {
+        Self { deadline: now + timeout.min(Duration::from_secs(30 * 60)) }
+    }
+
+    fn expired(&self, now: std::time::Instant) -> bool {
+        now >= self.deadline
+    }
+}
+
+fn ai_terminal_command_output_ready(
+    command_completed: bool,
+    shell_integration_detected: bool,
+    before: &str,
+    current: &str,
+    quiet_for: Duration,
+    waiting_for_secret: bool,
+    recovering: bool,
+) -> bool {
+    if waiting_for_secret || recovering {
+        return false;
+    }
+    // A frontend command mark does not prove that this shell emits completion events.
+    // Quiet output may be returned as a snapshot, never as a confirmed command exit.
+    command_completed || (!shell_integration_detected
+        && current != before
+        && !looks_waiting_for_input(current)
+        && quiet_for >= Duration::from_millis(400))
+}
+
+#[cfg(test)]
+mod command_output_tests {
+    use super::*;
+
+    #[test]
+    fn output_capture_respects_shell_events_activity_and_wait_states() {
+        let quiet = Duration::from_millis(500);
+        for (completed, integrated, output, elapsed, secret, reconnecting, expected) in [
+            (false, false, "command\nresult\n$ ", quiet, false, false, true),
+            (false, true, "command\nresult\n$ ", quiet, false, false, false),
+            (true, true, "command\nresult\n$ ", Duration::ZERO, false, false, true),
+            (false, false, "command\nresult", Duration::from_millis(100), false, false, false),
+            (false, false, "before", quiet, false, false, false),
+            (false, false, "command\nPassword:", quiet, true, false, false),
+            (false, false, "command\nresult", quiet, false, true, false),
+        ] {
+            assert_eq!(ai_terminal_command_output_ready(completed, integrated, "before", output, elapsed, secret, reconnecting), expected);
+        }
     }
 }

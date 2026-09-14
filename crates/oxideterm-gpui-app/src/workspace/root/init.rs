@@ -625,6 +625,7 @@ impl WorkspaceApp {
             terminal_semantic_highlight_section_expanded: true,
             terminal_rule_highlight_section_expanded: true,
             terminal_command_context_highlight_section_expanded: true,
+            terminal_selection_highlight_section_expanded: true,
             terminal_command_sender,
             _terminal_command_sender_observation: terminal_command_sender_observation,
             local_terminal_command_history,
@@ -811,6 +812,7 @@ impl WorkspaceApp {
             ssh_consumer_managed_key_resolver,
             pending_standalone_sftp_pair_launches: HashMap::new(),
             embedded_sftp_node_id: None,
+            embedded_sftp_pinned: false,
             sftp_presentation_request: None,
             ide_workspace,
             _ide_workspace_subscription: ide_workspace_subscription,
@@ -877,6 +879,11 @@ impl WorkspaceApp {
         workspace.start_public_mcp_delivery(cx);
         workspace.sync_ssh_config_sync_service();
         workspace.restore_session_tree_snapshot();
+        workspace.standalone_connections =
+            standalone_connections::StandaloneConnectionRegistry::restore(
+                default_session_tree_path().with_file_name("standalone_sessions.json"),
+                &workspace.connection_store,
+            );
         workspace.sync_terminal_command_sender_appearance(cx);
         workspace.sync_active_terminal_metadata_context(cx);
         workspace.sync_active_terminal_recording_elapsed_tick(cx);
@@ -1118,6 +1125,7 @@ impl WorkspaceApp {
             session_log_settings.directory.as_deref(),
         );
         TerminalUiPreferences {
+            processing_failed_message: self.i18n.t("terminal.processing_failed"),
             font_family: terminal
                 .font_family
                 .terminal_family_name(&terminal.custom_font_family),
@@ -1126,6 +1134,8 @@ impl WorkspaceApp {
             font_size: terminal.font_size as f32,
             font_weight: terminal.font_weight as f32,
             line_height: terminal.line_height as f32,
+            padding_horizontal: terminal.padding_horizontal as f32,
+            padding_vertical: terminal.padding_vertical as f32,
             cursor_shape: match terminal.cursor_style {
                 SettingsCursorStyle::Block => TerminalCursorShape::Block,
                 SettingsCursorStyle::Underline => TerminalCursorShape::Underline,
@@ -1144,6 +1154,7 @@ impl WorkspaceApp {
             open_links_with_modifier: terminal.open_links_with_modifier,
             detect_file_paths_as_links: terminal.detect_file_paths_as_links,
             semantic_coloring: terminal.semantic_coloring,
+            selection_highlighting: terminal.selection_highlighting,
             semantic_scheme: resolved_terminal_semantic_scheme(
                 terminal.semantic_scheme,
                 terminal.active_custom_semantic_scheme(),
@@ -1151,6 +1162,7 @@ impl WorkspaceApp {
             semantic_shell: SemanticShellDialect::Auto,
             selection_requires_shift: terminal.selection_requires_shift,
             free_type_mode: terminal.free_type_mode,
+            autosuggest_enabled: terminal.autosuggest.enabled,
             backspace_sequence: terminal.backspace_sequence,
             delete_sequence: terminal.delete_sequence,
             bidi_enabled: terminal.unicode.bidi_enabled,
@@ -1285,8 +1297,11 @@ impl WorkspaceApp {
                 directory_template: session_log_settings.directory_template.clone(),
                 include_control_sequences: session_log_settings.include_control_sequences,
                 retention_days: session_log_settings.retention_days.max(0) as u64,
-                max_file_bytes: (session_log_settings.max_file_size_mib.max(1) as u64)
-                    .saturating_mul(1024 * 1024),
+                // Zero is the explicit unlimited setting; positive values keep a byte boundary.
+                max_file_bytes: u64::try_from(session_log_settings.max_file_size_mib)
+                    .ok()
+                    .filter(|size_mib| *size_mib > 0)
+                    .map(|size_mib| size_mib.saturating_mul(1024 * 1024)),
                 file_name_template: session_log_settings.file_name_template.clone(),
                 content_template: session_log_settings.content_template.clone(),
                 file_mode: session_log_settings.file_mode,
@@ -1665,30 +1680,5 @@ mod semantic_scheme_tests {
             &terminal,
         );
         assert_eq!(timestamps.terminal_timestamps_enabled, Some(true));
-    }
-}
-
-pub(in crate::workspace) fn ai_chat_initialization_error(
-    error: &anyhow::Error,
-) -> AiChatInitializationError {
-    let message = error.to_string();
-    if message.contains("Database already open") || message.contains("Cannot acquire lock") {
-        return AiChatInitializationError {
-            message_key: "ai.chat.database_locked",
-            can_retry: true,
-        };
-    }
-    if message.contains("requires format upgrade")
-        || message.contains("upgrade required")
-        || message.contains("manual upgrade required")
-    {
-        return AiChatInitializationError {
-            message_key: "ai.chat.database_upgrade_required",
-            can_retry: false,
-        };
-    }
-    AiChatInitializationError {
-        message_key: "ai.chat.load_failed_generic",
-        can_retry: true,
     }
 }

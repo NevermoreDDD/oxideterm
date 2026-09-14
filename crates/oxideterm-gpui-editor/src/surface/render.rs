@@ -103,9 +103,14 @@ impl Render for TextEditorView {
         let visible = self
             .viewport
             .visible_rows(display_rows.len(), self.metrics.line_height);
+        let visible_rows: Vec<_> = visible
+            .range
+            .clone()
+            .filter_map(|index| display_rows.get(index))
+            .collect();
         let row_context = self.prepare_render_row_context(
             &display_rows,
-            &display_rows[visible.range.clone()],
+            &visible_rows,
             focused && self.caret_visible,
         );
         let view = cx.entity();
@@ -122,7 +127,7 @@ impl Render for TextEditorView {
             ))
             .h(px(display_rows.len() as f32 * self.metrics.line_height));
         for display_index in visible.range.clone() {
-            let Some(row) = display_rows.get(display_index).copied() else {
+            let Some(row) = display_rows.get(display_index) else {
                 continue;
             };
             rows = rows.child(self.render_row(display_index, row, &row_context, window, cx));
@@ -177,11 +182,13 @@ impl Render for TextEditorView {
             .id("oxideterm-gpui-editor")
             .size_full()
             .track_focus(&self.focus_handle)
+            .key_context("TextEditor")
             // Paint and measurement must use the same fallback chain, or a
             // missing configured font can make the caret drift on Windows.
             .font(editor_code_font(
                 &self.appearance.font_family,
                 self.appearance.font_fallback_family.as_deref(),
+                self.appearance.font_weight,
             ))
             .text_size(px(self.metrics.font_size))
             .line_height(px(self.metrics.line_height))
@@ -1053,7 +1060,7 @@ impl TextEditorView {
 
     fn prepare_render_row_context(
         &self,
-        display_rows: &[DisplayRow],
+        display_rows: &super::wrap::DisplayRows,
         visible_rows: &[DisplayRow],
         show_caret: bool,
     ) -> RenderRowContext {
@@ -1081,7 +1088,7 @@ impl TextEditorView {
             selections: self.active_selections(),
             matching_bracket_pair: self.matching_bracket_pair(),
             indentation_columns_by_line: visible_indentation_columns(
-                &self.indent_guide_index,
+                &self.structure_cache,
                 visible_rows,
                 self.settings.indentation_markers,
             ),
@@ -1243,27 +1250,18 @@ impl TextEditorView {
             return chunks;
         }
 
-        let chunks =
-            std::sync::Arc::new(self.build_highlighted_line_chunks(line, line_text, line_range));
+        let chunks = std::sync::Arc::new(self.build_highlighted_line_chunks(line_text, line_range));
         self.highlight_chunk_cache.borrow_mut().insert(key, chunks)
     }
 
     fn build_highlighted_line_chunks(
         &self,
-        line: usize,
         line_text: &str,
         line_range: Range<usize>,
     ) -> Vec<LineChunkSpec> {
         let mut chunks = Vec::new();
         let mut cursor = 0;
-        let span_range = self
-            .highlight_line_spans
-            .get(line)
-            .cloned()
-            .unwrap_or(0..self.highlight_spans.len());
-        for span in self.highlight_spans[span_range].iter().filter(|span| {
-            span.range.start.0 < line_range.end && span.range.end.0 > line_range.start
-        }) {
+        for span in self.highlight_spans.spans_in_range(line_range.clone()) {
             let start = span.range.start.0.max(line_range.start) - line_range.start;
             let end = span.range.end.0.min(line_range.end) - line_range.start;
             let Some(highlight_range) = visible_highlight_range(start, end, cursor) else {
@@ -1429,7 +1427,7 @@ fn special_char_marker(ch: char) -> Option<&'static str> {
 }
 
 fn visible_indentation_columns(
-    index: &super::indent_index::IndentGuideIndex,
+    index: &oxideterm_editor_syntax::StructureCache,
     visible_rows: &[DisplayRow],
     enabled: bool,
 ) -> BTreeMap<usize, Vec<usize>> {
@@ -1455,9 +1453,8 @@ fn visible_indentation_columns(
 #[cfg(test)]
 mod tests {
     use super::visible_indentation_columns;
-    use oxideterm_editor_syntax::IndentGuide;
-
-    use crate::surface::{indent_index::IndentGuideIndex, wrap::DisplayRow};
+    use crate::surface::wrap::DisplayRow;
+    use oxideterm_editor_syntax::{LanguageId, StructureCache, SyntaxSession};
 
     fn display_row(line: usize, start_col: usize, end_col: usize) -> DisplayRow {
         DisplayRow {
@@ -1471,48 +1468,16 @@ mod tests {
 
     #[test]
     fn indentation_guides_follow_syntax_ranges() {
-        let guides = vec![
-            IndentGuide {
-                start_line: 0,
-                end_line: 4,
-                column: 0,
-            },
-            IndentGuide {
-                start_line: 0,
-                end_line: 4,
-                column: 4,
-            },
-            IndentGuide {
-                start_line: 1,
-                end_line: 3,
-                column: 8,
-            },
-        ];
-
+        let source = "fn main() {\n    if ready {\n        call();\n    }\n}\n";
+        let session = SyntaxSession::parse(LanguageId::Rust, source).unwrap();
+        let mut cache = StructureCache::default();
+        cache.update(&session, source, 4, None);
         let rows = [display_row(0, 0, 120), display_row(2, 0, 120)];
-        let columns = visible_indentation_columns(&IndentGuideIndex::new(guides), &rows, true);
-
-        assert_eq!(columns.get(&2), Some(&vec![0, 4, 8]));
+        let columns = visible_indentation_columns(&cache, &rows, true);
+        assert_eq!(columns.get(&2), Some(&vec![0, 4]));
         assert_eq!(columns.get(&0), None);
-
-        let guides = vec![IndentGuide {
-            start_line: 0,
-            end_line: 4,
-            column: 8,
-        }];
-
-        let rows = [display_row(2, 4, 12)];
-        let columns = visible_indentation_columns(&IndentGuideIndex::new(guides), &rows, true);
-
-        assert_eq!(columns.get(&2), Some(&vec![8]));
-
-        let rows = [display_row(2, 0, 12)];
-        let index = IndentGuideIndex::new(vec![IndentGuide {
-            start_line: 0,
-            end_line: 4,
-            column: 8,
-        }]);
-
-        assert!(visible_indentation_columns(&index, &rows, false).is_empty());
+        let rows = [display_row(2, 0, 4), display_row(2, 4, 12)];
+        assert_eq!(visible_indentation_columns(&cache, &rows, true), columns);
+        assert!(visible_indentation_columns(&cache, &rows, false).is_empty());
     }
 }

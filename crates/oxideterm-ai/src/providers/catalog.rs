@@ -11,7 +11,7 @@ pub const AI_PROVIDER_TEMPLATES: &[AiProviderTemplate] = &[
         provider_type: "deepseek",
         label_key: "settings_view.ai.provider_template_deepseek",
         base_url: "https://api.deepseek.com",
-        initial_models: &["deepseek-v4-flash", "deepseek-v4-pro"],
+        initial_models: &["deepseek-flash", "deepseek-v4-pro"],
     },
     AiProviderTemplate {
         provider_type: "kimi",
@@ -42,6 +42,12 @@ pub const AI_PROVIDER_TEMPLATES: &[AiProviderTemplate] = &[
         label_key: "settings_view.ai.provider_template_openai",
         base_url: "https://api.openai.com/v1",
         initial_models: &["gpt-4o-mini"],
+    },
+    AiProviderTemplate {
+        provider_type: "xai",
+        label_key: "settings_view.ai.provider_template_xai",
+        base_url: "https://api.x.ai/v1",
+        initial_models: &["grok-4.6"],
     },
     AiProviderTemplate {
         provider_type: "anthropic",
@@ -80,6 +86,11 @@ pub fn provider_view(value: &serde_json::Value) -> Option<AiProviderView> {
     let provider_type =
         provider_string(value, "type").unwrap_or_else(|| "openai_compatible".to_string());
     Some(AiProviderView {
+        api_protocol: match value.get("apiProtocol") {
+            Some(value) => serde_json::from_value(value.clone()).ok()?,
+            None if provider_type == "xai" => crate::AiApiProtocol::Responses,
+            None => crate::AiApiProtocol::default(),
+        },
         custom: id.starts_with("custom-"),
         id,
         provider_type,
@@ -157,7 +168,7 @@ pub fn new_provider_from_template(
         .map(|model| (*model).to_string())
         .collect::<Vec<_>>();
 
-    serde_json::json!({
+    let mut provider = serde_json::json!({
         "id": id,
         "type": template.provider_type,
         "name": name,
@@ -165,5 +176,9 @@ pub fn new_provider_from_template(
         "models": models,
         "enabled": true,
         "createdAt": now_ms,
-    })
+    });
+    if template.provider_type == "xai" {
+        provider["apiProtocol"] = serde_json::json!(crate::AiApiProtocol::Responses);
+    }
+    provider
 }

@@ -43,6 +43,8 @@ const TERMINAL_APPEARANCE_KEYS: &[&str] = &[
     "customFontFamily",
     "fontSize",
     "lineHeight",
+    "paddingHorizontal",
+    "paddingVertical",
     "cursorStyle",
     "cursorBlink",
     "backgroundEnabled",
@@ -109,8 +111,6 @@ const AI_KEYS: &[&str] = &[
     "activeModel",
     "activeBackend",
     "activeAcpAgentId",
-    "contextMaxChars",
-    "contextVisibleLines",
     "thinkingStyle",
     "reasoningEffort",
     "reasoningProviderOverrides",
@@ -120,7 +120,6 @@ const AI_KEYS: &[&str] = &[
     "userContextWindows",
     "customSystemPrompt",
     "memory",
-    "modelMaxResponseTokens",
     "toolUse",
     "contextSources",
     "mcpServers",
@@ -179,6 +178,13 @@ pub fn export_oxide_settings_snapshot_json(
         );
     }
 
+    // Protected-store handles belong to one device; cloud secrets restore a new local handle.
+    if let Some(auth) = partial
+        .pointer_mut("/network/upstreamProxy/auth")
+        .and_then(Value::as_object_mut)
+    {
+        auth.remove("keychain_id");
+    }
     let envelope = json!({
         "format": OXIDE_SETTINGS_FORMAT,
         "version": OXIDE_SETTINGS_VERSION,
@@ -420,9 +426,45 @@ mod tests {
     }
 
     #[test]
+    fn retired_ai_size_controls_are_ignored_without_losing_sources_or_model_windows() {
+        let mut source = PersistedSettings::default().to_value();
+        source["ai"]["contextMaxChars"] = json!(8000);
+        source["ai"]["contextVisibleLines"] = json!(50);
+        source["ai"]["modelMaxResponseTokens"] = json!({"provider":{"model":256}});
+        source["ai"]["contextSources"] = json!({"ide":false,"sftp":true});
+        source["ai"]["userContextWindows"] = json!({"provider":{"model":128000}});
+        let loaded: PersistedSettings = serde_json::from_value(source).unwrap();
+        let exported = export_oxide_settings_snapshot_json(
+            &loaded,
+            Some(&HashSet::from(["ai".into()])),
+            false,
+        )
+        .unwrap();
+        let restored =
+            merge_oxide_settings_snapshot(&PersistedSettings::default(), &exported, None).unwrap();
+        let ai = &restored.to_value()["ai"];
+        for retired in [
+            "contextMaxChars",
+            "contextVisibleLines",
+            "modelMaxResponseTokens",
+        ] {
+            assert_eq!(ai.get(retired), None);
+        }
+        assert_eq!(ai["contextSources"], json!({"ide":false,"sftp":true}));
+        assert_eq!(
+            ai["userContextWindows"],
+            json!({"provider":{"model":128000}})
+        );
+    }
+
+    #[test]
     fn export_selected_extended_sections() {
         let mut settings = PersistedSettings::default();
         settings.ai.enabled = true;
+        settings.ai.providers = vec![
+            json!({"id":"responses-provider","type":"openai_compatible","apiProtocol":"responses","baseUrl":"https://example.test/v1","models":["model"]}),
+            json!({"id":"grok-provider","type":"xai","apiProtocol":"responses","baseUrl":"https://api.x.ai/v1","models":["grok-4.6"]}),
+        ];
         settings.settings_navigation.groups = vec![vec!["terminal".to_string()]];
         settings.local_terminal.default_cwd = Some("/tmp".to_string());
         settings
@@ -437,6 +479,19 @@ mod tests {
         let exported =
             export_oxide_settings_snapshot_json(&settings, Some(&selected), false).expect("export");
         let parsed: Value = serde_json::from_str(&exported).expect("json");
+        let restored = merge_oxide_settings_snapshot(
+            &PersistedSettings::default(),
+            &exported,
+            Some(&selected),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.ai.providers,
+            vec![
+                json!({"id":"responses-provider","type":"openai_compatible","apiProtocol":"responses","baseUrl":"https://example.test/v1","models":["model"]}),
+                json!({"id":"grok-provider","type":"xai","apiProtocol":"responses","baseUrl":"https://api.x.ai/v1","models":["grok-4.6"]})
+            ]
+        );
         let section_ids = parsed["sectionIds"]
             .as_array()
             .expect("section ids")

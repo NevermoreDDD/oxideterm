@@ -1725,6 +1725,9 @@ impl WorkspaceApp {
                 SettingsInput::TerminalFontSize
                 | SettingsInput::TerminalFontWeight
                 | SettingsInput::TerminalLineHeight
+                | SettingsInput::TerminalPaddingHorizontal
+                | SettingsInput::TerminalPaddingVertical
+                | SettingsInput::IdeFontWeight
                 | SettingsInput::IdeFontSize
                 | SettingsInput::IdeLineHeight,
             ) => TextInputContentAlign::Center,
@@ -3038,17 +3041,26 @@ impl WorkspaceApp {
             }
             WorkspaceImeTarget::NewConnection(field) => {
                 let changed = self.update_connection_form_state(cx, |state| {
+                    let editing_saved = state.saved_connection_source_id().is_some()
+                        && state.saved_connection_prompt_action.is_none();
                     let Some(form) = state.form.as_mut() else {
                         return false;
                     };
                     if form.selected_field == Some(field) && replacement_range.is_none() {
-                        *connection_field_value_mut(form, field) = String::new();
+                        // A revealed password may own the old allocation; scrub before replacement.
+                        zeroize::Zeroize::zeroize(connection_field_value_mut(form, field));
                     }
                     replace_utf16(
                         connection_field_value_mut(form, field),
                         replacement_range,
                         text,
                     );
+                    if field == NewConnectionField::Password {
+                        super::new_connection::restore_saved_password_placeholder_if_empty(
+                            form,
+                            editing_saved,
+                        );
+                    }
                     form.selected_field = None;
                     form.error = None;
                     refresh_connection_timeout_seconds(form, field);
@@ -3200,7 +3212,7 @@ fn connection_field_value_mut(
         NewConnectionField::Host => &mut form.host,
         NewConnectionField::Port => &mut form.port,
         NewConnectionField::Username => &mut form.username,
-        NewConnectionField::Password => &mut form.password,
+        NewConnectionField::Password => super::new_connection::password_draft_mut(form),
         NewConnectionField::KeyPath => &mut form.key_path,
         NewConnectionField::ManagedKeyId => &mut form.managed_key_id,
         NewConnectionField::CertPath => &mut form.cert_path,
@@ -3640,16 +3652,12 @@ mod tests {
         NewConnectionField, PendingPlatformTextCommit, QuickCommandInput, SettingsInput, SftpInput,
         TextInputAnchorStore, WorkspaceCaretState, WorkspaceCaretVisibility,
         WorkspaceImeMarkedText, WorkspaceImeTarget, active_ime_should_defer_input_key,
-        collapsed_copy_shortcut_is_owned_by_target, control_k_delete_end,
-        copy_shortcut_owner_for_target, effective_platform_text_replacement_range,
-        ime_target_is_secret, ime_text_snapshot, keystroke_platform_text,
-        keystroke_uses_text_edit_modifier, line_end_for_utf16_offset, line_range_for_utf16_offset,
-        line_start_for_utf16_offset, next_utf16_boundary, next_word_boundary,
+        collapsed_copy_shortcut_is_owned_by_target, copy_shortcut_owner_for_target,
+        effective_platform_text_replacement_range, ime_target_is_secret, ime_text_snapshot,
+        keystroke_platform_text, keystroke_uses_text_edit_modifier,
         normalize_clipboard_text_for_ime_target, path_completion_owns_vertical_navigation,
-        platform_text_commit_is_duplicate, previous_utf16_boundary, previous_word_boundary,
-        secret_ime_proxy, soft_wrapped_line_ranges_utf16, transpose_text_at_utf16_offset,
-        utf16_offset_for_char_index, vertical_line_navigation_destination,
-        word_range_for_utf16_offset, workspace_ime_target_for_plain_host_tools_input,
+        platform_text_commit_is_duplicate, secret_ime_proxy, soft_wrapped_line_ranges_utf16,
+        utf16_offset_for_char_index, workspace_ime_target_for_plain_host_tools_input,
     };
 
     fn key(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
@@ -3930,15 +3938,6 @@ mod tests {
     }
 
     #[test]
-    fn utf16_navigation_keeps_emoji_boundaries() {
-        let value = "a😄b";
-        assert_eq!(next_utf16_boundary(value, 0), 1);
-        assert_eq!(next_utf16_boundary(value, 1), 3);
-        assert_eq!(previous_utf16_boundary(value, 3), 1);
-        assert_eq!(previous_utf16_boundary(value, 4), 3);
-    }
-
-    #[test]
     fn secret_ime_proxy_redacts_content_and_preserves_utf16_boundaries() {
         let secret = "a密😄b";
         let proxy = secret_ime_proxy(secret);
@@ -4062,33 +4061,6 @@ mod tests {
     }
 
     #[test]
-    fn word_navigation_matches_browser_style_runs() {
-        let value = "alpha beta  gamma";
-        assert_eq!(previous_word_boundary(value, 12), 6);
-        assert_eq!(
-            previous_word_boundary(value, value.encode_utf16().count()),
-            12
-        );
-        assert_eq!(next_word_boundary(value, 0), 5);
-        assert_eq!(next_word_boundary(value, 6), 10);
-    }
-
-    #[test]
-    fn double_click_word_range_handles_edges() {
-        assert_eq!(word_range_for_utf16_offset("root", 1), 0..4);
-        assert_eq!(word_range_for_utf16_offset("alpha beta", 7), 6..10);
-        assert_eq!(word_range_for_utf16_offset("alpha beta", 5), 0..5);
-    }
-
-    #[test]
-    fn multiline_arrow_navigation_preserves_column() {
-        let value = "abc\nde\nfghi";
-        assert_eq!(vertical_line_navigation_destination(value, 2, true), 6);
-        assert_eq!(vertical_line_navigation_destination(value, 6, true), 9);
-        assert_eq!(vertical_line_navigation_destination(value, 9, false), 6);
-    }
-
-    #[test]
     fn visible_path_completion_owns_unmodified_vertical_navigation() {
         for target in [
             WorkspaceImeTarget::FileManager(FileManagerInput::Path),
@@ -4120,38 +4092,6 @@ mod tests {
             true,
             false,
         ));
-    }
-
-    #[test]
-    fn multiline_line_ranges_match_textarea_navigation() {
-        let value = "one\ntwo\nthree";
-        assert_eq!(line_range_for_utf16_offset(value, 1), 0..3);
-        assert_eq!(line_range_for_utf16_offset(value, 5), 4..7);
-        assert_eq!(line_start_for_utf16_offset(value, 10), 8);
-        assert_eq!(line_end_for_utf16_offset(value, 10), 13);
-    }
-
-    #[test]
-    fn control_k_matches_textarea_line_delete() {
-        let value = "one\ntwo\nthree";
-        assert_eq!(control_k_delete_end(value, 5), 7);
-        assert_eq!(control_k_delete_end(value, 7), 8);
-    }
-
-    #[test]
-    fn control_t_transposes_utf16_characters() {
-        assert_eq!(
-            transpose_text_at_utf16_offset("abcd", 2),
-            Some(("acbd".to_string(), 3))
-        );
-        assert_eq!(
-            transpose_text_at_utf16_offset("a😄b", 3),
-            Some(("ab😄".to_string(), 4))
-        );
-        assert_eq!(
-            transpose_text_at_utf16_offset("abcd", 4),
-            Some(("abdc".to_string(), 4))
-        );
     }
 
     #[test]

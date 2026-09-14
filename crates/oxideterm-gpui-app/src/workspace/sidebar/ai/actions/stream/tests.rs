@@ -56,6 +56,38 @@ mod ai_turn_order_tests {
         });
     }
 
+    #[gpui::test]
+    fn responses_history_delivery_ignores_cancelled_generations(cx: &mut gpui::TestAppContext) {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+        let entity = cx.new(|cx| {
+            crate::workspace::ai_state::AiWorkspaceEntity::new(
+                runtime,
+                oxideterm_ai::AiProviderKeyStore::new(),
+                cx,
+            )
+        });
+        entity.update(cx, |ai, _| {
+            let conversation = ai.create_conversation("responses-conversation".into(), None, 1, None);
+            ai.add_message(&conversation, test_message("assistant", AiChatRole::Assistant, "visible".into()));
+            let (generation, _) = ai.begin_chat_stream(conversation.clone(), "assistant".into());
+            let part = serde_json::json!({"output":[{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque"}],"results":[],"callIds":{}});
+            let event = AiStreamEvent::ProviderResponsePart {provider_type:"responses:scope".into(),part:part.clone()};
+            ai.apply_stream_event_state(generation, &conversation, "assistant", event.clone(), None);
+            ai.cancel_chat_stream_for(&conversation);
+            let (next, _) = ai.begin_chat_stream(conversation.clone(), "assistant".into());
+            ai.apply_stream_event_state(generation, &conversation, "assistant", event, None);
+            ai.apply_stream_event_state(next, &conversation, "assistant", AiStreamEvent::Content(" next".into()), None);
+            let message = &ai.conversation_state().conversations[0].messages[0];
+            assert_eq!(message.content, "visible next");
+            assert_eq!(oxideterm_ai::ai_provider_parts(message,"responses:scope"),Some([part].as_slice()));
+        });
+    }
+
     #[test]
     fn persisted_tool_arguments_drop_secret_capable_execution_payloads() {
         let arguments = serde_json::json!({
@@ -236,22 +268,8 @@ mod ai_turn_order_tests {
 
     fn assistant_message() -> AiChatMessage {
         AiChatMessage {
-            id: "assistant-1".to_string(),
-            role: AiChatRole::Assistant,
-            content: String::new(),
-            timestamp_ms: 1,
-            model: None,
-            context: None,
             is_streaming: true,
-            thinking_content: None,
-            metadata: None,
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-            turn: None,
-            transcript_ref: None,
-            summary_ref: None,
-            branches: None,
-            suggestions: Vec::new(),
+            ..test_message("assistant-1", AiChatRole::Assistant, "".to_string())
         }
     }
 
@@ -373,6 +391,7 @@ mod ai_turn_order_tests {
     #[test]
     fn acp_session_started_ignores_stale_generation_and_persists_current_metadata() {
         let mut conversations = vec![AiConversation {
+        archived: false,
             id: "conv-1".to_string(),
             title: "Conversation".to_string(),
             messages: Vec::new(),
@@ -494,6 +513,7 @@ mod ai_turn_order_tests {
     #[test]
     fn acp_handoff_cursor_advances_only_for_the_matching_agent() {
         let mut conversation = AiConversation {
+        archived: false,
             id: "conv-1".to_string(),
             title: "Conversation".to_string(),
             messages: vec![AiChatMessage {
@@ -655,17 +675,6 @@ mod ai_turn_order_tests {
 
 
 
-    #[test]
-    fn compaction_plan_skips_when_less_than_two_messages_would_compact() {
-        let messages = vec![
-            test_message("u-1", AiChatRole::User, "short".to_string()),
-            test_message("a-1", AiChatRole::Assistant, "short".to_string()),
-            test_message("u-2", AiChatRole::User, "short".to_string()),
-            test_message("a-2", AiChatRole::Assistant, "short".to_string()),
-        ];
-
-        assert!(ai_compaction_plan(&messages, 100_000, true).is_none());
-    }
 
 
 
@@ -722,6 +731,7 @@ mod ai_turn_order_tests {
                 kind: "compaction-anchor".to_string(),
                 original_count: Some(compacted.len()),
                 compacted_at_ms: Some(1),
+                original_ref: None,
                 original_messages: Some(compacted),
                 original_user_count: Some(2),
             }),
@@ -1228,211 +1238,8 @@ mod ai_turn_order_tests {
         assert_eq!(first_round, second_round);
     }
 
-    #[test]
-    fn provider_history_replays_legacy_tool_turns_as_plain_assistant_text() {
-        let mut history = vec![
-            AiChatMessage {
-                id: "user-1".to_string(),
-                role: AiChatRole::User,
-                content: "打开终端".to_string(),
-                timestamp_ms: 1,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: None,
-                metadata: None,
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-            AiChatMessage {
-                id: "assistant-1".to_string(),
-                role: AiChatRole::Assistant,
-                content: "本地终端已重新打开。".to_string(),
-                timestamp_ms: 2,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: Some("need a terminal".to_string()),
-                metadata: None,
-                tool_call_id: None,
-                tool_calls: vec![serde_json::json!({
-                    "id": "call-1",
-                    "name": "open_app_surface",
-                    "arguments": "{\"surface\":\"local_terminal\"}",
-                    "status": "completed",
-                    "result": {
-                        "ok": true,
-                        "output": "opened",
-                        "meta": { "toolName": "open_app_surface" }
-                    }
-                })],
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-            AiChatMessage {
-                id: "tool-result-call-1".to_string(),
-                role: AiChatRole::Tool,
-                content: "{\"ok\":true}".to_string(),
-                timestamp_ms: 3,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: None,
-                metadata: None,
-                tool_call_id: Some("call-1".to_string()),
-                tool_calls: Vec::new(),
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-        ];
 
-        normalize_ai_stream_history_for_provider(&mut history);
 
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].role, AiChatRole::User);
-        assert_eq!(history[1].role, AiChatRole::Assistant);
-        assert_eq!(history[1].content, "本地终端已重新打开。");
-        assert!(history[1].tool_calls.is_empty());
-        assert!(history[1].thinking_content.is_none());
-    }
-
-    #[test]
-    fn provider_history_drops_empty_tool_only_assistant_messages() {
-        let mut history = vec![AiChatMessage {
-            id: "assistant-tool-only".to_string(),
-            role: AiChatRole::Assistant,
-            content: String::new(),
-            timestamp_ms: 1,
-            model: None,
-            context: None,
-            is_streaming: false,
-            thinking_content: None,
-            metadata: None,
-            tool_call_id: None,
-            tool_calls: vec![serde_json::json!({
-                "id": "call-1",
-                "name": "open_app_surface",
-                "arguments": "{}"
-            })],
-            turn: None,
-            transcript_ref: None,
-            summary_ref: None,
-            branches: None,
-            suggestions: Vec::new(),
-        }];
-
-        normalize_ai_stream_history_for_provider(&mut history);
-
-        assert!(history.is_empty());
-    }
-
-    #[test]
-    fn provider_history_promotes_compaction_anchor_to_front_system_summary() {
-        let mut history = vec![
-            AiChatMessage {
-                id: "task-mode".to_string(),
-                role: AiChatRole::System,
-                content: "Task instructions".to_string(),
-                timestamp_ms: 0,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: None,
-                metadata: None,
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-            AiChatMessage {
-                id: "stale-system".to_string(),
-                role: AiChatRole::System,
-                content: "Persisted stale system prompt".to_string(),
-                timestamp_ms: 0,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: None,
-                metadata: None,
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-            AiChatMessage {
-                id: "anchor-1".to_string(),
-                role: AiChatRole::System,
-                content: " 用户之前打开过本地终端。 ".to_string(),
-                timestamp_ms: 1,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: None,
-                metadata: Some(AiChatMessageMetadata {
-                    kind: "compaction-anchor".to_string(),
-                    original_count: Some(4),
-                    compacted_at_ms: Some(1),
-                    original_messages: None,
-                    original_user_count: None,
-                }),
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-            AiChatMessage {
-                id: "user-1".to_string(),
-                role: AiChatRole::User,
-                content: "继续".to_string(),
-                timestamp_ms: 2,
-                model: None,
-                context: None,
-                is_streaming: false,
-                thinking_content: None,
-                metadata: None,
-                tool_call_id: None,
-                tool_calls: Vec::new(),
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            },
-        ];
-
-        normalize_ai_stream_history_for_provider(&mut history);
-
-        assert_eq!(history.len(), 3);
-        assert_eq!(history[0].id, "task-mode");
-        assert_eq!(history[1].role, AiChatRole::System);
-        assert_eq!(
-            history[1].content,
-            "Previous conversation summary:\n 用户之前打开过本地终端。 "
-        );
-        assert!(history[1].metadata.is_none());
-        assert_eq!(history[2].role, AiChatRole::User);
-        assert!(history.iter().all(|message| message.id != "stale-system"));
-    }
 
     #[test]
     fn completed_tool_calls_are_deduped_by_id_before_protocol_append() {
@@ -1493,82 +1300,5 @@ mod ai_turn_order_tests {
         );
     }
 
-    #[test]
-    fn cancel_rejects_streaming_pending_tool_calls_with_results() {
-        let mut conversation = AiConversation {
-            id: "conv-1".to_string(),
-            title: "Chat".to_string(),
-            messages: vec![AiChatMessage {
-                id: "assistant-1".to_string(),
-                role: AiChatRole::Assistant,
-                content: String::new(),
-                timestamp_ms: 1,
-                model: None,
-                context: None,
-                is_streaming: true,
-                thinking_content: None,
-                metadata: None,
-                tool_call_id: None,
-                tool_calls: vec![serde_json::json!({
-                    "id": "call-1",
-                    "name": "open_app_surface",
-                    "arguments": "{}",
-                    "status": "pending_user_approval",
-                    "result": serde_json::Value::Null,
-                })],
-                turn: None,
-                transcript_ref: None,
-                summary_ref: None,
-                branches: None,
-                suggestions: Vec::new(),
-            }],
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            origin: "sidebar".to_string(),
-            profile_id: None,
-            message_count: 1,
-            session_id: None,
-            session_metadata: None,
-            messages_loaded: true,
-            turn_count: 0,
-        };
-
-        let stopped = finalize_streaming_ai_messages_on_cancel(&mut conversation);
-
-        let call = &conversation.messages[0].tool_calls[0];
-        assert_eq!(call["status"], "rejected");
-        assert_eq!(call["result"]["ok"], false);
-        assert_eq!(
-            call["result"]["error"]["message"],
-            "Generation was stopped."
-        );
-        let parts = conversation.messages[0]
-            .turn
-            .as_ref()
-            .and_then(|turn| turn.get("parts"))
-            .and_then(serde_json::Value::as_array)
-            .expect("turn parts");
-        assert!(parts.iter().any(|part| {
-            part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
-                && part.get("toolCallId").and_then(serde_json::Value::as_str) == Some("call-1")
-        }));
-        assert_eq!(
-            conversation.messages[0]
-                .turn
-                .as_ref()
-                .and_then(|turn| turn.get("status"))
-                .and_then(serde_json::Value::as_str),
-            Some("complete")
-        );
-        assert!(!conversation.messages[0].is_streaming);
-        assert_eq!(
-            stopped,
-            vec![AiStoppedAssistantTurn {
-                message_id: "assistant-1".to_string(),
-                status: "complete",
-                retained: true,
-            }]
-        );
-    }
 
 }

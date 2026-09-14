@@ -9,8 +9,13 @@ default = []
 
 [dependencies]
 gpui.workspace = true
+oxideterm-gpui-ui = { path = "../oxideterm-gpui-ui" }
+tracing.workspace = true
 oxideterm-editor-core = { path = "../oxideterm-editor-core" }
 oxideterm-editor-syntax = { path = "../oxideterm-editor-syntax" }
 oxideterm-theme = { path = "../oxideterm-theme" }
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

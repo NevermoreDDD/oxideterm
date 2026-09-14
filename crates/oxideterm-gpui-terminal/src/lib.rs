@@ -14,9 +14,9 @@ pub use app::TerminalPlaybackUpdateTimings;
 pub use app::{
     SharedTerminalSession, TerminalBroadcastInputKind, TerminalContextAction, TerminalCursorAnchor,
     TerminalCwdShellIntegrationStatus, TerminalInputBroadcaster, TerminalInputInterceptor,
-    TerminalInputInterceptorResult, TerminalPane, TerminalPaneEvent, TerminalSearchStatus,
-    TerminalSerialAction, TerminalSerialStatus, TerminalTelnetAction,
-    TerminalWorkingDirectorySource,
+    TerminalInputInterceptorResult, TerminalKeybindings, TerminalPane, TerminalPaneEvent,
+    TerminalSearchStatus, TerminalSerialAction, TerminalSerialStatus, TerminalShortcut,
+    TerminalTelnetAction, TerminalWorkingDirectorySource,
 };
 pub use background_cache::BackgroundImageRenderCache;
 pub use command_facts::{
@@ -41,5 +41,6 @@ pub use terminal_ui::{
     TerminalModemLabels, TerminalNotice, TerminalNoticeVariant, TerminalPasteLabels,
     TerminalSerialControlLabels, TerminalSessionLogLabels, TerminalTmuxLabels, TerminalTrzszLabels,
     TerminalUiPreferenceOverrides, TerminalUiPreferences, TerminalUiTheme,
-    resolved_terminal_semantic_scheme,
+    resolved_terminal_semantic_scheme, terminal_semantic_color, terminal_semantic_line_band,
+    terminal_semantic_variant_color,
 };

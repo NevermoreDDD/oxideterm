@@ -1707,6 +1707,34 @@ mod entity_delivery_tests {
     }
 
     #[gpui::test]
+    fn sidebar_switch_preserves_paths_and_transfer_target_but_retires_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let entity = cx.new(SftpWorkspaceEntity::new);
+        entity.update(cx, |sftp, cx| {
+            let a = SftpRemoteId::Node(NodeId::new("delivery-test"));
+            let b = SftpRemoteId::Node(NodeId::new("other-server"));
+            sftp.activate_view(SftpSurfaceId::Sidebar, a.clone());
+            sftp.remote_path = "/server-a".into();
+            sftp.remote_selected.insert("old-selection".into());
+            sftp.transfers.push(transfer_item());
+            let generation = sftp.view_generation;
+            sftp.deactivate_view(SftpSurfaceId::Sidebar, &a, cx);
+            sftp.activate_view(SftpSurfaceId::Sidebar, b.clone());
+            assert!(sftp.remote_selected.is_empty());
+            assert_ne!(sftp.view_generation, generation);
+            assert_eq!(sftp.transfers[0].remote_id, a);
+            assert_eq!(sftp.transfers[0].remote_path, "/file.txt");
+            sftp.remote_path = "/server-b".into();
+            sftp.deactivate_view(SftpSurfaceId::Sidebar, &b, cx);
+            sftp.activate_view(SftpSurfaceId::Sidebar, a);
+            assert_eq!(sftp.remote_path, "/server-a");
+            sftp.activate_view(SftpSurfaceId::Sidebar, b);
+            assert_eq!(sftp.remote_path, "/server-b");
+        });
+    }
+
+    #[gpui::test]
     fn stale_remote_list_result_does_not_emit_effect(cx: &mut TestAppContext) {
         let entity = cx.new(SftpWorkspaceEntity::new);
         entity.update(cx, |sftp, _cx| {

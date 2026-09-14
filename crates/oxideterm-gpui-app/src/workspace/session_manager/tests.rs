@@ -56,13 +56,15 @@ pub(super) fn ssh_config_display_projection_never_copies_proxy_command_secrets()
 }
 
 #[test]
-pub(super) fn save_request_from_form_preserves_custom_icon_and_independent_colors() {
+pub(super) fn unnamed_save_request_preserves_custom_icon_and_independent_colors() {
     let mut form = base_form();
+    form.name.clear();
     form.icon = "cloud".to_string();
     form.color = "#7dd3fc".to_string();
     form.icon_background_color = "#082f49".to_string();
     let request = save_request_from_form(&mut form, Some("conn-1".to_string())).unwrap();
 
+    assert_eq!(request.name, "me@192.168.1.2");
     assert_eq!(request.icon.as_deref(), Some("cloud"));
     assert_eq!(request.color.as_deref(), Some("#7dd3fc"));
     assert_eq!(request.icon_background_color.as_deref(), Some("#082f49"));
@@ -124,29 +126,42 @@ pub(super) fn new_connection_save_password_true_keeps_empty_password_as_submitte
 }
 
 #[test]
-pub(super) fn edit_properties_unloaded_password_preserves_saved_keychain_id() {
+pub(super) fn edit_properties_optional_name_preserves_connection_identity_and_saved_password() {
     let existing = SavedAuth::Password {
         keychain_id: Some("kc-password".to_string()),
         plaintext_password: None,
     };
-    let mut form = base_form();
-    form.password = String::new();
-    form.password_loaded = false;
-    form.save_password = true;
+    for (name, expected) in [
+        ("Home", "Home"),
+        ("", "deploy@server.example.com"),
+        (" \t ", "deploy@server.example.com"),
+    ] {
+        let mut form = base_form();
+        form.name = name.to_string();
+        form.host = " server.example.com ".to_string();
+        form.username = " deploy ".to_string();
+        form.password_loaded = false;
+        form.save_password = true;
 
-    let request = save_request_from_form_with_existing_auth(
-        &mut form,
-        Some("conn-1".to_string()),
-        Some(&existing),
-    )
-    .unwrap();
-
-    match request.auth {
-        SavedAuth::Password {
-            keychain_id: Some(keychain_id),
-            plaintext_password: None,
-        } => assert_eq!(keychain_id, "kc-password"),
-        other => panic!("unexpected auth: {other:?}"),
+        let request = save_request_from_form_with_existing_auth(
+            &mut form,
+            Some("conn-1".to_string()),
+            Some(&existing),
+        )
+        .unwrap();
+        assert_eq!(request.name, expected);
+        assert_eq!(request.id.as_deref(), Some("conn-1"));
+        assert_eq!(request.host, "server.example.com");
+        assert_eq!(request.username, "deploy");
+        match request.auth {
+            SavedAuth::Password {
+                keychain_id: Some(keychain_id),
+                plaintext_password: None,
+            } => {
+                assert_eq!(keychain_id, "kc-password");
+            }
+            other => panic!("unexpected auth: {other:?}"),
+        }
     }
 }
 
@@ -259,9 +274,10 @@ pub(super) fn edit_properties_can_remove_the_entire_proxy_chain() {
 }
 
 #[test]
-pub(super) fn edit_properties_preserves_legacy_ssh_compatibility() {
+pub(super) fn edit_properties_preserves_ssh_compatibility_policy() {
     let mut saved_connection = saved_connection_fixture(SavedAuth::Agent);
     saved_connection.options.legacy_ssh_compatibility = true;
+    saved_connection.options.ssh_algorithms.mac = vec!["hmac-sha1".to_string()];
     saved_connection.options.dedicated_new_terminal_connection = true;
 
     // Editing and saving an existing connection must round-trip its transport policy.
@@ -270,6 +286,8 @@ pub(super) fn edit_properties_preserves_legacy_ssh_compatibility() {
 
     assert!(form.legacy_ssh_compatibility);
     assert!(request.legacy_ssh_compatibility);
+    assert_eq!(form.ssh_algorithms.mac, ["hmac-sha1"]);
+    assert_eq!(request.ssh_algorithms.mac, ["hmac-sha1"]);
     assert!(form.dedicated_new_terminal_connection);
     assert!(request.dedicated_new_terminal_connection);
 }
@@ -571,4 +589,37 @@ pub(super) fn runtime_proxy_hops_are_prepended_without_cloning_the_connection_fo
     assert_eq!(request.proxy_chain.len(), 2);
     assert_eq!(request.proxy_chain[0].host, "runtime-hop.example.com");
     assert_eq!(request.proxy_chain[1].host, "form-hop.example.com");
+}
+
+#[test]
+fn viewing_saved_password_does_not_replace_stored_credential() {
+    let existing = SavedAuth::Password {
+        keychain_id: Some("stored-owner".into()),
+        plaintext_password: None,
+    };
+    let mut form = base_form();
+    form.saved_password_keychain_id = Some("stored-owner".into());
+    form.password = "revealed-test-value".into();
+    form.password_from_store = true;
+    form.password_loaded = true;
+    let request = save_request_from_form_with_existing_auth(
+        &mut form,
+        Some("connection".into()),
+        Some(&existing),
+    )
+    .unwrap();
+    assert!(
+        matches!(request.auth, SavedAuth::Password { keychain_id: Some(ref id), plaintext_password: None } if id == "stored-owner")
+    );
+    crate::workspace::new_connection::password_draft_mut(&mut form).push_str("-edited");
+    let edited = save_request_from_form_with_existing_auth(
+        &mut form,
+        Some("connection".into()),
+        Some(&existing),
+    )
+    .unwrap();
+    assert!(
+        matches!(edited.auth, SavedAuth::Password { plaintext_password: Some(ref password), .. } if password.expose_secret() == "revealed-test-value-edited")
+    );
+    assert!(form.password.is_empty());
 }

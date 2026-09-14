@@ -435,7 +435,7 @@ pub enum SavedUpstreamProxyProtocol {
     HttpConnect,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SavedUpstreamProxyAuth {
     None,
@@ -454,7 +454,7 @@ impl Default for SavedUpstreamProxyAuth {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedUpstreamProxyConfig {
     pub protocol: SavedUpstreamProxyProtocol,
@@ -468,7 +468,7 @@ pub struct SavedUpstreamProxyConfig {
     pub no_proxy: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SavedUpstreamProxyPolicy {
     UseGlobal,
@@ -1407,6 +1407,8 @@ pub struct RemoteDesktopProfile {
     /// Saved SSH connection used to reach this endpoint through a local tunnel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_gateway_connection_id: Option<String>,
+    #[serde(default = "default_remote_desktop_proxy")]
+    pub upstream_proxy: SavedUpstreamProxyPolicy,
     /// Stable protected-store reference; the credential value is never serialized here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_ref: Option<String>,
@@ -1435,6 +1437,7 @@ pub struct SaveRemoteDesktopProfileRequest {
     pub username: Option<String>,
     pub domain: Option<String>,
     pub ssh_gateway_connection_id: Option<String>,
+    pub upstream_proxy: Option<SavedUpstreamProxyPolicy>,
     /// An explicit reference is primarily used by trusted import and sync paths.
     pub credential_ref: Option<String>,
     /// The store moves this secret into the protected credential backend.
@@ -1683,6 +1686,10 @@ impl StandaloneSftpProfile {
     }
 }
 
+fn default_remote_desktop_proxy() -> SavedUpstreamProxyPolicy {
+    SavedUpstreamProxyPolicy::Direct
+}
+
 impl RemoteDesktopProfile {
     pub fn new(
         name: impl Into<String>,
@@ -1705,6 +1712,7 @@ impl RemoteDesktopProfile {
             username: None,
             domain: None,
             ssh_gateway_connection_id: None,
+            upstream_proxy: SavedUpstreamProxyPolicy::Direct,
             credential_ref: None,
             read_only: false,
             session_options: RemoteDesktopSessionOptions::default(),
@@ -1715,6 +1723,21 @@ impl RemoteDesktopProfile {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.protocol != RemoteDesktopProtocol::Rdp
+            && !matches!(self.upstream_proxy, SavedUpstreamProxyPolicy::Direct)
+        {
+            bail!("Upstream proxy is supported only for RDP profiles");
+        }
+        if let SavedUpstreamProxyPolicy::Custom { proxy } = &self.upstream_proxy {
+            if proxy.protocol != SavedUpstreamProxyProtocol::Socks5 {
+                bail!("RDP supports SOCKS5 proxies only");
+            }
+            non_empty(proxy.host.trim(), "Upstream proxy host")?;
+            if proxy.port == 0 {
+                bail!("Upstream proxy port must be greater than zero");
+            }
+        }
+
         if self.id.trim().is_empty() {
             bail!("Remote desktop profile id is required");
         }
@@ -1834,6 +1857,14 @@ pub struct ConnectionStoreData {
     pub version: u32,
     #[serde(default)]
     pub connections: Vec<SavedConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleared_credentials: Vec<CredentialTarget>,
+    #[serde(default)]
+    pub global_proxy_credential_revision: String,
+    #[serde(default)]
+    pub global_proxy_credential_cleared: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_global_proxy_reference: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1865,6 +1896,10 @@ impl Default for ConnectionStoreData {
         Self {
             version: CONFIG_VERSION,
             connections: Vec::new(),
+            cleared_credentials: Vec::new(),
+            global_proxy_credential_revision: String::new(),
+            global_proxy_credential_cleared: false,
+            synced_global_proxy_reference: None,
             groups: Vec::new(),
             recent: Vec::new(),
             connection_tombstones: Vec::new(),

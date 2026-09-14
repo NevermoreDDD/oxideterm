@@ -17,11 +17,9 @@ pub(crate) async fn stream_openai_completion(
     messages: Vec<AiChatMessage>,
     events: tokio::sync::mpsc::UnboundedSender<AiStreamEvent>,
 ) -> Result<()> {
-    let client = oxideterm_network_proxy::application_http_client_builder()
-        .context("failed to apply application proxy to AI chat client")?
-        .timeout(CHAT_STREAM_TIMEOUT)
-        .build()
-        .context("failed to create AI chat client")?;
+    // Reuse the application pool across tool rounds; provider keys remain request-scoped below.
+    let client = oxideterm_network_proxy::application_http_client()
+        .context("failed to acquire application AI chat client")?;
     let body = openai_chat_body(&config, &messages);
     let mut last_error = None;
     let urls = openai_compatible_candidates(&config.base_url, "/chat/completions");
@@ -39,6 +37,7 @@ pub(crate) async fn stream_openai_completion(
         };
 
         if !response.status().is_success() {
+            super::retry::check_transient_response(&response)?;
             let status = response.status().as_u16();
             let error_text = response.text().await.unwrap_or_default();
             let parsed = parse_openai_error(status, &error_text);
@@ -54,6 +53,7 @@ pub(crate) async fn stream_openai_completion(
                     }
                     Err(error) => return Err(error),
                 };
+                super::retry::check_transient_response(&retry_response)?;
                 if retry_response.status().is_success() {
                     match stream_openai_response(retry_response, &events).await? {
                         StreamParseResult::Done | StreamParseResult::SawEvent => {
@@ -164,11 +164,9 @@ pub(crate) async fn stream_ollama_completion(
 ) -> Result<()> {
     config.base_url = config.base_url.trim_end_matches('/').to_string();
     let url = format!("{}/v1/chat/completions", config.base_url);
-    let client = oxideterm_network_proxy::application_http_client_builder()
-        .context("failed to apply application proxy to AI chat client")?
-        .timeout(CHAT_STREAM_TIMEOUT)
-        .build()
-        .context("failed to create Ollama chat client")?;
+    // Reuse the same application pool for every model round in this conversation.
+    let client = oxideterm_network_proxy::application_http_client()
+        .context("failed to acquire application Ollama chat client")?;
     let body = openai_chat_body(&config, &messages);
     let mut response = openai_stream_request(&client, &url, &config, &body)
         .await
@@ -176,6 +174,7 @@ pub(crate) async fn stream_ollama_completion(
             anyhow!("Cannot connect to Ollama. Make sure Ollama is running (ollama serve).")
         })?;
     if !response.status().is_success() {
+        super::retry::check_transient_response(&response)?;
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
         let parsed = parse_ollama_error(status, &error_text);
@@ -187,6 +186,7 @@ pub(crate) async fn stream_ollama_completion(
                     anyhow!("Cannot connect to Ollama. Make sure Ollama is running (ollama serve).")
                 })?;
             if !response.status().is_success() {
+                super::retry::check_transient_response(&response)?;
                 let retry_status = response.status().as_u16();
                 let retry_error_text = response.text().await.unwrap_or_default();
                 return Err(anyhow!(parse_ollama_error(retry_status, &retry_error_text)));
@@ -208,6 +208,12 @@ async fn openai_stream_request(
 ) -> Result<reqwest::Response> {
     let mut request = client
         .post(url)
+        // xAI documents hour-long request timeouts for its reasoning models; cancellation remains task-owned.
+        .timeout(if config.provider_type == "xai" {
+            std::time::Duration::from_secs(3600)
+        } else {
+            CHAT_STREAM_TIMEOUT
+        })
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(body);
     if let Some(api_key) = config.api_key.as_ref().filter(|key| !key.is_empty()) {
@@ -216,7 +222,7 @@ async fn openai_stream_request(
     request
         .send()
         .await
-        .map_err(|error| anyhow!("failed to connect to AI provider: {}", error.without_url()))
+        .map_err(|error| anyhow::Error::new(error.without_url()))
 }
 
 async fn stream_openai_response(
@@ -224,10 +230,14 @@ async fn stream_openai_response(
     events: &tokio::sync::mpsc::UnboundedSender<AiStreamEvent>,
 ) -> Result<StreamParseResult> {
     let mut accumulator = OpenAiToolAccumulator::default();
-    stream_sse_response(response, events, |line| {
+    let result = stream_sse_response(response, events, |line| {
         parse_openai_data_line_with_accumulator(line, &mut accumulator)
     })
-    .await
+    .await?;
+    if matches!(result, StreamParseResult::SawEvent) && !accumulator.finished {
+        return Err(anyhow!("ai_stream_interrupted"));
+    }
+    Ok(result)
 }
 
 fn body_without_tool_choice(body: &Value) -> Value {

@@ -162,7 +162,7 @@ fn migrate_ai_providers(settings: &mut Value, warnings: &mut Vec<String>) {
             "type": "deepseek",
             "name": "DeepSeek",
             "baseUrl": "https://api.deepseek.com",
-            "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+            "models": ["deepseek-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
             "enabled": true,
             "createdAt": created_at,
         }),
@@ -709,6 +709,18 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
             MIN_TERMINAL_FONT_WEIGHT,
             MAX_TERMINAL_FONT_WEIGHT,
         ),
+        (
+            "terminal.paddingHorizontal",
+            DEFAULT_TERMINAL_PADDING_HORIZONTAL,
+            0,
+            MAX_TERMINAL_PADDING,
+        ),
+        (
+            "terminal.paddingVertical",
+            DEFAULT_TERMINAL_PADDING_VERTICAL,
+            0,
+            MAX_TERMINAL_PADDING,
+        ),
         ("terminal.backgroundBlur", 0, 0, 20),
         ("appearance.borderRadius", 6, 0, 16),
         ("appearance.uiFontSize", DEFAULT_UI_FONT_SIZE, 11, 20),
@@ -748,7 +760,7 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
             100 * 1024 * 1024 * 1024,
         ),
         ("terminal.sessionLog.retentionDays", 30, 0, 3650),
-        ("terminal.sessionLog.maxFileSizeMib", 100, 1, 4096),
+        ("terminal.sessionLog.maxFileSizeMib", 100, 0, 4096),
     ] {
         let segments: Vec<_> = path.split('.').collect();
         if let Some(value) = get_path_mut(&mut settings, &segments) {

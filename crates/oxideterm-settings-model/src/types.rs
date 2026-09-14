@@ -71,6 +71,13 @@ pub enum SettingsKeybindingScopeFilter {
     Terminal,
     Split,
     Palette,
+    Editor,
+    Sftp,
+    Files,
+    Preview,
+    RemoteDesktop,
+    Plugins,
+    AiPanel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +93,8 @@ pub enum SettingsSelect {
     AppearanceFrostedGlass,
     AppearanceBackgroundFit,
     CustomThemeDuplicate,
+    IdeFontFamily,
+    IdeCjkFontFamily,
     TerminalFontFamily,
     TerminalCjkFontFamily,
     TerminalEncoding,
@@ -112,8 +121,6 @@ pub enum SettingsSelect {
     NetworkProxyProtocol,
     NetworkProxyAuth,
     AiProviderTemplate,
-    AiContextMaxChars,
-    AiContextVisibleLines,
     AiEmbeddingProvider,
     KnowledgeCollectionScope,
     KnowledgeDocumentFormat,
@@ -143,6 +150,10 @@ pub enum SettingsInput {
     TerminalFontWeight,
     TerminalScrollback,
     TerminalLineHeight,
+    TerminalPaddingHorizontal,
+    TerminalPaddingVertical,
+    IdeFontWeight,
+    IdeCustomFontFamily,
     IdeFontSize,
     IdeLineHeight,
     AppearanceUiFont,
@@ -215,7 +226,6 @@ pub enum SettingsInput {
     AiToolUseMaxRounds,
     AiToolUseMaxCallsPerRound,
     AiModelContextWindow(usize, usize),
-    AiActiveModelMaxResponseTokens,
     AiEmbeddingModel,
     AiMcpName,
     AiMcpCommand,
@@ -337,6 +347,13 @@ impl SettingsKeybindingScopeFilter {
             Self::Terminal,
             Self::Split,
             Self::Palette,
+            Self::Editor,
+            Self::Sftp,
+            Self::Files,
+            Self::Preview,
+            Self::RemoteDesktop,
+            Self::Plugins,
+            Self::AiPanel,
         ]
     }
 
@@ -347,6 +364,13 @@ impl SettingsKeybindingScopeFilter {
             Self::Terminal => "settings_view.keybindings.scope_terminal",
             Self::Split => "settings_view.keybindings.scope_split",
             Self::Palette => "settings_view.keybindings.scope_palette",
+            Self::Editor => "settings_view.keybindings.scope_editor",
+            Self::Sftp => "settings_view.keybindings.scope_sftp",
+            Self::Files => "settings_view.keybindings.scope_files",
+            Self::Preview => "settings_view.keybindings.scope_preview",
+            Self::RemoteDesktop => "settings_view.keybindings.scope_remote_desktop",
+            Self::Plugins => "settings_view.keybindings.scope_plugins",
+            Self::AiPanel => "settings_view.keybindings.scope_ai_panel",
         }
     }
 }
@@ -523,6 +547,10 @@ impl SettingsInput {
             Self::TerminalFontWeight => 21,
             Self::TerminalScrollback => 33_000,
             Self::TerminalLineHeight => 2,
+            Self::TerminalPaddingHorizontal => 22,
+            Self::TerminalPaddingVertical => 23,
+            Self::IdeFontWeight => 34_010,
+            Self::IdeCustomFontFamily => 34_011,
             Self::IdeFontSize => 3,
             Self::IdeLineHeight => 4,
             Self::AppearanceUiFont => 5,
@@ -597,7 +625,6 @@ impl SettingsInput {
             Self::AiModelContextWindow(provider_index, model_index) => {
                 23_000 + provider_index as u64 * 1_000 + model_index as u64
             }
-            Self::AiActiveModelMaxResponseTokens => 24_000,
             Self::AiEmbeddingModel => 24_001,
             Self::AiMcpName => 25_000,
             Self::AiMcpCommand => 25_001,

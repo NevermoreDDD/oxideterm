@@ -141,12 +141,15 @@ impl AiRuntimeContextEntity {
         cx.on_release(|runtime, _cx| runtime.shutdown()).detach();
     }
 
-    /// A replacement stream must invalidate every previous model capability lease first.
+    /// Authority belongs to one run. Replacing that run cannot revoke another agent's lease.
     pub(in crate::workspace) fn begin_tool_session(
         &mut self,
         stream_generation: u64,
     ) -> ToolSessionId {
-        self.finish_all_tool_sessions(RuntimeRevocationReason::ToolSessionCancelled);
+        self.finish_tool_session(
+            stream_generation,
+            RuntimeRevocationReason::ToolSessionCancelled,
+        );
         let tool_session_id = self.registry.begin_tool_session();
         self.tool_sessions
             .insert(stream_generation, tool_session_id.clone());
@@ -161,6 +164,66 @@ impl AiRuntimeContextEntity {
         if let Some(tool_session_id) = self.tool_sessions.remove(&stream_generation) {
             self.registry.finish_tool_session(&tool_session_id, reason);
         }
+    }
+
+    pub(in crate::workspace) fn is_agent_scoped_session(&self, session: &ToolSessionId) -> bool {
+        self.registry.is_restricted_session(session)
+    }
+
+    pub(in crate::workspace) fn agent_scope(
+        &self,
+        session: &ToolSessionId,
+        tools: std::collections::BTreeSet<String>,
+    ) -> oxideterm_ai::agent::AgentScope {
+        oxideterm_ai::agent::AgentScope {
+            targets: self.registry.session_owners(session),
+            tools,
+        }
+    }
+
+    pub(in crate::workspace) fn restrict_agent_session(
+        &mut self,
+        session: &ToolSessionId,
+        scope: &oxideterm_ai::agent::AgentScope,
+    ) -> Result<(), oxideterm_ai::RuntimeContextError> {
+        self.registry
+            .restrict_tool_session(session, scope.targets.clone())
+    }
+
+    pub(in crate::workspace) fn delegated_agent_target(
+        &self,
+        session: &ToolSessionId,
+        handle: &str,
+    ) -> Result<(oxideterm_ai::RuntimeOwnerKey, String), oxideterm_ai::RuntimeValidationError> {
+        let handle = oxideterm_ai::RuntimeHandleId::parse(handle.to_owned()).map_err(|_| {
+            oxideterm_ai::RuntimeValidationError::new(
+                oxideterm_ai::RuntimeValidationFailure::UnknownHandle,
+            )
+        })?;
+        let label = self
+            .registry
+            .validate_handle_projection(session, Some(&handle))?
+            .label;
+        Ok((self.registry.delegated_owner(session, &handle)?, label))
+    }
+
+    pub(in crate::workspace) fn terminal_resource_key(
+        &self,
+        session: TerminalSessionId,
+    ) -> Option<oxideterm_ai::RuntimeOwnerKey> {
+        self.terminal_owners
+            .get(&session)
+            .map(|owner| owner.key.clone())
+    }
+
+    pub(in crate::workspace) fn agent_can_observe_terminal(
+        &self,
+        session: &ToolSessionId,
+        terminal: TerminalSessionId,
+    ) -> bool {
+        self.terminal_owners
+            .get(&terminal)
+            .is_some_and(|owner| self.registry.permits_owner(session, &owner.key))
     }
 
     /// Rejects work queued by a stream that has been cancelled or replaced.
@@ -763,14 +826,23 @@ mod tests {
     use super::AiRuntimeContextEntity;
 
     #[test]
-    fn replacement_stream_invalidates_the_previous_tool_session() {
+    fn tool_sessions_are_isolated_and_same_run_replacement_revokes_old_authority() {
         let mut entity = AiRuntimeContextEntity::new();
         let first = entity.begin_tool_session(7);
         let second = entity.begin_tool_session(8);
 
-        assert!(!entity.is_active_tool_session(7, &first));
+        assert!(entity.is_active_tool_session(7, &first));
         assert!(entity.is_active_tool_session(8, &second));
-        assert_ne!(first, second);
+        let replacement = entity.begin_tool_session(7);
+        assert!(!entity.is_active_tool_session(7, &first));
+        assert!(entity.is_active_tool_session(7, &replacement));
+        assert!(entity.is_active_tool_session(8, &second));
+        entity.finish_tool_session(
+            7,
+            oxideterm_ai::RuntimeRevocationReason::ToolSessionCancelled,
+        );
+        assert!(!entity.is_active_tool_session(7, &replacement));
+        assert!(entity.is_active_tool_session(8, &second));
     }
 
     #[test]
@@ -822,6 +894,43 @@ mod tests {
             )
             .expect_err("closed terminal does not retain authority");
         assert_eq!(error.public_code(), "runtime_owner_closed");
+    }
+
+    #[test]
+    fn delegated_discovery_cannot_issue_or_reuse_another_targets_handle() {
+        let mut entity = AiRuntimeContextEntity::new();
+        let first = TerminalSessionId(41);
+        let second = TerminalSessionId(42);
+        entity.register_terminal_session(first, "First".into());
+        entity.register_terminal_session(second, "Second".into());
+        let parent = entity.begin_tool_session(1);
+        let outside = entity.issue_terminal_handle(&parent, second).unwrap();
+        let child = entity.begin_tool_session(2);
+        let stale = entity.issue_terminal_handle(&child, second).unwrap();
+        let mut scope = oxideterm_ai::agent::AgentScope::default();
+        scope
+            .targets
+            .insert(entity.terminal_resource_key(first).unwrap());
+        entity.restrict_agent_session(&child, &scope).unwrap();
+        assert!(entity.issue_terminal_handle(&child, first).is_ok());
+        assert!(entity.issue_terminal_handle(&child, second).is_err());
+        for handle in [outside, stale] {
+            assert!(
+                entity
+                    .validate_terminal_handle(
+                        &child,
+                        Some(handle.handle_id.as_str()),
+                        oxideterm_ai::RuntimeCapability::TerminalObserve
+                    )
+                    .is_err()
+            );
+        }
+        scope
+            .targets
+            .insert(entity.terminal_resource_key(second).unwrap());
+        entity.restrict_agent_session(&child, &scope).unwrap();
+        assert!(!entity.agent_can_observe_terminal(&child, second));
+        assert!(entity.is_active_tool_session(1, &parent));
     }
 
     #[test]

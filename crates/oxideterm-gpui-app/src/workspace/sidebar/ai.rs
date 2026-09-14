@@ -1,8 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::workspace::ai_state::{
-    AiChatInitializationOutcome, AiChatPopover, AiWorkspaceEntity, AiWorkspaceVisibility,
-};
+use crate::workspace::ai_state::{AiChatPopover, AiWorkspaceEntity, AiWorkspaceVisibility};
 use crate::workspace::ime::WorkspaceImeTarget;
 use crate::workspace::*;
 use gpui::{Context, Div, MouseDownEvent, Rgba, Window};
@@ -16,8 +14,7 @@ use oxideterm_ai::{
     ai_help_markdown as ai_help_markdown_core, ai_input_system_prompt, ai_input_token_at_cursor,
     ai_reference_context_block, ai_should_trigger_hard_deny, ai_user_explicitly_requested_json,
     ai_visible_suggestion_content, apply_chat_request_overrides, detect_ai_intent,
-    extract_ai_error_context, generate_chat_title, infer_ai_cwd,
-    model_max_response_tokens as ai_model_max_response_tokens, model_reasoning_capability,
+    extract_ai_error_context, generate_chat_title, infer_ai_cwd, model_reasoning_capability,
     model_selector_display_name, model_selector_truncated_label,
     model_selector_visible_provider_groups, parse_ai_user_input,
     provider_chat_requires_key as ai_provider_chat_requires_key,
@@ -27,7 +24,6 @@ use oxideterm_ai::{
 };
 use oxideterm_ai::{
     AiExecutedToolResult, ai_to_usable_budget_threshold, ai_tool_result_model_content,
-    condense_ai_tool_messages,
 };
 use oxideterm_gpui_markdown::{
     MarkdownBlockLayout, MarkdownOptions, parser as markdown_parser, render as markdown_render,
@@ -132,11 +128,13 @@ pub(in crate::workspace) fn ai_message_backend_for_stream(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum AiHeaderAction {
+    ArchivedConversations,
     NewChat,
     Settings,
 }
 
 pub(in crate::workspace) struct AiPendingChatStream {
+    pub(super) launch_id: Option<String>,
     pub(super) conversation_id: String,
     pub(super) config: AiChatStreamConfig,
     pub(super) request_content: Option<String>,

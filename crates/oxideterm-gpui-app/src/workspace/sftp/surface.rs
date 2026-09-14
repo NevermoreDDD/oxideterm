@@ -191,26 +191,6 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.tokens.ui;
-        let Some(node_id) = self.embedded_sftp_node_id.clone() else {
-            return div()
-                .flex_1()
-                .min_h(px(0.0))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .px_4()
-                .text_size(px(SFTP_TEXT_XS))
-                .text_color(rgb(theme.text_muted))
-                .child(Self::render_lucide_icon(
-                    LucideIcon::FolderOpen,
-                    28.0,
-                    rgb(theme.text_muted),
-                ))
-                .child(self.i18n.t("sftp.sidebar.no_session"))
-                .into_any_element();
-        };
         if self
             .active_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::Sftp)
@@ -229,6 +209,37 @@ impl WorkspaceApp {
                 .child(self.i18n.t("sftp.sidebar.active_tab_notice"))
                 .into_any_element();
         }
+        let Some(node_id) = self.embedded_sftp_target(cx) else {
+            return div()
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .px_4()
+                .text_size(px(SFTP_TEXT_XS))
+                .text_color(rgb(theme.text_muted))
+                .child(Self::render_lucide_icon(
+                    LucideIcon::FolderOpen,
+                    28.0,
+                    rgb(theme.text_muted),
+                ))
+                .child(self.i18n.t("sftp.sidebar.no_follow_target"))
+                .child(self.render_sftp_icon_button(
+                    LucideIcon::X,
+                    self.i18n.t("sftp.preview.close"),
+                    cx.listener(|this, _event, _window, cx| {
+                        if let Some(node) = this.embedded_sftp_node_id.clone() {
+                            this.close_embedded_sftp_for_node(&node, cx);
+                        }
+                        cx.stop_propagation();
+                    }),
+                    cx.entity(),
+                ))
+                .into_any_element();
+        };
         let context_menu_exit_delay = oxideterm_gpui_ui::motion::duration(
             &self.tokens,
             oxideterm_gpui_ui::motion::MotionDuration::Micro,
@@ -281,6 +292,25 @@ impl WorkspaceApp {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(node_title),
                             )
+                            .child(self.render_sftp_icon_button(
+                                if self.embedded_sftp_pinned {
+                                    LucideIcon::Pin
+                                } else {
+                                    LucideIcon::Link2
+                                },
+                                self.i18n.t(if self.embedded_sftp_pinned {
+                                    "sftp.sidebar.unpin"
+                                } else {
+                                    "sftp.sidebar.pin"
+                                }),
+                                cx.listener(|this, _event, _window, cx| {
+                                    this.embedded_sftp_pinned = !this.embedded_sftp_pinned;
+                                    this.activate_embedded_sftp_sidebar_if_visible(cx);
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                }),
+                                cx.entity(),
+                            ))
                             .child(self.render_sftp_nav_button(
                                 SftpPane::Remote,
                                 "..",

@@ -1,12 +1,12 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::filesystem::IdeFileError;
+use crate::filesystem::{IdeFileError, TextFileFormat};
 use crate::tree::FileTreeSnapshot;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -144,9 +144,13 @@ pub struct ProjectSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EditorBuffer {
+    #[serde(default)]
+    pub format: TextFileFormat,
+    #[serde(default)]
+    pub saved_format: TextFileFormat,
     pub location: IdeLocation,
-    pub text: String,
-    pub saved_text: String,
+    pub text: Arc<str>,
+    pub saved_text: Arc<str>,
     pub version: SavedFileVersion,
     pub revision: u64,
     pub saved_revision: u64,
@@ -154,9 +158,11 @@ pub struct EditorBuffer {
 
 impl EditorBuffer {
     pub fn new(location: IdeLocation, text: impl Into<String>, version: SavedFileVersion) -> Self {
-        let text = text.into();
+        let text: Arc<str> = text.into().into();
         Self {
             location,
+            format: TextFileFormat::default(),
+            saved_format: TextFileFormat::default(),
             saved_text: text.clone(),
             text,
             version,
@@ -166,7 +172,9 @@ impl EditorBuffer {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.revision != self.saved_revision || self.text != self.saved_text
+        self.revision != self.saved_revision
+            || self.text != self.saved_text
+            || self.format != self.saved_format
     }
 }
 
@@ -181,10 +189,14 @@ pub struct EditorTab {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BufferSnapshot {
+    #[serde(default)]
+    pub format: TextFileFormat,
+    #[serde(default)]
+    pub saved_format: TextFileFormat,
     pub tab_id: EditorTabId,
     pub location: IdeLocation,
-    pub text: String,
-    pub saved_text: String,
+    pub text: Arc<str>,
+    pub saved_text: Arc<str>,
     pub version: SavedFileVersion,
     pub revision: u64,
     pub saved_revision: u64,

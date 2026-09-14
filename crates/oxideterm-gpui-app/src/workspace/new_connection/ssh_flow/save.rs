@@ -76,6 +76,54 @@ fn mosh_password_draft_is_persistent(form: &NewConnectionForm) -> bool {
     form.save_password || (form.mosh_profile_id.is_some() && !form.password.is_empty())
 }
 
+fn rdp_proxy_policy_from_form(
+    form: &mut NewConnectionForm,
+) -> Result<SavedUpstreamProxyPolicy, &'static str> {
+    Ok(match form.upstream_proxy_policy {
+        NewConnectionUpstreamProxyPolicy::UseGlobal => SavedUpstreamProxyPolicy::UseGlobal,
+        NewConnectionUpstreamProxyPolicy::Direct => SavedUpstreamProxyPolicy::Direct,
+        NewConnectionUpstreamProxyPolicy::Custom => {
+            let host = form.upstream_proxy_host.trim().to_string();
+            if host.is_empty() {
+                return Err("modals.new_connection.remote_desktop_proxy_host_required");
+            }
+            let port = form
+                .upstream_proxy_port
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0)
+                .ok_or("modals.new_connection.remote_desktop_proxy_port_invalid")?;
+            let auth = match form.upstream_proxy_auth {
+                NewConnectionUpstreamProxyAuth::None => SavedUpstreamProxyAuth::None,
+                NewConnectionUpstreamProxyAuth::Password => {
+                    let username = form.upstream_proxy_username.trim().to_string();
+                    if username.is_empty() {
+                        return Err("modals.new_connection.remote_desktop_proxy_username_required");
+                    }
+                    SavedUpstreamProxyAuth::Password {
+                        username,
+                        keychain_id: form.upstream_proxy_password_keychain_id.clone(),
+                        plaintext_password: (!form.upstream_proxy_password.is_empty()).then(|| {
+                            SecretString::from(std::mem::take(&mut form.upstream_proxy_password))
+                        }),
+                    }
+                }
+            };
+            SavedUpstreamProxyPolicy::Custom {
+                proxy: SavedUpstreamProxyConfig {
+                    protocol: oxideterm_connections::SavedUpstreamProxyProtocol::Socks5,
+                    host,
+                    port,
+                    auth,
+                    remote_dns: form.upstream_proxy_remote_dns,
+                    no_proxy: form.upstream_proxy_no_proxy.trim().to_string(),
+                },
+            }
+        }
+    })
+}
+
 fn saved_profile_notes(notes: &str) -> Option<String> {
     let notes = notes.trim();
     (!notes.is_empty()).then(|| notes.to_string())
@@ -934,11 +982,17 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.submit_new_connection_form_with_action(
-            NewConnectionSubmitAction::SaveAndConnect,
-            window,
-            cx,
-        );
+        let action = if self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .is_some_and(|form| form.standalone_connection_id.is_some())
+        {
+            NewConnectionSubmitAction::Connect
+        } else {
+            NewConnectionSubmitAction::SaveAndConnect
+        };
+        self.submit_new_connection_form_with_action(action, window, cx);
     }
 
     pub(in crate::workspace) fn submit_new_connection_form_with_action(
@@ -1353,8 +1407,8 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((config, terminal_options, mut save_request)) =
-            self.with_connection_form_mut(cx, |this, form, cx| {
+        let Some((config, name, terminal_options, mut save_request)) = self
+            .with_connection_form_mut(cx, |this, form, cx| {
                 let form = form?;
                 let port_path = form.serial_port_path.trim().to_string();
                 let baud_rate = form.serial_baud_rate.trim().parse::<u32>().ok();
@@ -1423,7 +1477,12 @@ impl WorkspaceApp {
                 });
                 form.pending = true;
                 form.error = None;
-                Some((config, form.terminal.clone(), save_request))
+                Some((
+                    config,
+                    form.serial_profile_name.clone(),
+                    form.terminal.clone(),
+                    save_request,
+                ))
             })
         else {
             return;
@@ -1475,7 +1534,7 @@ impl WorkspaceApp {
             }
         }
 
-        match self.create_serial_terminal_tab(config, terminal_options, window, cx) {
+        match self.create_serial_terminal_tab(config, &name, terminal_options, window, cx) {
             Ok(session_id) => {
                 if let Some(request) = save_request {
                     match self.connection_store.upsert_serial_profile(request) {
@@ -1729,7 +1788,10 @@ impl WorkspaceApp {
                 form.name.trim().to_string()
             };
             let options = MoshConnectionOptions {
-                saved_profile_id: None,
+                saved_profile_id: form
+                    .standalone_connection_id
+                    .as_ref()
+                    .and(form.mosh_profile_id.clone()),
                 server_executable: server_executable.clone(),
                 udp_host_override: (!form.mosh_udp_host.trim().is_empty())
                     .then(|| form.mosh_udp_host.trim().to_string()),
@@ -1866,7 +1928,18 @@ impl WorkspaceApp {
             return;
         };
 
-        if let Some(connect) = direct_connect {
+        if let Some(mut connect) = direct_connect {
+            if let Some(id) = self
+                .connection_form_state(cx)
+                .form
+                .as_ref()
+                .and_then(|form| form.standalone_connection_id.clone())
+            {
+                let Some(attempt) = self.standalone_connections.begin_reconnect(&id) else {
+                    return;
+                };
+                connect.options.runtime_connection_attempt_id = Some(attempt);
+            }
             self.start_ssh_preflight(
                 connect.config,
                 connect.title,
@@ -1914,7 +1987,18 @@ impl WorkspaceApp {
             return;
         };
         let title = profile.name.clone();
-        let options = mosh_options_from_profile(&profile);
+        let mut options = mosh_options_from_profile(&profile);
+        if let Some(id) = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .and_then(|form| form.standalone_connection_id.clone())
+        {
+            let Some(attempt) = self.standalone_connections.begin_reconnect(&id) else {
+                return;
+            };
+            options.runtime_connection_attempt_id = Some(attempt);
+        }
         self.update_connection_form_state(cx, |state| {
             if let Some(form) = state.form.as_mut() {
                 form.error = Some(self.i18n.t("ssh.form.checking_host_key"));
@@ -2226,6 +2310,41 @@ impl WorkspaceApp {
                     cx.notify();
                     return None;
                 }
+                let proxy_policy = if protocol == RemoteDesktopProtocol::Rdp {
+                    match rdp_proxy_policy_from_form(form) {
+                        Ok(policy) => policy,
+                        Err(key) => {
+                            form.error = Some(this.i18n.t(key));
+                            cx.notify();
+                            return None;
+                        }
+                    }
+                } else {
+                    SavedUpstreamProxyPolicy::Direct
+                };
+                let socks_proxy = if protocol == RemoteDesktopProtocol::Rdp
+                    && action != NewConnectionSubmitAction::Save
+                {
+                    match oxideterm_session_adapter::rdp_socks_proxy_from_saved_policy(
+                        &this.connection_store,
+                        this.settings_store.settings(),
+                        &proxy_policy,
+                        form.remote_desktop_ssh_gateway_connection_id.is_some(),
+                    ) {
+                        Ok(proxy) => proxy,
+                        Err(error) => {
+                            form.error = Some(format!(
+                                "{}: {error}",
+                                this.i18n
+                                    .t("modals.new_connection.remote_desktop_proxy_failed")
+                            ));
+                            cx.notify();
+                            return None;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let label = remote_desktop_profile_label(&form.name, protocol, &host, port);
                 let username =
                     Some(form.username.trim().to_string()).filter(|username| !username.is_empty());
@@ -2248,12 +2367,19 @@ impl WorkspaceApp {
                 } else {
                     (None, password)
                 };
-                let domain = existing_profile
-                    .as_ref()
-                    .and_then(|profile| profile.domain.clone());
-                let read_only = existing_profile
-                    .as_ref()
-                    .is_some_and(|profile| profile.read_only);
+                let reconnect_profile = form
+                    .standalone_connection_id
+                    .as_deref()
+                    .and_then(|id| this.standalone_connections.record(id))
+                    .and_then(|record| match &record.launch {
+                        StandaloneConnectionLaunch::RestoredRemoteDesktop { profile } => {
+                            Some(profile)
+                        }
+                        _ => None,
+                    });
+                let source_profile = existing_profile.as_ref().or(reconnect_profile);
+                let domain = source_profile.and_then(|profile| profile.domain.clone());
+                let read_only = source_profile.is_some_and(|profile| profile.read_only);
                 let save_request = should_save.then(|| SaveRemoteDesktopProfileRequest {
                     id: editing_profile_id,
                     name: label.clone(),
@@ -2270,6 +2396,7 @@ impl WorkspaceApp {
                     ssh_gateway_connection_id: form
                         .remote_desktop_ssh_gateway_connection_id
                         .clone(),
+                    upstream_proxy: Some(proxy_policy),
                     credential_ref: None,
                     credential: credential_to_save,
                     clear_credential,
@@ -2282,6 +2409,7 @@ impl WorkspaceApp {
                     protocol,
                     endpoint: RemoteDesktopEndpoint::new(host, port),
                     transport_endpoint: None,
+                    socks_proxy,
                     username,
                     domain,
                     credential_ref: None,
@@ -2351,14 +2479,28 @@ impl WorkspaceApp {
             }
         }
 
+        let reconnect_id = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .and_then(|form| form.standalone_connection_id.clone());
         self.update_connection_form_state(cx, ConnectionFormState::clear);
         if action != NewConnectionSubmitAction::Save {
             let runtime_password =
                 runtime_password.map(|secret| RemoteDesktopSecret::from(secret.into_zeroizing()));
-            self.open_remote_desktop_connection_with_gateway(
+            let attempt = if let Some(id) = reconnect_id {
+                let Some(attempt) = self.standalone_connections.begin_reconnect(&id) else {
+                    return;
+                };
+                Some(attempt)
+            } else {
+                None
+            };
+            self.open_remote_desktop_connection_for_connection(
                 profile,
                 runtime_password,
                 ssh_gateway_connection_id,
+                attempt,
                 window,
                 cx,
             );
@@ -3107,6 +3249,12 @@ impl WorkspaceApp {
             }
             return;
         };
+        let reconnect_id = runtime_connection_attempt_id
+            .as_deref()
+            .and_then(|attempt| {
+                self.standalone_connections
+                    .connection_id_for_attempt(attempt)
+            });
         let runtime_secrets = match self.connection_store.load_mosh_profile_runtime_secrets(id) {
             Ok(secrets) => secrets,
             Err(_) => {
@@ -3120,6 +3268,7 @@ impl WorkspaceApp {
                     .t("sessionManager.mosh_profiles.missing_credentials");
                 self.update_connection_form_state(cx, |state| {
                     if let Some(form) = state.form.as_mut() {
+                        form.standalone_connection_id = reconnect_id.clone();
                         form.error = Some(missing_credentials);
                         form.focused_field = NewConnectionField::Name;
                         form.field_focused = false;
@@ -3141,6 +3290,7 @@ impl WorkspaceApp {
                 .t("sessionManager.mosh_profiles.missing_credentials");
             self.update_connection_form_state(cx, |state| {
                 if let Some(form) = state.form.as_mut() {
+                    form.standalone_connection_id = reconnect_id.clone();
                     form.error = Some(missing_credentials);
                     form.focused_field = match form.auth_tab {
                         SshAuthTab::Password => NewConnectionField::Password,
@@ -3172,9 +3322,7 @@ impl WorkspaceApp {
         mut intent: SshConnectionIntent,
         cx: &App,
     ) {
-        if let SshConnectionIntent::Mosh(options) = &mut intent
-            && options.runtime_connection_attempt_id.is_none()
-        {
+        if let SshConnectionIntent::Mosh(options) = &mut intent {
             let mut reconnect_options = options.clone();
             // A later manual retry must not reuse an automation request correlation token.
             reconnect_options.public_mcp_open_token = None;
@@ -3187,12 +3335,20 @@ impl WorkspaceApp {
                     profile_id: profile_id.clone(),
                 },
             );
-            let connection_attempt_id = self.standalone_connections.insert_pending(
-                StandaloneConnectionKind::Mosh,
-                title.clone(),
-                reconnect_launch,
-            );
-            options.runtime_connection_attempt_id = Some(connection_attempt_id);
+            if let Some(attempt) = &options.runtime_connection_attempt_id {
+                self.standalone_connections.replace_launch_for_attempt(
+                    attempt,
+                    title.clone(),
+                    reconnect_launch,
+                );
+            } else {
+                options.runtime_connection_attempt_id =
+                    Some(self.standalone_connections.insert_pending(
+                        StandaloneConnectionKind::Mosh,
+                        title.clone(),
+                        reconnect_launch,
+                    ));
+            }
         }
         let tx = self.ssh_worker_sender(cx);
         let host = config.host.clone();
@@ -3237,6 +3393,8 @@ impl WorkspaceApp {
                         connect_timeout_seconds,
                         upstream_proxy.as_ref(),
                         worker_config.proxy_command.as_ref(),
+                        worker_config.legacy_ssh_compatibility,
+                        &worker_config.ssh_algorithms,
                     )),
                 ),
                 Err(error) => (

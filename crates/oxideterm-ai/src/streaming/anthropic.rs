@@ -8,7 +8,7 @@ use crate::{
 };
 
 use super::CHAT_STREAM_TIMEOUT;
-use super::common::{ParsedStreamLine, stream_sse_response};
+use super::common::{ParsedStreamLine, StreamParseResult, stream_sse_response};
 
 pub(crate) async fn stream_anthropic_completion(
     config: AiChatStreamConfig,
@@ -23,36 +23,34 @@ pub(crate) async fn stream_anthropic_completion(
         "{}/v1/messages",
         config.base_url.trim().trim_end_matches('/')
     );
-    let client = oxideterm_network_proxy::application_http_client_builder()
-        .context("failed to apply application proxy to AI chat client")?
-        .timeout(CHAT_STREAM_TIMEOUT)
-        .build()
-        .context("failed to create Anthropic chat client")?;
+    // Reuse the application pool while keeping the API key on this request only.
+    let client = oxideterm_network_proxy::application_http_client()
+        .context("failed to acquire application Anthropic chat client")?;
     let body = anthropic_chat_body(&config, &messages);
     let response = client
         .post(&url)
+        .timeout(CHAT_STREAM_TIMEOUT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&body)
         .send()
         .await
-        .map_err(|error| {
-            anyhow!(
-                "failed to connect to Anthropic provider: {}",
-                error.without_url()
-            )
-        })?;
+        .map_err(|error| anyhow::Error::new(error.without_url()))?;
     if !response.status().is_success() {
+        super::retry::check_transient_response(&response)?;
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
         return Err(anyhow!(parse_anthropic_error(status, &error_text)));
     }
     let mut accumulator = AnthropicToolAccumulator::default();
-    let _ = stream_sse_response(response, &events, |line| {
+    let result = stream_sse_response(response, &events, |line| {
         parse_anthropic_data_line_with_accumulator(line, &mut accumulator)
     })
     .await?;
+    if !matches!(result, StreamParseResult::Done) {
+        return Err(anyhow!("ai_stream_interrupted"));
+    }
     let _ = events.send(AiStreamEvent::Done);
     Ok(())
 }
@@ -326,6 +324,15 @@ pub(crate) fn parse_anthropic_data_line_with_accumulator(
 
     let mut events = Vec::new();
     if let Ok(json) = serde_json::from_str::<Value>(data) {
+        if let Some(usage) = json
+            .get("usage")
+            .or_else(|| json.get("message").and_then(|message| message.get("usage")))
+        {
+            events.push(AiStreamEvent::Usage {
+                input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+                output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+            });
+        }
         match json.get("type").and_then(Value::as_str) {
             Some("content_block_start") => {
                 if json
@@ -403,6 +410,12 @@ pub(crate) fn parse_anthropic_data_line_with_accumulator(
                     });
                 }
             }
+            Some("message_delta")
+                if json.pointer("/delta/stop_reason").and_then(Value::as_str)
+                    == Some("max_tokens") =>
+            {
+                events.push(AiStreamEvent::Error("ai_output_incomplete".into()));
+            }
             Some("message_stop") => events.push(AiStreamEvent::Done),
             Some("error") => {
                 let message = json
@@ -444,6 +457,7 @@ mod tests {
 
     fn config(reasoning_effort: &str, max_response_tokens: i64) -> AiChatStreamConfig {
         AiChatStreamConfig {
+            api_protocol: crate::AiApiProtocol::default(),
             execution_backend: AiExecutionBackend::Provider,
             provider_id: Some("anthropic".to_string()),
             acp_agent_id: None,

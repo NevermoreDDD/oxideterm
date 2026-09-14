@@ -178,7 +178,8 @@ impl WorkspaceApp {
             paste: self.i18n.t("menu.paste"),
             select_all: self.i18n.t("fileManager.selectAll"),
         };
-        let workspace = cx.entity();
+        // The workspace owns the dialog editor; saving must not keep it alive.
+        let workspace = cx.weak_entity();
         let editor = cx.new(|cx| {
             let mut editor = oxideterm_gpui_editor::TextEditorView::new(value, &tokens, cx);
             let mut editor_settings = oxideterm_gpui_editor::EditorSettings::default();
@@ -190,6 +191,8 @@ impl WorkspaceApp {
             editor.set_context_menu_labels(context_menu_labels);
             editor.apply_ide_runtime_settings(
                 &tokens,
+                runtime_settings.editor_font_family.clone(),
+                runtime_settings.editor_font_weight,
                 runtime_settings.editor_font_fallback.clone(),
                 runtime_settings.editor_font_size,
                 runtime_settings.editor_line_height,
@@ -663,7 +666,6 @@ impl WorkspaceApp {
                     &mut settings.ai.reasoning_provider_overrides,
                     &mut settings.ai.reasoning_model_overrides,
                     &mut settings.ai.user_context_windows,
-                    &mut settings.ai.model_max_response_tokens,
                     index,
                 );
             },

@@ -120,7 +120,7 @@ impl TextEditorView {
             self.save_status = super::EditorSaveStatus::Dirty;
             // Replace-all can touch many ranges, so rebuild tree-sitter state
             // instead of pretending a single incremental edit exists.
-            self.reparse_syntax();
+            self.request_syntax(None, true, cx);
             self.clear_folds_after_buffer_change();
             self.refresh_find_matches();
             self.viewport
@@ -130,6 +130,12 @@ impl TextEditorView {
     }
 
     pub(super) fn refresh_find_matches(&mut self) {
+        if self.find_query.is_empty() {
+            self.find_matches.clear();
+            self.find_line_matches.clear();
+            self.active_find_index = None;
+            return;
+        }
         self.find_matches = self
             .buffer
             .with_text(|text| find_all(text, &self.find_query, self.find_options()));

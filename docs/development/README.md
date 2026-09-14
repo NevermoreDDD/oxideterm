@@ -42,6 +42,7 @@ Move inward only when evidence says the outer layer is correct. For example, an 
 | Build and run on macOS, Windows, or Linux | [Local development](local-development.md) |
 | Choose checks for a focused change | [Verification matrix](verification.md) |
 | Change a shared SSH connection or long-running task | [Runtime ownership](runtime-ownership.md) |
+| Change parent/child AI runs, approvals or execution coordination | [AI agent collaboration](ai-agents.md) |
 | Investigate or modify the vendored UI framework | [GPUI CE maintenance](gpui-ce.md) |
 | Collect a minimal reproduction, logs, or a performance sample | [Debugging](debugging.md) |
 | Write or review regression coverage and fixtures | [Testing and fixtures](testing-and-fixtures.md) |

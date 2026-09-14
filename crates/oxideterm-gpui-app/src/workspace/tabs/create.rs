@@ -91,6 +91,17 @@ fn saved_node_route_matches_config(
     node_id: &NodeId,
     requested_config: &SshConfig,
 ) -> bool {
+    let Some(runtime_config) = node_router
+        .node_runtime_snapshot(node_id)
+        .map(|snapshot| snapshot.config)
+    else {
+        return false;
+    };
+    // A changed negotiation policy needs a new physical connection while the
+    // old node remains available to its existing terminal and tool consumers.
+    if runtime_config.connection_key() != requested_config.connection_key() {
+        return false;
+    }
     let proxy_hops = requested_config
         .proxy_chain
         .as_deref()
@@ -230,7 +241,10 @@ fn reusable_direct_root_node_for_saved_config(
                 .saved_connection_id()
                 .is_none_or(|owner| owner == saved_connection_id)
         });
-        (endpoint_matches && owner_matches).then_some(node_id)
+        let physical_policy_matches = node_router
+            .node_runtime_snapshot(&node_id)
+            .is_some_and(|snapshot| snapshot.config.connection_key() == config.connection_key());
+        (endpoint_matches && owner_matches && physical_policy_matches).then_some(node_id)
     })
 }
 
@@ -279,6 +293,7 @@ impl WorkspaceApp {
             protocol,
             endpoint,
             transport_endpoint: None,
+            socks_proxy: None,
             username: launch.username,
             domain: launch.domain,
             credential_ref: None,
@@ -495,11 +510,16 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn create_serial_terminal_tab(
         &mut self,
         config: SerialSessionConfig,
+        name: &str,
         terminal_options: ConnectionTerminalOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<TerminalSessionId> {
-        let title = format!("Serial {}", config.port_path);
+        let title = if name.trim().is_empty() {
+            format!("Serial {}", config.port_path)
+        } else {
+            name.trim().to_owned()
+        };
         self.create_serial_terminal_tab_with_title(config, terminal_options, title, window, cx)
     }
 
@@ -1387,7 +1407,7 @@ impl WorkspaceApp {
         // Both policies keep remounted tabs on the deferred PTY boundary
         // so authentication cannot briefly start at a fallback size.
         .with_deferred_pty(true)
-        .with_runtime_handle(self.forwarding_runtime.handle().clone())
+        .with_runtime(self.forwarding_runtime.clone())
         .with_trzsz_policy(preferences.trzsz_policy.clone());
         self.register_existing_ssh_terminal_session(node_id, session_id, cx)?;
         let shared_session = TerminalPane::ssh_shared_session(session_config, &preferences);
@@ -1983,6 +2003,22 @@ mod create_tests {
 
         assert!(saved_node_route_matches_config(
             &router, &node_id, &requested
+        ));
+
+        let mut changed_legacy_policy = requested.clone();
+        changed_legacy_policy.legacy_ssh_compatibility = true;
+        assert!(!saved_node_route_matches_config(
+            &router,
+            &node_id,
+            &changed_legacy_policy,
+        ));
+
+        let mut changed_algorithms = requested;
+        changed_algorithms.ssh_algorithms.mac = vec!["hmac-sha1".to_string()];
+        assert!(!saved_node_route_matches_config(
+            &router,
+            &node_id,
+            &changed_algorithms,
         ));
     }
 

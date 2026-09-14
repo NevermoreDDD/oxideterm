@@ -5,9 +5,14 @@ use crate::detector::{DetectedModemProtocol, detect_modem_start};
 use crate::stream::{ModemTransfer, ModemWakeCallback};
 use crate::zmodem::ZFrameType;
 use crate::zmodem_transfer::parse_zmodem_header_prefix;
-use std::{borrow::Cow, fmt};
+use std::{
+    borrow::Cow,
+    fmt,
+    time::{Duration, Instant},
+};
 
 const PLAIN_HISTORY_LIMIT: usize = 512;
+const MODEM_PREFIX_IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 const XYMODEM_CANCEL_BYTES: &[u8] = &[crate::xymodem::CAN; 8];
 const ZMODEM_CANCEL_BYTES: &[u8] = &[
     crate::zmodem::ZDLE,
@@ -52,7 +57,9 @@ pub enum ModemConsumerEvent {
 pub struct ModemConsumer {
     plain_tail: Vec<u8>,
     detection_tail: Vec<u8>,
+    plain_tail_deadline: Option<Instant>,
     plain_history: Vec<u8>,
+    plain_history_starts_mid_line: bool,
     detection_scope: ModemDetectionScope,
     pending: Option<PendingTransfer>,
     transfer: Option<ModemTransfer>,
@@ -204,7 +211,9 @@ impl ModemConsumer {
         Self {
             plain_tail: Vec::new(),
             detection_tail: Vec::new(),
+            plain_tail_deadline: None,
             plain_history: Vec::new(),
+            plain_history_starts_mid_line: false,
             detection_scope: ModemDetectionScope::default(),
             pending: None,
             transfer: None,
@@ -251,7 +260,9 @@ impl ModemConsumer {
         self.pending = None;
         self.plain_tail.clear();
         self.detection_tail.clear();
+        self.plain_tail_deadline = None;
         self.plain_history.clear();
+        self.plain_history_starts_mid_line = false;
         self.detection_scope.reset();
         trailing_output
     }
@@ -272,6 +283,20 @@ impl ModemConsumer {
     }
 
     pub fn process_server_output(&mut self, bytes: &[u8]) -> Vec<ModemConsumerEvent> {
+        self.process_server_output_at(bytes, Instant::now())
+    }
+
+    fn process_server_output_at(&mut self, bytes: &[u8], now: Instant) -> Vec<ModemConsumerEvent> {
+        let mut events = self.flush_expired_plain_output_at(now);
+        events.extend(self.process_server_output_inner(bytes, now));
+        events
+    }
+
+    fn process_server_output_inner(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Vec<ModemConsumerEvent> {
         if bytes.is_empty() {
             return Vec::new();
         }
@@ -285,14 +310,33 @@ impl ModemConsumer {
             return self.process_pending_server_output(bytes);
         }
 
-        let masked_bytes = self.detection_scope.mask_control_strings(bytes);
-        if self.plain_tail.is_empty()
-            && self.detection_tail.is_empty()
-            && !contains_modem_candidate(masked_bytes.as_ref())
-        {
+        let unbuffered = self.plain_tail.is_empty() && self.detection_tail.is_empty();
+        // Ordinary output needs one scan for both control strings and modem
+        // markers. Buffered prefixes still require the stateful detector.
+        let ordinary_output = unbuffered
+            && matches!(self.detection_scope, ModemDetectionScope::Ground)
+            && !bytes.iter().any(|byte| {
+                matches!(
+                    *byte,
+                    0x1b | 0x90
+                        | 0x9d
+                        | 0x9f
+                        | crate::zmodem::ZPAD
+                        | crate::xymodem::WANT_CRC
+                        | crate::xymodem::NAK
+                        | crate::xymodem::SOH
+                        | crate::xymodem::STX
+                )
+            });
+        let masked_bytes = if ordinary_output {
+            Cow::Borrowed(bytes)
+        } else {
+            self.detection_scope.mask_control_strings(bytes)
+        };
+        if unbuffered && (ordinary_output || !contains_modem_candidate(masked_bytes.as_ref())) {
             self.remember_plain_output(masked_bytes.as_ref());
             let mut events = vec![ModemConsumerEvent::WriteTerminal(bytes.to_vec())];
-            if let Some(request) = xymodem_download_request(&self.plain_history) {
+            if let Some(request) = self.xymodem_download_request() {
                 self.start_transfer(&[], request.clone());
                 events.push(ModemConsumerEvent::TransferStarted(request));
             }
@@ -306,6 +350,7 @@ impl ModemConsumer {
             combined.extend_from_slice(&self.plain_tail);
             combined.extend_from_slice(bytes);
             self.plain_tail.clear();
+            self.plain_tail_deadline = None;
             Cow::Owned(combined)
         };
         let detection_bytes = if self.detection_tail.is_empty() {
@@ -321,20 +366,16 @@ impl ModemConsumer {
         let Some(start) = detect_modem_start(detection_bytes.as_ref()) else {
             let hold = possible_modem_prefix_suffix_len(detection_bytes.as_ref());
             if hold == scan_bytes.len() {
-                self.plain_tail.extend_from_slice(scan_bytes.as_ref());
-                self.detection_tail
-                    .extend_from_slice(detection_bytes.as_ref());
+                self.hold_plain_tail(scan_bytes.as_ref(), detection_bytes.as_ref(), now);
                 return Vec::new();
             }
             let split = scan_bytes.len() - hold;
-            self.plain_tail.extend_from_slice(&scan_bytes[split..]);
-            self.detection_tail
-                .extend_from_slice(&detection_bytes[split..]);
+            self.hold_plain_tail(&scan_bytes[split..], &detection_bytes[split..], now);
             self.remember_plain_output(&detection_bytes[..split]);
             let mut events = vec![ModemConsumerEvent::WriteTerminal(
                 scan_bytes[..split].to_vec(),
             )];
-            if let Some(request) = xymodem_download_request(&self.plain_history) {
+            if let Some(request) = self.xymodem_download_request() {
                 self.start_transfer(&[], request.clone());
                 events.push(ModemConsumerEvent::TransferStarted(request));
             }
@@ -351,7 +392,7 @@ impl ModemConsumer {
 
         let protocol_bytes = &scan_bytes[start.offset..];
         if let Some(request) =
-            request_for_protocol(start.protocol, protocol_bytes, &self.plain_history)
+            request_for_protocol(start.protocol, protocol_bytes, self.command_history())
         {
             self.start_transfer(protocol_bytes, request.clone());
             events.push(ModemConsumerEvent::TransferStarted(request));
@@ -377,11 +418,55 @@ impl ModemConsumer {
         events
     }
 
+    pub fn pending_plain_output_delay(&self) -> Option<Duration> {
+        self.plain_tail_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    pub fn flush_expired_plain_output(&mut self) -> Vec<ModemConsumerEvent> {
+        self.flush_expired_plain_output_at(Instant::now())
+    }
+
+    pub fn flush_pending_plain_output(&mut self) -> Vec<ModemConsumerEvent> {
+        if self.plain_tail.is_empty() {
+            self.plain_tail_deadline = None;
+            return Vec::new();
+        }
+
+        let plain = std::mem::take(&mut self.plain_tail);
+        let detection = std::mem::take(&mut self.detection_tail);
+        self.plain_tail_deadline = None;
+        self.remember_plain_output(&detection);
+        vec![ModemConsumerEvent::WriteTerminal(plain)]
+    }
+
+    fn flush_expired_plain_output_at(&mut self, now: Instant) -> Vec<ModemConsumerEvent> {
+        if self
+            .plain_tail_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return Vec::new();
+        }
+        self.flush_pending_plain_output()
+    }
+
+    fn hold_plain_tail(&mut self, plain: &[u8], detection: &[u8], now: Instant) {
+        if plain.is_empty() {
+            self.plain_tail_deadline = None;
+            return;
+        }
+        self.plain_tail.extend_from_slice(plain);
+        self.detection_tail.extend_from_slice(detection);
+        // A short idle window joins transport fragments without hiding ordinary
+        // text indefinitely when it happens to share a modem header prefix.
+        self.plain_tail_deadline = Some(now + MODEM_PREFIX_IDLE_TIMEOUT);
+    }
+
     fn process_pending_server_output(&mut self, bytes: &[u8]) -> Vec<ModemConsumerEvent> {
         let mut pending = self.pending.take().expect("pending transfer");
         pending.bytes.extend_from_slice(bytes);
         if let Some(request) =
-            request_for_protocol(pending.protocol, &pending.bytes, &self.plain_history)
+            request_for_protocol(pending.protocol, &pending.bytes, self.command_history())
         {
             let initial = pending.bytes;
             self.start_transfer(&initial, request.clone());
@@ -423,7 +508,9 @@ impl ModemConsumer {
         );
         self.transfer_input = Some(transfer.clone());
         self.transfer = Some(transfer.clone());
+        self.plain_tail_deadline = None;
         self.plain_history.clear();
+        self.plain_history_starts_mid_line = false;
         transfer
     }
 
@@ -432,6 +519,15 @@ impl ModemConsumer {
             return;
         }
         if bytes.len() >= PLAIN_HISTORY_LIMIT {
+            let discard = bytes.len() - PLAIN_HISTORY_LIMIT;
+            let previous_byte = if discard == 0 {
+                self.plain_history.last().copied()
+            } else {
+                Some(bytes[discard - 1])
+            };
+            if let Some(previous_byte) = previous_byte {
+                self.plain_history_starts_mid_line = !matches!(previous_byte, b'\r' | b'\n');
+            }
             self.plain_history.clear();
             self.plain_history
                 .extend_from_slice(&bytes[bytes.len() - PLAIN_HISTORY_LIMIT..]);
@@ -441,9 +537,38 @@ impl ModemConsumer {
         let retained_bytes = PLAIN_HISTORY_LIMIT - bytes.len();
         if self.plain_history.len() > retained_bytes {
             let discard = self.plain_history.len() - retained_bytes;
+            self.plain_history_starts_mid_line =
+                !matches!(self.plain_history[discard - 1], b'\r' | b'\n');
             self.plain_history.drain(..discard);
         }
         self.plain_history.extend_from_slice(bytes);
+    }
+
+    fn xymodem_download_request(&self) -> Option<ModemTransferRequest> {
+        // PTYs echo characters while the user is still typing. Wait for the
+        // command line terminator so entering "sx" cannot open a prompt early.
+        if !self.plain_history.ends_with(b"\r") && !self.plain_history.ends_with(b"\n") {
+            return None;
+        }
+        let text = String::from_utf8_lossy(self.command_history());
+        let (protocol, direction) = xymodem_command_hint(text.lines().next_back()?)?;
+        (direction == ModemTransferDirection::Download).then_some(ModemTransferRequest {
+            protocol,
+            direction,
+        })
+    }
+
+    fn command_history(&self) -> &[u8] {
+        // Trimming can leave a word suffix such as "ry" from "history".
+        // Only a real line boundary may make the retained suffix a command.
+        if self.plain_history_starts_mid_line {
+            self.plain_history
+                .iter()
+                .position(|byte| matches!(*byte, b'\r' | b'\n'))
+                .map_or(&[], |end| &self.plain_history[end + 1..])
+        } else {
+            &self.plain_history
+        }
     }
 }
 
@@ -518,20 +643,6 @@ fn xymodem_negotiation_protocol_hint(plain_history: &[u8]) -> Option<DetectedMod
             Some((protocol, ModemTransferDirection::Upload)) => Some(protocol),
             _ => None,
         })
-}
-
-fn xymodem_download_request(plain_history: &[u8]) -> Option<ModemTransferRequest> {
-    // PTYs echo characters while the user is still typing. Wait for the
-    // command line terminator so entering "sx" cannot open a prompt early.
-    if !plain_history.ends_with(b"\r") && !plain_history.ends_with(b"\n") {
-        return None;
-    }
-    let text = String::from_utf8_lossy(plain_history);
-    let (protocol, direction) = xymodem_command_hint(text.lines().next_back()?)?;
-    (direction == ModemTransferDirection::Download).then_some(ModemTransferRequest {
-        protocol,
-        direction,
-    })
 }
 
 fn xymodem_command_hint(line: &str) -> Option<(DetectedModemProtocol, ModemTransferDirection)> {
@@ -648,6 +759,46 @@ mod tests {
         assert!(consumer.process_server_output(&[b'*', b'*']).is_empty());
         let events = consumer.process_server_output(&[0x18, b'B', b'0']);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn incomplete_modem_prefix_is_released_after_idle_timeout() {
+        let mut consumer = ModemConsumer::new();
+        let started_at = Instant::now();
+
+        assert!(
+            consumer
+                .process_server_output_at(b"**", started_at)
+                .is_empty()
+        );
+        assert_eq!(
+            terminal_bytes(&consumer.flush_expired_plain_output_at(
+                started_at + MODEM_PREFIX_IDLE_TIMEOUT - Duration::from_nanos(1)
+            )),
+            b""
+        );
+        assert_eq!(
+            terminal_bytes(
+                &consumer.flush_expired_plain_output_at(started_at + MODEM_PREFIX_IDLE_TIMEOUT)
+            ),
+            b"**"
+        );
+    }
+
+    #[test]
+    fn delayed_suffix_does_not_reclassify_released_text_as_a_modem_header() {
+        let mut consumer = ModemConsumer::new();
+        let started_at = Instant::now();
+
+        assert!(
+            consumer
+                .process_server_output_at(b"*", started_at)
+                .is_empty()
+        );
+        let events =
+            consumer.process_server_output_at(b"X", started_at + MODEM_PREFIX_IDLE_TIMEOUT);
+
+        assert_eq!(terminal_bytes(&events), b"*X");
     }
 
     #[test]
@@ -859,6 +1010,94 @@ mod tests {
                 .any(|event| matches!(event, ModemConsumerEvent::TransferStarted(_)))
         );
         assert!(consumer.active_transfer().is_none());
+    }
+
+    #[test]
+    fn truncated_grep_lines_never_start_transfers_at_any_chunk_boundary() {
+        let outputs = [
+            format!(
+                "bundle.js: execute history {}C\r\n",
+                "a".repeat(PLAIN_HISTORY_LIMIT - 3)
+            ),
+            format!(
+                "bundle.js: execute busy {}\r\n",
+                "a".repeat(PLAIN_HISTORY_LIMIT - 5)
+            ),
+        ];
+        for output in outputs {
+            for split in 0..=output.len() {
+                let mut consumer = ModemConsumer::new();
+                let mut events = consumer.process_server_output(&output.as_bytes()[..split]);
+                events.extend(consumer.process_server_output(&output.as_bytes()[split..]));
+                events.extend(consumer.flush_pending_plain_output());
+                assert!(
+                    events
+                        .iter()
+                        .all(|event| matches!(event, ModemConsumerEvent::WriteTerminal(_))),
+                    "ordinary grep output started a transfer at split {split}"
+                );
+                assert_eq!(terminal_bytes(&events), output.as_bytes(), "split {split}");
+            }
+        }
+    }
+
+    #[test]
+    fn complete_commands_after_truncated_output_still_start_xymodem() {
+        for (command, protocol, direction) in [
+            (
+                b"$ rx file.bin\r\nC".as_slice(),
+                DetectedModemProtocol::Xmodem,
+                ModemTransferDirection::Upload,
+            ),
+            (
+                b"$ rb\r\nC".as_slice(),
+                DetectedModemProtocol::Ymodem,
+                ModemTransferDirection::Upload,
+            ),
+            (
+                b"$ sx file.bin\r\n".as_slice(),
+                DetectedModemProtocol::Xmodem,
+                ModemTransferDirection::Download,
+            ),
+            (
+                b"$ sb file.bin\r\n".as_slice(),
+                DetectedModemProtocol::Ymodem,
+                ModemTransferDirection::Download,
+            ),
+        ] {
+            let argument_end = command.iter().position(|byte| *byte == b'\r').unwrap();
+            let mut full_history_command = command[..argument_end].to_vec();
+            full_history_command.extend(std::iter::repeat_n(
+                b' ',
+                PLAIN_HISTORY_LIMIT - argument_end - 2,
+            ));
+            full_history_command.extend_from_slice(&command[argument_end..]);
+            for command in [command, full_history_command.as_slice()] {
+                for split in 0..=command.len() {
+                    let mut consumer = ModemConsumer::new();
+                    let mut prefix = vec![b'a'; PLAIN_HISTORY_LIMIT * 2];
+                    prefix.extend_from_slice(b"\r\n");
+                    let mut events = consumer.process_server_output(&prefix);
+                    events.extend(consumer.process_server_output(&command[..split]));
+                    events.extend(consumer.process_server_output(&command[split..]));
+                    let requests = events
+                        .into_iter()
+                        .filter_map(|event| match event {
+                            ModemConsumerEvent::TransferStarted(request) => Some(request),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        requests,
+                        vec![ModemTransferRequest {
+                            protocol,
+                            direction
+                        }],
+                        "split {split}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

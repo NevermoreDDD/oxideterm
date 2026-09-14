@@ -14,15 +14,45 @@ use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod agent_queries;
+mod agents;
+mod content;
+mod reachability;
+mod records;
+mod stream_delta;
+mod text;
+mod tool_payloads;
+pub use agent_queries::{AgentCommunicationPage, agent_history_branch};
+pub use stream_delta::{HistoryStreamDelta, HistoryStreamSnapshot};
+mod archives;
+mod cache;
+mod compaction;
+mod decoding;
+mod live_windows;
+mod migration;
+mod mutations;
+mod queries;
+mod store;
+mod windows;
+mod writer;
+pub use live_windows::{live_content_page, live_message_view};
+pub use mutations::HistoryMutation;
+pub use records::{
+    ConversationHead, HISTORY_CACHE_BYTES, HISTORY_PAGE_SIZE, HistoryCursor, HistoryPage,
+    MessageDescriptor, MessagePage,
+};
+pub use store::ConversationStore;
+pub use windows::{
+    HistoryContentCursor, HistoryContentPage, HistoryEventLocation, HistoryMessageView,
+};
+pub use writer::{HISTORY_PENDING_BYTES, HistoryWriteState, HistoryWriter};
+
 use crate::{
     AiChatMessage, AiChatMessageMetadata, AiChatRole, AiChatState, AiConversation,
     AiMessageBranches,
 };
 
 pub const AI_CHAT_DB_VERSION: u32 = 3;
-// Prompt compaction keeps the active model context bounded independently; this
-// larger guard only limits retained local history for a single conversation.
-pub const MAX_MESSAGES_PER_CONVERSATION: usize = 2_000;
 
 const COMPRESSION_THRESHOLD: usize = 4096;
 const ANCHOR_META_HEADER: &str = "$$ANCHOR_B64$$";
@@ -93,7 +123,10 @@ impl AiChatPersistenceStore {
                 meta.turn_count = Some(conversation.turn_count);
             }
         }
-        let active_conversation_id = metas.first().map(|meta| meta.id.clone());
+        let active_conversation_id = metas
+            .iter()
+            .find(|meta| !meta.archived)
+            .map(|meta| meta.id.clone());
         let mut conversations = metas
             .into_iter()
             .map(conversation_from_meta)
@@ -116,6 +149,10 @@ impl AiChatPersistenceStore {
 
     pub fn load_conversation(&self, conversation_id: &str) -> Result<Option<AiConversation>> {
         self.initialize()?;
+        self.read_conversation(conversation_id)
+    }
+
+    fn read_conversation(&self, conversation_id: &str) -> Result<Option<AiConversation>> {
         let read_txn = self.db.begin_read()?;
         let conv_table = read_txn.open_table(CONVERSATIONS_TABLE)?;
         let Some(meta_bytes) = conv_table.get(conversation_id)? else {
@@ -207,6 +244,7 @@ impl AiChatPersistenceStore {
             let existing_ids = collect_keys(&conv_table)?;
             for conversation_id in existing_ids {
                 if !desired_ids.contains(&conversation_id) {
+                    agents::delete_conversation(&write_txn, &conversation_id)?;
                     delete_conversation_rows(
                         &conversation_id,
                         &mut conv_table,
@@ -370,6 +408,7 @@ impl AiChatPersistenceStore {
             let _ = write_txn.open_table(METADATA_TABLE)?;
             let _ = write_txn.open_table(DIAGNOSTIC_TABLE)?;
             let _ = write_txn.open_table(CONV_DIAGNOSTIC_TABLE)?;
+            agents::initialize(&write_txn)?;
         }
         write_txn.commit()?;
 
@@ -532,11 +571,6 @@ fn replace_conversation_messages(
     let new_ids = conversation
         .messages
         .iter()
-        .rev()
-        .take(MAX_MESSAGES_PER_CONVERSATION)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
     let retained = new_ids.iter().cloned().collect::<HashSet<_>>();
@@ -545,15 +579,7 @@ fn replace_conversation_messages(
             let _ = message_table.remove(old_id.as_str())?;
         }
     }
-    for message in conversation
-        .messages
-        .iter()
-        .rev()
-        .take(MAX_MESSAGES_PER_CONVERSATION)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
+    for message in &conversation.messages {
         let persisted = persisted_from_message_with_projection(
             &conversation.id,
             message,
@@ -596,6 +622,7 @@ fn conversation_from_meta(meta: ConversationMeta) -> AiConversation {
         .and_then(Value::as_str)
         .map(str::to_string);
     AiConversation {
+        archived: meta.archived,
         id: meta.id,
         title: meta.title,
         messages: Vec::new(),
@@ -628,6 +655,7 @@ fn meta_from_conversation(conversation: &AiConversation) -> ConversationMeta {
         Some(Value::Object(metadata))
     });
     ConversationMeta {
+        archived: conversation.archived,
         id: conversation.id.clone(),
         title: conversation.title.clone(),
         created_at: conversation.created_at_ms,
@@ -699,21 +727,19 @@ fn normalize_interrupted_assistant_projection(message: &mut AiChatMessage) {
     if message.role != AiChatRole::Assistant {
         return;
     }
-    let Some(turn) = message.turn.as_mut() else {
-        return;
-    };
-    if turn.get("status").and_then(Value::as_str) != Some("streaming") {
-        return;
-    }
-    if let Some(object) = turn.as_object_mut() {
-        object.insert("status".to_string(), Value::String("complete".to_string()));
-    }
-    if let Some(parts) = turn.get_mut("parts").and_then(Value::as_array_mut) {
-        for part in parts {
-            if part.get("type").and_then(Value::as_str) == Some("thinking")
-                && let Some(object) = part.as_object_mut()
-            {
-                object.insert("streaming".to_string(), Value::Bool(false));
+    if let Some(turn) = message.turn.as_mut() {
+        if turn.get("status").and_then(Value::as_str) == Some("streaming")
+            && let Some(object) = turn.as_object_mut()
+        {
+            object.insert("status".to_string(), Value::String("complete".to_string()));
+        }
+        if let Some(parts) = turn.get_mut("parts").and_then(Value::as_array_mut) {
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) == Some("thinking")
+                    && let Some(object) = part.as_object_mut()
+                {
+                    object.insert("streaming".to_string(), Value::Bool(false));
+                }
             }
         }
     }
@@ -742,7 +768,12 @@ fn normalize_interrupted_assistant_projection(message: &mut AiChatMessage) {
     if rejected_tool_ids.is_empty() {
         return;
     }
-    if let Some(rounds) = turn.get_mut("toolRounds").and_then(Value::as_array_mut) {
+    if let Some(rounds) = message
+        .turn
+        .as_mut()
+        .and_then(|turn| turn.get_mut("toolRounds"))
+        .and_then(Value::as_array_mut)
+    {
         for round in rounds {
             let Some(tool_calls) = round.get_mut("toolCalls").and_then(Value::as_array_mut) else {
                 continue;
@@ -770,13 +801,21 @@ fn normalize_interrupted_assistant_projection(message: &mut AiChatMessage) {
     }
 }
 
-fn ai_tool_call_is_unfinished(call: &Value) -> bool {
-    if call.get("result").is_some_and(|result| !result.is_null()) {
-        return false;
-    }
+pub(crate) fn ai_tool_call_is_unfinished(call: &Value) -> bool {
+    // Waiting tools carry progress in `result`; only the execution state is terminal evidence.
     matches!(
         call.get("status").and_then(Value::as_str),
-        Some("pending" | "approved" | "running" | "pending_user_approval")
+        Some(
+            "pending"
+                | "approved"
+                | "running"
+                | "pending_user_approval"
+                | "pending_approval"
+                | "pending_user_selection"
+                | "waiting_user"
+                | "waiting_condition"
+                | "waiting_connection"
+        )
     )
 }
 
@@ -820,7 +859,11 @@ fn load_round_summaries_from_transcript(
     read_txn: &redb::ReadTransaction,
     conversation_id: &str,
 ) -> Result<Vec<TranscriptRoundSummary>> {
-    let transcript_index_table = read_txn.open_table(CONV_TRANSCRIPT_TABLE)?;
+    let transcript_index_table = match read_txn.open_table(CONV_TRANSCRIPT_TABLE) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
     let transcript_table = read_txn.open_table(TRANSCRIPT_TABLE)?;
     let ids = transcript_index_table
         .get(conversation_id)?
@@ -1069,7 +1112,15 @@ fn persisted_from_message_with_projection(
         tool_calls: message
             .tool_calls
             .iter()
-            .filter_map(|value| serde_json::from_value::<PersistedToolCall>(value.clone()).ok())
+            .filter_map(|value| {
+                let mut call = value.clone();
+                if call["name"] == "ask_user" && call["status"] == "waiting_user" {
+                    // A question preview is not a completed result or a durable reply channel.
+                    call["status"] = Value::String("pending".into());
+                    call["result"] = Value::Null;
+                }
+                serde_json::from_value::<PersistedToolCall>(call).ok()
+            })
             .collect(),
         tool_call_id: message.tool_call_id.clone(),
         context_snapshot: message.context.as_ref().map(|context| ContextSnapshot {
@@ -1420,6 +1471,8 @@ pub struct ConversationMeta {
     // Keep additive fields at the end because MessagePack stores structs positionally.
     #[serde(default)]
     pub turn_count: Option<usize>,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[allow(dead_code)]
@@ -1452,3 +1505,6 @@ pub struct PersistedDiagnosticEvent {
     #[serde(default)]
     pub data: Value,
 }
+
+#[cfg(test)]
+mod storage_tests;

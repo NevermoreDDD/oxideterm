@@ -471,7 +471,7 @@ impl LocalPtySession {
     }
 
     pub fn tmux_action(&mut self, action: crate::TmuxAction) -> Result<bool> {
-        let Some(command) = self.tmux_display.action_command(action) else {
+        let Some(command) = self.tmux_display.action_command(&action) else {
             return Ok(false);
         };
         self.write_control_bytes(command)?;
@@ -725,6 +725,14 @@ impl LocalPtySession {
         search_matches_from_term(&term, self.size.cols, query)
     }
 
+    pub fn set_selection(&self, selection: Option<crate::TerminalSelectionRange>) {
+        crate::selection::set_term_selection(&mut self.display_term().lock(), selection);
+    }
+
+    pub fn selection(&self) -> Option<crate::TerminalSelectionRange> {
+        crate::selection::term_selection(&self.display_term().lock())
+    }
+
     pub fn search_source(&self) -> TerminalSearchSource {
         TerminalSearchSource::new(self.display_term(), self.size.cols)
     }
@@ -752,6 +760,27 @@ impl LocalPtySession {
         let term = self.display_term();
         let mut term = term.lock();
         incremental_snapshot_from_term(&mut term, self.size, &self.graphics, previous)
+    }
+
+    pub fn try_render_snapshot(
+        &self,
+        previous: &TerminalSnapshot,
+        allow_defer: bool,
+    ) -> Option<(TerminalSnapshot, Option<crate::TerminalSelectionRange>, TermMode)> {
+        // The tmux compositor owns multiple grids and retains its existing snapshot contract.
+        if self.tmux_display.is_active() {
+            return Some((self.snapshot_incremental(previous), self.selection(), self.mode()));
+        }
+        let mut term = if allow_defer {
+            self.term.try_lock_unfair()?
+        } else {
+            self.term.lock()
+        };
+        let snapshot =
+            incremental_snapshot_from_term(&mut term, self.size, &self.graphics, previous);
+        // Selection coordinates must describe this grid revision, without a second blocking lock.
+        let selection = crate::selection::term_selection(&term);
+        Some((snapshot, selection, *term.mode()))
     }
 
     pub fn snapshot_with_display_offset(
@@ -1068,8 +1097,8 @@ fn snapshot_row_source<T: EventListener>(
         .any(|cell| cell.flags.contains(Flags::WRAPLINE));
 
     Some(SnapshotRowSource {
-        // The cell allocation follows the row content when Alacritty rotates or swaps row values.
-        source_id: terminal_cells.as_ptr() as usize,
+        // Emulator-owned identity survives scrolling and cannot alias recycled cell storage.
+        source_id: terminal_row.identity(),
         populated_cols,
         wrapped,
     })

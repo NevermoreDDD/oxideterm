@@ -3,6 +3,360 @@
 Stable releases are listed newest first. The release workflow uses each versioned
 section as the detailed changelog attached to the corresponding GitHub Release.
 
+## 2.0.29
+
+### English
+
+OxideTerm 2.0.29 expands OxideSens with more AI providers, resumable task execution, complete persistent history, and conversation archiving. It also improves terminal responsiveness and command observation, reduces editor memory and background work, and adds independent IDE typography settings.
+
+#### 🤖 AI Providers and Task Execution
+
+- Added OpenAI Responses API support with stateless history replay, including restoration of the conversation context needed for subsequent requests.
+- Added a native xAI Grok provider with model discovery and model capability settings.
+- Updated the recommended DeepSeek Flash model to `deepseek-flash`, with matching context-window and reasoning-level support. Existing Flash aliases remain recognized, and `deepseek-v4-pro` keeps its current name; saved custom model lists are not rewritten.
+- Added task checkpoints and resumable execution, bounded condition waits, dependency-aware read scheduling, and classified recovery for interrupted or failed operations.
+- Replaced manual context and response limits with automatic budgeting, and improved handling of follow-up instructions during running tasks.
+- Added clarification questions during execution. An agent can present a question, wait for the user's answer, and continue the task.
+
+#### 💬 Complete Chat History and Archiving
+
+- Removed the conversation message-count cap. Persistent history retains messages, tool activity, subagent history, and alternative branches rather than discarding older messages at a fixed limit.
+- Reworked history storage around incremental writes, separately stored metadata, chunked content, and on-demand message loading. Large conversations no longer require all message bodies to be loaded for browsing the conversation list.
+- Added conversation archiving, an archived-conversation list, and restore actions. Archiving hides a conversation from the normal list while retaining its history; archiving alone does not cancel running work.
+- Added separate indexed pagination for active and archived conversations. Startup loads the first 50 active conversations; archived conversations load when their list is opened, with additional pages available on demand. Clearing all conversations still includes histories outside the loaded pages.
+- Fixed loading failures involving older history metadata. Existing history is migrated to the new store while the original database is retained. Conversations written after migration are stored in the new database and are not copied back to the old version's database.
+- Added regression coverage for archive and restore persistence, metadata pagination, message preservation, and conversation switching without losing drafts.
+
+#### 🖱️ Chat Display and Scrolling
+
+- Added a chat scrollbar and improved scroll-position preservation when reading earlier messages, reducing jumps back to the current screen during content updates.
+- Fixed a list-rendering borrow conflict that could crash the application during tool activity and history loading.
+- Simplified tool activity presentation, removing internal activity navigation, JSON-path controls, and redundant “more content” rows. Messages display their complete activity content automatically.
+- Fixed stopped or historical tool calls remaining in a spinning state, preventing continued animation and unnecessary redraws after the operation ended.
+- Adjusted conversation-list heading typography and selected-row corners so the highlight follows the list's actual boundaries.
+
+#### 🛠️ AI and Terminal Command Handling
+
+- Removed the recurring manual terminal-control handback gate. Tool request ownership is released when the request ends, while stale requests cannot release ownership belonging to a newer operation.
+- Improved command completion, cancellation, and owned-process cleanup. Stopping observation does not claim that an already-issued remote command has stopped.
+- Improved output capture on shells without integration events. Stable output can be returned as a captured snapshot without being reported as a confirmed command exit.
+- Kept AI command tracking functional when visual command marks are disabled.
+- Kept privilege-authentication input local to the running command and improved isolation from ordinary terminal input handling.
+
+#### ⚡ Terminal, Connections, and Remote Desktop
+
+- Moved SSH terminal parsing to an owned background worker, reduced output copies, and bounded batch-flush latency to reduce UI work during continuous output.
+- Fixed switching away from a terminal incorrectly marking already-displayed output as unread, including the first switch after opening a terminal.
+- Fixed the command sender retaining keyboard focus after clicking a terminal pane.
+- Improved RDP text pasting through acknowledged clipboard transfers.
+- Added default connection names when editing unnamed saved connections.
+- Fixed detached-tab cleanup after native window closure on Windows.
+
+#### ✍️ IDE Mini and Editor Performance
+
+- Added independent IDE font-family, Chinese/CJK fallback-font, and font-weight settings alongside the existing font-size and line-height controls. Editor settings can continue to follow the terminal defaults or use explicit overrides.
+- Shared immutable document text across editor snapshots and save requests, and reclaimed unused text storage to reduce retained memory.
+- Moved cancellable syntax work off the UI thread and avoided redundant queued work for superseded document versions.
+- Reused syntax blocks, updated presentation indexes locally, and reduced temporary highlight copies and repeated derived calculations.
+- Fixed editor callback ownership cycles and made caret-blink scheduling cancel correctly when the editor loses focus or is released.
+
+#### ⌨️ Shortcuts and Validation
+
+- Exposed context-specific and plugin shortcuts in settings, and fixed old shortcuts remaining registered after runtime updates.
+- Expanded mixed-language terminal benchmark coverage and recorded SSH background-parsing measurements.
+- Fixed CI formatting and asynchronous scheduler issues, and adjusted large-storage test timeout guards without reducing their data-preservation assertions.
+- Updated affected interface text across all 11 supported languages. Focused archive, pagination, draft-preservation, and storage regression checks passed; the maintainer completed GUI validation before approving this release.
+
+### 中文
+
+OxideTerm 2.0.29 为 OxideSens 增加了更多模型接入、可恢复任务执行、完整历史持久化和对话归档，同时改善终端响应与命令输出观察，降低编辑器内存占用和后台计算开销，并新增独立的 IDE 字体设置。
+
+#### 🤖 AI 模型接入与任务执行
+
+- 新增 OpenAI Responses API 支持及无状态历史重放，恢复后续请求所需的对话上下文。
+- 新增原生 xAI Grok 提供商，支持模型发现及模型能力设置。
+- 将 DeepSeek Flash 推荐模型名更新为 `deepseek-flash`，同步上下文容量与思考档位识别。旧 Flash 别名仍可识别，`deepseek-v4-pro` 保持原名；已保存的自定义模型列表不会被重写。
+- 新增任务检查点和可恢复执行、有界条件等待、按依赖安排的读取调度，以及中断或失败操作的分类恢复。
+- 使用自动预算管理替代手动上下文与回复限制，并改善任务运行期间追加指令的处理。
+- 新增执行中的澄清提问：代理可以提出问题、等待用户回答，再继续任务。
+
+#### 💬 完整聊天历史与归档
+
+- 移除对话消息数量上限，持久化保留消息、工具活动、子代理历史和替代分支，不再按固定条数丢弃较早消息。
+- 重构历史存储，采用增量写入、独立元数据、内容分块和消息按需加载；浏览对话列表时不再需要加载大对话的全部正文。
+- 新增对话归档、已归档列表和恢复操作。归档后对话从普通列表隐藏，历史记录继续保留；归档本身不会取消正在执行的任务。
+- 普通与归档对话分别使用索引分页。启动只加载首批 50 条普通对话，归档列表打开时才读取，后续按需加载更多。清空全部对话仍包含尚未加载的历史记录。
+- 修复旧历史元数据导致的加载失败。现有历史会迁移到新存储，同时保留原数据库；迁移后产生的对话记录写入新数据库，不会回写到旧版本使用的数据库。
+- 补充归档与恢复持久化、元数据分页、消息保留，以及切换对话时保留草稿的回归验证。
+
+#### 🖱️ 聊天展示与滚动
+
+- 新增聊天滚动条，改善向上阅读历史时的滚动位置保持，减少内容更新导致的回跳。
+- 修复工具活动和历史加载期间，列表渲染借用冲突可能引发的应用崩溃。
+- 简化工具活动展示，移除内部活动翻页、JSON 路径控件及重复的“更多内容”行，自动展示消息的完整活动内容。
+- 修复已停止或历史工具调用仍持续转圈的问题，避免操作结束后继续动画和无效刷新。
+- 调整对话列表标题字号和选中行圆角，使高亮符合列表实际边界。
+
+#### 🛠️ AI 与终端命令处理
+
+- 移除反复要求手动交还终端控制权的阻塞机制。工具请求结束后释放该请求的控制权，旧请求不会错误释放新操作持有的控制权。
+- 改善命令完成、取消和所属进程的清理处理；停止观察不会被表述为已经停止远端命令。
+- 改善缺少 Shell 集成事件时的输出捕获。稳定输出可以作为已捕获快照返回，不会被误报为已确认的命令退出。
+- 关闭可视命令标记后，AI 命令跟踪仍可正常工作。
+- 特权认证输入保持在正在运行的命令中处理，并改善其与普通终端输入处理的隔离。
+
+#### ⚡ 终端、连接与远程桌面
+
+- 将 SSH 终端解析移到具有明确生命周期的后台工作线程，减少输出复制并限制批量刷新延迟，降低连续输出时的界面线程开销。
+- 修复切出终端后，已展示输出被误判为未读的问题，包括终端打开后的第一次切换。
+- 修复点击终端窗格后，命令发送栏仍占用键盘焦点的问题。
+- 通过带确认的剪贴板传输改善 RDP 文本粘贴。
+- 编辑未命名的已保存连接时，自动提供默认名称。
+- 修复 Windows 原生窗口关闭后的分离标签清理问题。
+
+#### ✍️ IDE Mini 与编辑器性能
+
+- 在现有字号、行高设置基础上，新增独立的 IDE 字体、中文/CJK 回退字体和字重设置，可继续跟随终端默认值，也可单独覆盖。
+- 编辑器快照与保存请求共享不可变文档文本，并回收不再使用的文本存储，减少常驻内存。
+- 将可取消的语法分析移出界面线程，避免为已经过期的文档版本重复排队计算。
+- 复用语法块、局部更新展示索引，减少临时高亮复制与重复派生计算。
+- 修复编辑器回调所有权循环，使光标闪烁任务在失焦或编辑器释放时正确取消。
+
+#### ⌨️ 快捷键与验证
+
+- 设置中展示上下文专用快捷键和插件快捷键，修复运行时更新后旧快捷键仍被注册的问题。
+- 扩充混合语言终端基准覆盖，并记录 SSH 后台解析的测量结果。
+- 修复 CI 格式检查和异步调度问题，调整大型存储测试的超时保护，同时保留数据完整性断言。
+- 相关界面文案同步维护全部 11 种语言。归档、分页、草稿保留及存储的聚焦回归检查通过；维护者已完成 GUI 验收并批准发布。
+
+## 2.0.28
+
+### English
+
+OxideTerm 2.0.28 adds AI message queues and optional subagent collaboration, expands encrypted credential sync and RDP proxy support, raises the IDE editing limit to 100 MiB with encoding preservation, and improves terminal interaction, session recovery, and settings navigation.
+
+#### 💬 OxideSens Conversations and Subagents
+
+- Added queued follow-up messages while a response is running, with editing, deletion, reordering, and send-now actions. Normal completion sends the next queued message; stopping or a failed turn keeps pending messages available for explicit continuation. Each message retains its originating conversation, model, and prepared context.
+- Added separate steering and interrupt-and-send actions. Steering supplies additional instructions to a native run without replacing its model or permissions; interrupt-and-send cancels the current turn and submits the replacement before queued messages. Drafts and pending queues remain in memory and are not replayed after restarting the workspace.
+- Added optional subagent collaboration for native AI conversations, disabled by default per conversation. Child tasks can inherit the parent model or use another configured model, with one to four runnable subagents across the application and a default of two. ACP sessions are not subagent backends.
+- Added task-group progress, individual and group stopping, follow-up instructions, expandable task details, and parent/child token-usage reporting. Completed child history stays with its parent conversation; unfinished historical runs reopen as interrupted.
+- Scoped delegated terminal, SFTP, and IDE access to the resources assigned to each task. User terminal input takes priority over queued AI work. Stopping an agent does not guarantee that an already-issued remote command has ended; unresolved terminal control requires explicit handling.
+
+#### 🖱️ Terminal Input, Selection, and Display
+
+- Added a setting to disable terminal command suggestions while preserving the current draft. Windows local PowerShell suggestions now read PSReadLine history.
+- Added independent horizontal and vertical terminal padding, both defaulting to 1 px. Selection at the content edges no longer accidentally consumes input, and Shift-click can extend an existing selection.
+- Added optional highlighting of other occurrences of selected text, with global and per-session controls in the existing highlighting interface. This feature is off by default.
+- Kept selections attached to their original content during scrolling and scrollback eviction. Stabilized timestamp row identity, and restored free-type mouse positioning after leaving history search.
+- Improved cell-aligned box, block, and other terminal graphics, and preserved the actual DirectWrite fallback font face on Windows to avoid incorrect glyph rendering.
+- Fixed IME candidate positioning in alternate-screen applications such as Vim and tmux, including switching back from another terminal. Regression checks cover the terminal input-handler path; native Windows Chinese-input-method behavior still needs confirmation.
+
+#### ⚡ Terminal Output and File Transfers
+
+- Reduced repeated scanning and copying of ordinary terminal output while retaining the stateful detection paths for terminal control strings, graphics, triggers, and transfer protocols.
+- Made local terminal snapshots defer a busy parser lock with bounded retries, reducing UI waits during continuous output without indefinitely postponing a fresh snapshot.
+- Fixed long or truncated command-like output being mistaken for XMODEM/YMODEM transfer commands. Complete subsequent transfer commands remain detectable, including across input chunks.
+- Made trzsz wait for complete handshake lines before starting a transfer, avoiding premature detection when protocol markers are split across reads.
+
+Local benchmark results for OxideTerm 2.0.28, recorded on 2026-09-10 at 09:00:29 UTC using the [repository benchmark](https://github.com/AnalyseDeCircuit/oxideterm/tree/v2.0.28/benchmark): 16 MiB per workload, one warm-up and three measured runs. The table reports medians.
+
+| Workload | Median time (ms) | Median throughput (MiB/s) |
+|---|---:|---:|
+| plain | 133.606 | 119.755 |
+| ansi | 159.822 | 100.111 |
+| unicode | 165.883 | 96.454 |
+| long-csi | 153.803 | 104.029 |
+
+These results measure process-to-PTY throughput, not completed rendering or input latency.
+
+#### 🔌 Connections, Recovery, and Encrypted Sync
+
+- Added restart recovery for standalone serial, Telnet, Mosh, RDP, and VNC session entries, including temporary sessions. Entries return disconnected; temporary credentials are not persisted and must be supplied again when reconnecting. This restores session entries, not past terminal output.
+- Added SOCKS5 routing for RDP, including authentication, session-manager editing, and synchronization of its saved configuration. When an SSH gateway is selected, the gateway's own proxy settings take precedence; RDP's SOCKS5 settings apply when no SSH gateway is used.
+- Extended the separately selectable encrypted credential-sync scope to standalone SFTP and Mosh authentication, RDP/VNC passwords, and supported SOCKS5/HTTP upstream proxy credentials. Restored secrets use protected storage on the receiving device rather than copied device-local keychain references.
+- Preserved explicitly configured SSH algorithms during host-key preflight as well as connection setup. Improved SSH terminal-channel cleanup and retention of startup failures, and cleared expired keyboard-interactive authentication prompts.
+- Restored revealing saved SSH passwords without replacing the saved credential, and preserved saved serial profile names in active sessions.
+- Updated IronRDP to handle additional Font Map messages from RDP servers.
+
+#### 📂 SFTP, IDE, and Knowledge
+
+- Made the SFTP sidebar follow the active SSH terminal, with a pin action to keep a chosen server. Pending file selections are retired when the destination changes, preventing uploads to an unintended server. Reopening SFTP from session management preserves an existing full-tab view.
+- Raised the IDE editing limit to 100 MiB independently of the file-preview limit, across local, SFTP, and remote-agent file access. Large-file mode disables syntax processing and wrapping to limit editing overhead.
+- Preserved file encoding, BOM, and line endings when opening and saving. Added encoding and line-ending controls to the IDE status bar, including reopening with a specified encoding and choosing the save format. Text is normalized internally, and saving rejects characters that the selected encoding cannot represent.
+- Added knowledge-document pagination beyond the first 100 documents, with page navigation and recovery when the final page becomes empty. Embedding configuration now has its own card and remains available before a collection is created.
+
+#### ⚙️ Settings Organization
+
+- Renamed the connection and network pages to clarify their scope, reorganized cards across General, Terminal, Appearance, Connections, SFTP, and IDE, and restored missing card descriptions. Terminal input now separates clipboard, mouse/link, and keyboard/suggestion controls.
+- Moved external connection-link handling to Network & External Access and the terminal performance overlay to Help & About → Diagnostics. Clarified the two MCP directions, placed pending external MCP approvals before client management, and made client permissions expandable.
+- Separated current-conversation subagent options from global tool concurrency. Corrected missing and misplaced search entries, removed unavailable targets, and expanded matching collapsed AI settings when navigating from search. Updated all 11 languages and platform-specific labels.
+
+#### 🖥️ Desktop Interaction
+
+- Fixed Windows animation-frame scheduling that could starve input and quit messages.
+- Made connection tabs select on mouse press so fullscreen input-event ordering cannot clear a pending switch before release.
+- Restored a consistently visible close button on non-blocking connection progress cards.
+
+### 中文
+
+OxideTerm 2.0.28 新增 AI 消息排队与可选的子 Agent 协作，扩展加密凭据同步和 RDP 代理支持，将 IDE 编辑上限提高至 100 MiB 并保留文件编码，同时改进终端交互、会话恢复和设置导航。
+
+#### 💬 OxideSens 对话与子 Agent
+
+- 支持在回复生成期间排队发送后续消息，并提供编辑、删除、调整顺序和立即发送操作。正常完成后发送下一条；停止或本轮失败时保留待发消息，等待手动继续。每条消息保留所属对话、模型和已准备的上下文。
+- 增加独立的调整方向与打断后发送操作。调整方向向原生运行中的任务补充指令，不替换模型或权限；打断后发送取消当前轮次，并优先于队列发送替代消息。草稿与待发队列保存在内存中，重启工作区后不会自动重放。
+- 原生 AI 对话新增可选的子 Agent 协作，默认按对话关闭。子任务可继承父任务模型或选择其他已配置模型；应用内同时运行的子 Agent 上限可设为 1–4 个，默认 2 个。ACP 会话不作为子 Agent 后端。
+- 增加任务组进度、单个及整组停止、补充指令、可展开的任务详情，以及父子任务的 Token 用量展示。已完成的子任务历史归属父对话；历史中未完成的运行恢复为已中断状态。
+- 子任务的终端、SFTP 和 IDE 访问限定在分配给它的资源内，用户在终端中的输入优先于排队的 AI 工作。停止 Agent 不代表已经发出的远程命令一定结束；未确认释放的终端控制需要显式处理。
+
+#### 🖱️ 终端输入、选择与显示
+
+- 新增关闭终端命令提示的设置，并保留当前输入草稿。Windows 本地 PowerShell 的命令建议现可读取 PSReadLine 历史。
+- 新增独立的水平、垂直终端边距设置，默认均为 1 px。修正内容边缘的选择行为，支持通过 Shift-click 扩展已有选区。
+- 新增可选的选中文本同词高亮，在现有高亮界面提供全局与会话级控制，默认关闭。
+- 滚动和历史缓冲淘汰时，选区继续跟随原始内容；稳定时间戳的行身份，并修复退出历史搜索后自由输入模式的鼠标定位。
+- 改进框线、方块等终端图形与单元格的对齐；Windows 下保留 DirectWrite 实际选用的后备字体，避免错误字形渲染。
+- 修复 Vim、tmux 等备用屏幕程序中的 IME 候选框定位，包括从其他终端切回的场景。回归检查已覆盖终端输入接口路径，Windows 原生中文输入法的实际表现仍待确认。
+
+#### ⚡ 终端输出与文件传输
+
+- 减少普通终端输出的重复扫描和复制，同时保留控制字符串、图形、触发器和传输协议所需的有状态检测。
+- 本地终端快照遇到繁忙的解析锁时采用有上限的延后重试，减少持续输出期间的界面等待，避免无限推迟快照更新。
+- 修复过长或被截断的类命令输出误触发 XMODEM/YMODEM 传输。后续完整的传输命令仍可正常识别，并支持跨输入分块检测。
+- trzsz 等待完整握手行后再启动传输，避免协议标记跨读取分块时提前触发。
+
+OxideTerm 2.0.28 本机基准结果，测试时间为 2026-09-10 09:00:29 UTC，使用[仓库内的 benchmark](https://github.com/AnalyseDeCircuit/oxideterm/tree/v2.0.28/benchmark)：每种负载 16 MiB，预热 1 次、实测 3 次，下表为中位数。
+
+| 负载 | 耗时中位数（ms） | 吞吐量中位数（MiB/s） |
+|---|---:|---:|
+| plain | 133.606 | 119.755 |
+| ansi | 159.822 | 100.111 |
+| unicode | 165.883 | 96.454 |
+| long-csi | 153.803 | 104.029 |
+
+该结果衡量进程向 PTY 输出的吞吐量，不代表完整渲染耗时或输入延迟。
+
+#### 🔌 连接、恢复与加密同步
+
+- 补齐独立串口、Telnet、Mosh、RDP 和 VNC 会话条目的跨重启恢复，覆盖临时会话。条目以断开状态恢复；临时凭据不落盘，重连时需重新提供。恢复的是会话条目，不包含过去的终端输出。
+- RDP 新增 SOCKS5 路由，支持认证、会话管理中的编辑及已保存配置的同步。选择 SSH 网关时使用网关自身的代理设置；未使用 SSH 网关时才采用 RDP 的 SOCKS5 设置。
+- 将可单独选择的加密凭据同步范围扩展至独立 SFTP、Mosh 认证、RDP/VNC 密码，以及受支持的 SOCKS5/HTTP 上游代理凭据。接收设备将恢复后的秘密写入受保护存储，不直接沿用其他设备的钥匙串引用。
+- SSH 主机密钥预检和正式连接均遵循显式配置的算法偏好；改进终端通道清理和启动失败信息保留，并清除过期的键盘交互认证提示。
+- 恢复查看已保存 SSH 密码的功能，不替换原凭据；串口活动会话保留已保存配置的名称。
+- 更新 IronRDP，兼容 RDP 服务器额外发送的 Font Map 消息。
+
+#### 📂 SFTP、IDE 与知识库
+
+- SFTP 侧栏跟随活动 SSH 终端，并支持固定指定服务器。目标变化时清理待处理的文件选择，防止上传到错误服务器；从会话管理重新打开 SFTP 时保留已有的完整标签页。
+- IDE 编辑上限提高至 100 MiB，与文件预览上限分离，覆盖本地、SFTP 和远程 Agent 文件访问。大文件模式关闭语法处理与自动折行，以控制编辑开销。
+- 打开和保存文件时保留编码、BOM 与换行格式；IDE 状态栏新增编码及换行入口，支持按指定编码重新打开和修改保存格式。文本在内部统一换行；所选编码无法表示部分字符时拒绝有损保存。
+- 知识库文档超过 100 个后可继续分页查看，支持翻页，并在最后一页变空时回退。嵌入配置独立成卡片，尚未创建集合时也可访问。
+
+#### ⚙️ 设置整理
+
+- 调整连接和网络页面名称以明确范围，整理通用、终端、外观、连接、SFTP 和 IDE 页内卡片，并恢复缺失的卡片说明。终端输入分为剪贴板、鼠标与链接、键盘与输入提示三组。
+- 将外部连接链接移至“网络与外部访问”，终端性能浮层移至“帮助与关于 → 诊断”。说明两处 MCP 的访问方向，将外部 MCP 待审批操作置于客户端管理之前，并支持按需展开客户端权限。
+- 分开当前会话的子 Agent 选项与全局工具并发设置；修正搜索漏项和错误位置，移除不可用目标，搜索进入 AI 设置时展开对应折叠区域。同步更新全部 11 种语言及平台专用文案。
+
+#### 🖥️ 桌面交互
+
+- 修复 Windows 动画帧调度挤占输入与退出消息处理的问题。
+- 连接标签在鼠标按下时切换，避免全屏下输入事件顺序导致松开前待切换状态丢失。
+- 恢复非阻塞连接进度卡片中持续可见的关闭按钮。
+
+![OxideTerm terminal throughput comparison through 2.0.28](https://raw.githubusercontent.com/AnalyseDeCircuit/oxideterm/main/.github/release-notes/assets/terminal-performance-2.0.28-comparison.png)
+
+## 2.0.27
+
+### English
+
+OxideTerm 2.0.27 expands terminal semantic highlighting, adds merging existing terminal tabs into split panes and more flexible session logs, and improves serial output, connection prompts, AI streaming, and desktop compatibility.
+
+#### 🎨 Terminal Highlighting and Display
+
+- Expanded command-aware highlighting for compiler diagnostics, Git status and diffs, systemd services and journals, test results, and Docker/Kubernetes resource states. Classification follows the command context rather than treating every matching word as a status.
+- Added structured highlighting for `ls`, `stat`, `getfacl`, `df`, `free`, `ip`, `ss`, and `ping`, including file metadata, capacity, interface and socket states, and packet loss. File-listing parsing accounts for omitted owner/group columns and common GNU/BSD output differences.
+- Added distinct colors for Unix read, write, execute, and special permission bits. Weekday and month names also use separate colors, including in ordinary output.
+- Added nested bracket colors and subtle background bands for explicit error and warning lines. Semantic coloring continues to respect explicit terminal colors and manual foreground highlights; detected URLs no longer overwrite colors supplied by the shell.
+- Added horizontal scrolling to reveal terminal columns obscured when timestamps are enabled, without changing the terminal's column count.
+- Improved custom font-stack parsing so quoted family names and fallback fonts are handled correctly.
+
+#### 🪟 Terminal Tabs and Session Logs
+
+- Added horizontal and vertical merge actions to terminal tab context menus. Existing sessions of the same terminal type can be moved into the active tab as split panes without opening replacement connections.
+- Added a configurable session-log root directory and relative subdirectory templates, such as `{session}/{date}`, for organizing logs by session and date.
+- Added an unlimited log-file size option by setting the maximum size to `0`. Positive limits remain available; unlimited logging can consume additional disk space.
+
+#### 🔌 Serial and Connection Reliability
+
+- Added independent transmit and receive line-ending controls for serial sessions. Receive normalization handles CRLF split across input chunks; saved line-ending choices are retained in connection profiles and included in cloud sync.
+- Fixed ordinary terminal output being held indefinitely when its trailing bytes resemble the beginning of a modem-transfer handshake. Incomplete ambiguous prefixes are released when their wait expires or the stream ends.
+- Made connection and reconnection progress cards non-blocking. Dismissed cards remain dismissed across retries, and progress cards yield to keyboard-interactive authentication dialogs instead of covering the prompt.
+- Preserved explicitly configured legacy SSH algorithm preferences when creating sessions from saved connections.
+
+#### 🖥️ Desktop Compatibility and Credentials
+
+- Fixed tab clicks near the top edge of macOS fullscreen windows and adjusted traffic-light controls to native sizing.
+- Fixed macOS Keychain reads that could alter saved password text, including values that resemble hexadecimal data. Existing affected entries are read through the native Keychain path and migrated; macOS may request access during that migration.
+- Normalized Windows ConPTY environment blocks to avoid conflicting case variants of environment-variable names.
+- Removed duplicate entries from Linux local-shell discovery and improved checkbox visibility across the interface.
+
+#### 💬 AI Chat
+
+- Reduced repeated connection setup for AI chat and tool rounds by reusing the application's HTTP connection pool while keeping authentication request-scoped.
+- Fixed streamed chat events being lost during window updates, improving continuity of incremental responses and tool activity.
+
+#### ⚡ Terminal Performance and Contributor Documentation
+
+- Fixed command marks retaining obsolete coordinates after scrollback eviction. New output is no longer mistaken for an old command, and retained output remains associated with its running command. A macOS Apple M5 synthetic renderer workload with 2,000 previous commands improved from approximately 4.5–4.8 ms/frame to 0.58–0.66 ms/frame; this is a workload-specific result, not a cross-platform throughput claim.
+- Reused the current frame's logical-line index for semantic classification, avoiding repeated scans of wrapped lines without adding a persistent cache.
+- Added development documentation covering crate responsibilities, platform setup, verification, runtime ownership, GPUI CE maintenance, debugging, sensitive data, settings, localization, benchmarking, and releases.
+
+### 中文
+
+OxideTerm 2.0.27 扩展终端语义着色，新增将已有终端标签合并为分屏的操作和更灵活的会话日志配置，并改进串口输出、连接提示、AI 流式响应及桌面平台兼容性。
+
+#### 🎨 终端着色与显示
+
+- 扩展编译器诊断、Git 状态与差异、systemd 服务与日志、测试结果以及 Docker/Kubernetes 资源状态的命令感知着色。分类依据命令上下文，不会把所有同名词语都当成状态。
+- 为 `ls`、`stat`、`getfacl`、`df`、`free`、`ip`、`ss` 和 `ping` 增加结构化着色，覆盖文件元数据、容量、网卡与套接字状态及丢包率。文件列表解析兼顾省略所有者或组列的情况，以及常见 GNU/BSD 输出差异。
+- 为 Unix 读取、写入、执行和特殊权限位增加不同颜色。星期与月份名称也使用独立颜色，并支持普通输出中的识别。
+- 新增嵌套括号配色，以及明确错误、警告行的浅色背景带。语义着色继续尊重终端显式颜色与手动前景高亮；自动识别的 URL 不再覆盖 Shell 提供的颜色。
+- 在启用时间戳时增加横向滚动，可查看被遮挡的终端列，而不改变终端列数。
+- 改进自定义字体列表解析，正确处理带引号的字体名称与后备字体。
+
+#### 🪟 终端标签与会话日志
+
+- 在终端标签右键菜单中新增横向、纵向合并操作。相同终端类型的已有会话可移入当前标签形成分屏，无需重新建立连接。
+- 支持自定义会话日志根目录和相对子目录模板，例如 `{session}/{date}`，便于按会话、日期整理日志。
+- 支持将日志最大文件大小设为 `0`，表示不限制大小；仍可设置正数限制。无限制记录可能持续占用磁盘空间。
+
+#### 🔌 串口与连接可靠性
+
+- 为串口会话增加独立的发送、接收换行控制。接收转换正确处理跨数据块的 CRLF；换行选择会保存到连接配置，并随云同步传递。
+- 修复普通终端输出的末尾字节类似文件传输握手开头时，内容可能一直不显示的问题。不完整的待判定前缀会在等待到期或数据流结束时释放。
+- 将连接与重连进度卡片改为非阻塞显示。关闭后的卡片不会因重试重新弹出；键盘交互认证对话框出现时，进度卡片会让出位置，不再遮挡认证提示。
+- 从已保存连接创建会话时，保留用户明确配置的旧版 SSH 算法偏好。
+
+#### 🖥️ 桌面兼容性与凭据
+
+- 修复 macOS 全屏窗口顶部附近的标签点击，并将红绿灯控件调整为原生尺寸。
+- 修复 macOS 钥匙串读取可能改变已保存密码原文的问题，包括看起来像十六进制数据的密码。受影响的旧条目会通过原生钥匙串读取并迁移，迁移时 macOS 可能请求访问授权。
+- 规范 Windows ConPTY 环境变量块，避免同名变量的大小写变体互相冲突。
+- 去除 Linux 本地 Shell 列表中的重复条目，并提升界面复选框的辨识度。
+
+#### 💬 AI 对话
+
+- 复用应用的 HTTP 连接池，减少 AI 对话及工具调用轮次中的重复连接准备，同时将认证信息保持在单次请求范围内。
+- 修复窗口更新期间流式对话事件可能丢失的问题，改善增量回复与工具活动的连续性。
+
+#### ⚡ 终端性能与贡献者文档
+
+- 修复回滚历史裁剪后命令标记仍保留过期坐标的问题。新输出不再被误认为旧命令，仍保留的输出也会继续关联正在运行的命令。在 macOS Apple M5 上，包含 2000 条历史命令的合成渲染场景从约 4.5–4.8 ms/帧降至 0.58–0.66 ms/帧；该结果仅针对这一场景，不代表跨平台吞吐量提升。
+- 语义分类复用当前帧的逻辑行索引，避免反复扫描自动换行的长行，不增加持久缓存。
+- 新增开发文档，覆盖 crate 职责、平台环境、验证流程、运行时所有权、GPUI CE 维护、调试、敏感数据、设置、国际化、性能基准及发布流程。
+
 ## 2.0.26
 
 ### English

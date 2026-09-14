@@ -934,6 +934,7 @@ impl WorkspaceApp {
         self.tab_host.update(cx, |tab_host, _| {
             tab_host.set_active_pane(None, next_pane_id);
         });
+        self.activate_embedded_sftp_sidebar_if_visible(cx);
         self.needs_active_pane_focus = true;
         self.focus_active_pane(window, cx);
         cx.notify();
@@ -947,14 +948,14 @@ impl WorkspaceApp {
         else {
             return;
         };
-        self.finish_tab_removal(transition, exiting_visual, window, cx);
+        self.finish_tab_removal(transition, exiting_visual, Some(window), cx);
     }
 
     pub(super) fn finish_tab_removal(
         &mut self,
         transition: TabRemovalTransition,
         exiting_visual: Option<ExitingTabVisual>,
-        window: &mut Window,
+        mut window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let TabRemovalTransition {
@@ -967,7 +968,7 @@ impl WorkspaceApp {
         // can observe a replacement tab with the same presentation kind.
         self.ai_runtime_context
             .update(cx, |runtime, _cx| runtime.revoke_app_surface(tab.id));
-        self.apply_tab_mount_cleanup(mount_cleanup, Some(window), cx);
+        self.apply_tab_mount_cleanup(mount_cleanup, window.as_deref_mut(), cx);
         self.sync_host_tools_lifecycle(false, cx);
         if self
             .main_window_tabs
@@ -993,7 +994,7 @@ impl WorkspaceApp {
             self.standalone_connections.release_surface(
                 standalone_connections::StandaloneConnectionSurface::RemoteDesktop(tab.id),
             );
-            self.close_remote_desktop_tab(tab.id, window, cx);
+            self.close_remote_desktop_tab(tab.id, window.as_deref_mut(), cx);
         }
         // Tauri keeps node SFTP alive when the SFTP tab is closed; the tab is
         // only a view over the node-owned ConnectionEntry session.
@@ -1051,8 +1052,12 @@ impl WorkspaceApp {
         self.needs_active_pane_focus = self
             .active_tab(cx)
             .is_some_and(|tab| is_terminal_tab_kind(&tab.kind));
-        self.focus_active_pane(window, cx);
-        self.reveal_active_tab(window, cx);
+        // A closed shell has no window to focus. The surviving main window
+        // observes the session change and consumes needs_active_pane_focus.
+        if let Some(window) = window {
+            self.focus_active_pane(window, cx);
+            self.reveal_active_tab(window, cx);
+        }
         if let Some(exiting_visual) = exiting_visual {
             self.begin_tab_visual_exit(exiting_visual, cx);
         }
@@ -1445,7 +1450,7 @@ impl WorkspaceApp {
         tab_id: TabId,
         index: usize,
         event: &MouseDownEvent,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if index >= self.tabs(cx).len()
@@ -1470,6 +1475,9 @@ impl WorkspaceApp {
         else {
             return;
         };
+        // Select on press: native chrome can consume release or cancel capture with a
+        // buttonless move. Those events should cancel dragging, not tab navigation.
+        self.set_active_tab(tab_id, window, cx);
         let drop_target_index = self.tab_drop_target_index_for_x(start_x, window, &tab_widths, cx);
         self.main_window_tabs.drag = Some(TabDragState {
             tab_id,
@@ -1565,11 +1573,8 @@ impl WorkspaceApp {
                     cx.notify();
                 }
             }
-            TabDragMode::Pending | TabDragMode::Reorder => {
-                if self.tab_by_id(drag.tab_id, cx).is_some() {
-                    self.set_active_tab(drag.tab_id, window, cx);
-                }
-            }
+            // Selection already happened on press; release owns only drag completion.
+            TabDragMode::Pending | TabDragMode::Reorder => {}
         }
         cx.notify();
     }

@@ -284,7 +284,26 @@ const CAPABILITY_ROWS: &[CapabilityRow] = &[
         levels: NONE,
         request_format: AiReasoningRequestFormat::Unsupported,
     },
+    // https://docs.x.ai/developers/model-capabilities/text/reasoning
+    CapabilityRow {
+        provider_type: "xai",
+        model_match: ModelMatch::Prefix("grok-4.6"),
+        levels: &[Low, Medium, High, Xhigh],
+        request_format: AiReasoningRequestFormat::OpenAi,
+    },
+    CapabilityRow {
+        provider_type: "xai",
+        model_match: ModelMatch::Prefix("grok-4.5"),
+        levels: LOW_MEDIUM_HIGH,
+        request_format: AiReasoningRequestFormat::OpenAi,
+    },
     // https://api-docs.deepseek.com/guides/thinking_mode
+    CapabilityRow {
+        provider_type: "deepseek",
+        model_match: ModelMatch::Exact("deepseek-flash"),
+        levels: &[None, Low, High, Max],
+        request_format: AiReasoningRequestFormat::DeepSeek,
+    },
     CapabilityRow {
         provider_type: "deepseek",
         model_match: ModelMatch::Prefix("deepseek-v4"),

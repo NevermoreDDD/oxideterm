@@ -351,6 +351,7 @@ fn client_loop_prioritizes_queued_close_over_pending_output_error() {
     let mut config = RdpWorkerConfig {
         endpoint: RemoteDesktopEndpoint::new("example.test", 3389),
         transport_endpoint: None,
+        socks_proxy: None,
         size: RemoteDesktopSize {
             width: 1280,
             height: 720,
@@ -632,6 +633,7 @@ fn client_config_withholds_credentials_until_certificate_acceptance() {
     let mut config = RdpWorkerConfig {
         endpoint: RemoteDesktopEndpoint::new("example.test", 3389),
         transport_endpoint: Some(RemoteDesktopEndpoint::new("127.0.0.1", 43891)),
+        socks_proxy: None,
         size: RemoteDesktopSize {
             width: 1280,
             height: 720,
@@ -1208,4 +1210,246 @@ fn test_frame() -> RemoteDesktopFrame {
         RemoteDesktopFrameFormat::Bgra8,
         vec![0, 0, 0, 0xff],
     )
+}
+
+fn proxy_client_config(port: u16) -> ClientRdpConfig {
+    build_client_rdp_config(&RdpWorkerConfig {
+        endpoint: RemoteDesktopEndpoint::new("desktop.test", 3390),
+        transport_endpoint: None,
+        socks_proxy: Some(std::sync::Arc::new(
+            oxideterm_remote_desktop::RemoteDesktopSocksProxy {
+                host: "127.0.0.1".into(),
+                port,
+                remote_dns: true,
+                no_proxy: String::new(),
+                auth: Some(oxideterm_remote_desktop::RemoteDesktopProxyAuth {
+                    username: "proxy-user".into(),
+                    password: "proxy-secret".into(),
+                }),
+            },
+        )),
+        size: RemoteDesktopSize {
+            width: 1280,
+            height: 720,
+        },
+        scale_factor: RDP_CONNECT_DEFAULT_SCALE_FACTOR_PERCENT,
+        graphics_epoch: 0,
+        read_only: false,
+        session_options: RemoteDesktopSessionOptions::default(),
+        monitor_layout: RemoteDesktopMonitorLayout::default(),
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn rdp_transport_dials_socks_target_and_preserves_server_identity() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = proxy_client_config(listener.local_addr().unwrap().port());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut greeting = [0; 4];
+        stream.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [5, 2, 0, 2]);
+        stream.write_all(&[5, 2]).await.unwrap();
+        let mut auth = [0; 25];
+        stream.read_exact(&mut auth).await.unwrap();
+        assert_eq!(&auth, b"\x01\x0aproxy-user\x0cproxy-secret");
+        stream.write_all(&[1, 0]).await.unwrap();
+        let mut request = [0; 19];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request[..5], &[5, 1, 0, 3, 12]);
+        assert_eq!(&request[5..17], b"desktop.test");
+        assert_eq!(u16::from_be_bytes([request[17], request[18]]), 3390);
+        stream
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
+        let mut payload = [0; 4];
+        stream.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"ping");
+        stream.write_all(b"pong").await.unwrap();
+    });
+    let mut stream = tokio::time::timeout(Duration::from_secs(2), connect_rdp_transport(&config))
+        .await
+        .unwrap()
+        .unwrap();
+    stream.write_all(b"ping").await.unwrap();
+    let mut response = [0; 4];
+    stream.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response, b"pong");
+    assert_eq!(config.destination.host(), "desktop.test");
+    assert_eq!(config.destination.port(), 3390);
+    assert!(config.connector.enable_tls && config.connector.enable_credssp);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_rdp_during_socks_handshake_releases_transport() {
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = proxy_client_config(listener.local_addr().unwrap().port());
+    let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
+    let close_tx = input_tx.clone();
+    let (output_tx, _output_rx) = client_rdp_output_channel(1);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut greeting = [0; 4];
+        stream.read_exact(&mut greeting).await.unwrap();
+        close_tx.send(RdpInputEvent::Close).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        connect_native_rdp(&config, &mut input_rx, input_tx, output_tx),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(result.err().unwrap().to_string().contains("canceled"));
+    server.await.unwrap();
+}
+
+#[test]
+fn clipboard_text_preserves_code_whitespace_and_unicode_in_windows_format() {
+    let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
+    let (output_tx, _output_rx) = client_rdp_output_channel(RDP_CLIENT_OUTPUT_QUEUE_CAPACITY);
+    let mut backend = ClientClipboardBackend::new(
+        input_tx,
+        output_tx,
+        RemoteDesktopSessionOptions::default().clipboard,
+    );
+    backend.set_local_text("one\n\t中文🦀\r\ntwo\rthree\n".repeat(512));
+    backend.on_format_data_request(FormatDataRequest {
+        format: ClipboardFormatId::CF_UNICODETEXT,
+    });
+    let expected = "one\r\n\t中文🦀\r\ntwo\r\nthree\r\n".repeat(512);
+    match input_rx.try_recv().unwrap() {
+        RdpInputEvent::Clipboard(ClipboardMessage::SendFormatData(response)) => {
+            assert_eq!(response.to_unicode_string().unwrap(), expected);
+        }
+        _ => panic!("expected one Unicode clipboard response"),
+    }
+    assert!(input_rx.try_recv().is_err());
+}
+
+#[test]
+fn paste_dispatch_preserves_large_text_without_generating_per_character_events() {
+    let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
+    let mut database = RdpInputDatabase::new();
+    let mut mapper = RdpKeyboardInputMapper::default();
+    let text = "fn main() {\n\tprintln!(\"中文🦀\");\n}\n".repeat(512);
+    let request = RemoteDesktopHelperRequest::PasteText {
+        text: text.clone().into(),
+    };
+    assert!(!format!("{request:?}").contains("println"));
+    forward_client_rdp_request(&input_tx, &mut database, &mut mapper, request, false).unwrap();
+    match input_rx.try_recv().unwrap() {
+        RdpInputEvent::SetClipboardText {
+            text: received,
+            paste: true,
+        } => assert_eq!(received.expose_secret(), text),
+        _ => panic!("expected one clipboard paste event"),
+    }
+    assert!(input_rx.try_recv().is_err());
+    forward_client_rdp_request(
+        &input_tx,
+        &mut database,
+        &mut mapper,
+        RemoteDesktopHelperRequest::PasteText {
+            text: "read-only".into(),
+        },
+        true,
+    )
+    .unwrap();
+    assert!(input_rx.try_recv().is_err());
+}
+
+#[test]
+fn clipboard_paste_waits_for_its_ack_and_does_not_replay_rejected_or_replaced_content() {
+    let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel();
+    let (output_tx, output_rx) = client_rdp_output_channel(RDP_CLIENT_OUTPUT_QUEUE_CAPACITY);
+    let mut backend = ClientClipboardBackend::new(
+        input_tx,
+        output_tx,
+        RemoteDesktopSessionOptions::default().clipboard,
+    );
+    backend.set_local_text("earlier clipboard synchronization".to_string());
+    backend.record_format_list_sent();
+    backend.request_text_paste("new paste\n\t中文".into());
+    backend.record_format_list_sent();
+    backend.on_ready();
+    assert!(
+        input_rx.try_recv().is_err(),
+        "initialization must not re-advertise accepted content"
+    );
+    backend.on_format_list_response(true);
+    assert!(
+        input_rx.try_recv().is_err(),
+        "an old synchronization acknowledgement must not paste"
+    );
+    backend.on_format_list_response(true);
+    let RdpInputEvent::PasteClipboard(generation) = input_rx.try_recv().unwrap() else {
+        panic!("expected one paste shortcut request");
+    };
+    assert!(backend.take_ready_paste(generation));
+    assert!(!backend.take_ready_paste(generation));
+    backend.on_format_list_response(true);
+    assert!(
+        input_rx.try_recv().is_err(),
+        "duplicate acknowledgement must not paste twice"
+    );
+
+    backend.request_text_paste("rejected".into());
+    backend.record_format_list_sent();
+    backend.on_format_list_response(false);
+    assert!(input_rx.try_recv().is_err());
+    assert!(matches!(
+        output_rx.control_rx.try_recv().unwrap(),
+        ClientRdpOutput::Event(RemoteDesktopHelperEvent::ClipboardTransferFailed { .. })
+    ));
+
+    backend.request_text_paste("superseded".into());
+    backend.record_format_list_sent();
+    backend.set_local_text("clipboard only".to_string());
+    backend.record_format_list_sent();
+    backend.on_format_list_response(true);
+    backend.on_format_list_response(true);
+    assert!(
+        input_rx.try_recv().is_err(),
+        "clipboard synchronization must not revive a cancelled paste"
+    );
+
+    backend.request_text_paste("waiting shortcut".into());
+    backend.record_format_list_sent();
+    backend.on_format_list_response(true);
+    let RdpInputEvent::PasteClipboard(generation) = input_rx.try_recv().unwrap() else {
+        panic!("expected paste");
+    };
+    backend.set_local_text("changed before shortcut delivery".to_string());
+    assert!(!backend.take_ready_paste(generation));
+}
+
+#[test]
+fn clipboard_paste_shortcut_is_one_complete_control_v_sequence() {
+    use ironrdp::pdu::input::fast_path::KeyboardFlags;
+    assert_eq!(
+        rdp_paste_input_events().as_slice(),
+        &[
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x1d),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), 0x2f),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x2f),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x1d),
+        ]
+    );
 }

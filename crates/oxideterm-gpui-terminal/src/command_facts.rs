@@ -205,6 +205,14 @@ impl CommandFactLedger {
         self.ai_records.clone()
     }
 
+    pub(crate) fn ai_command_status(&self, id: &str) -> Option<TerminalCommandFactStatus> {
+        self.ai_records
+            .iter()
+            .rev()
+            .find(|record| record.command_id == id)
+            .map(|record| record.status)
+    }
+
     pub(crate) fn autosuggest_records(&self) -> Vec<TerminalAutosuggestCommandRecord> {
         self.autosuggest_records.clone()
     }
@@ -282,7 +290,7 @@ impl CommandFactLedger {
                 command_id: Arc::from(mark.command_id.as_str()),
                 query: Arc::from(query.query),
                 case_sensitive: query.case_sensitive,
-                output_start_global_line: mark.command_line.saturating_add(1),
+                output_start_global_line: mark.output_start_line(),
                 output_end_global_line: None,
             });
         let fact = TerminalCommandFact {
@@ -296,7 +304,7 @@ impl CommandFactLedger {
                 .filter(|command| !command.trim().is_empty()),
             start_global_line: mark.start_line,
             command_global_line: mark.command_line,
-            output_start_global_line: mark.command_line.saturating_add(1),
+            output_start_global_line: mark.output_start_line(),
             end_global_line: None,
             status: TerminalCommandFactStatus::Open,
             confidence: mark.confidence,
@@ -307,6 +315,33 @@ impl CommandFactLedger {
         };
         self.record_ai_command_if_eligible(mark, &fact);
         self.facts.push(fact);
+    }
+
+    pub(crate) fn trim_history(&mut self, lines: usize) {
+        // Closed facts are historical metadata, not live grid annotations. Only
+        // the latest open fact needs rebasing before its closing boundary arrives.
+        if let Some(fact) = self.facts.last_mut()
+            && fact.status == TerminalCommandFactStatus::Open
+        {
+            fact.start_global_line = fact.start_global_line.saturating_sub(lines);
+            fact.command_global_line = fact.command_global_line.saturating_sub(lines);
+            fact.output_start_global_line = fact.output_start_global_line.saturating_sub(lines);
+            fact.end_global_line = fact.end_global_line.map(|end| end.saturating_sub(lines));
+        }
+        if let Some(highlight) = &mut self.transient_command_highlight {
+            if highlight
+                .output_end_global_line
+                .is_some_and(|end| end < lines)
+            {
+                self.transient_command_highlight = None;
+            } else {
+                highlight.output_start_global_line =
+                    highlight.output_start_global_line.saturating_sub(lines);
+                highlight.output_end_global_line = highlight
+                    .output_end_global_line
+                    .map(|end| end.saturating_sub(lines));
+            }
+        }
     }
 
     pub(crate) fn close_from_mark(&mut self, mark: &TerminalCommandMark) {
@@ -602,6 +637,7 @@ mod tests {
             command: command.map(str::to_string),
             start_line: 10,
             command_line: 10,
+            command_line_clipped: false,
             end_line: closed.then_some(12),
             is_closed: closed,
             closed_by: closed.then_some(TerminalCommandMarkClosedBy::ShellIntegration),
@@ -618,30 +654,27 @@ mod tests {
     }
 
     #[test]
-    fn command_fact_ledger_closes_fact_and_records_ai_command() {
-        let mut ledger = CommandFactLedger::default();
-        ledger.create_from_mark(&mark("cmd-1", Some("ls"), false));
-        ledger.close_from_mark(&mark("cmd-1", Some("ls"), true));
-
-        let facts = ledger.facts();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].status, TerminalCommandFactStatus::Closed);
-        assert_eq!(facts[0].end_global_line, Some(12));
-
-        let records = ledger.ai_records();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].command, "ls");
-        assert_eq!(records[0].status, TerminalCommandFactStatus::Closed);
-    }
-
-    #[test]
-    fn command_fact_ledger_skips_empty_commands_for_ai_records() {
-        let mut ledger = CommandFactLedger::default();
-        ledger.create_from_mark(&mark("cmd-1", Some("  "), false));
-        ledger.close_from_mark(&mark("cmd-1", Some("  "), true));
-
-        assert_eq!(ledger.facts().len(), 1);
-        assert!(ledger.ai_records().is_empty());
+    fn closed_facts_keep_boundaries_but_only_nonblank_commands_enter_ai_history() {
+        for (command, expected) in [("ls", vec!["ls"]), ("  ", vec![])] {
+            let mut ledger = CommandFactLedger::default();
+            ledger.create_from_mark(&mark("cmd-1", Some(command), false));
+            ledger.close_from_mark(&mark("cmd-1", Some(command), true));
+            let facts = ledger.facts();
+            assert_eq!(facts.len(), 1);
+            assert_eq!(facts[0].status, TerminalCommandFactStatus::Closed);
+            assert_eq!(facts[0].end_global_line, Some(12));
+            let records = ledger.ai_records();
+            assert_eq!(
+                records
+                    .iter()
+                    .map(|record| record.command.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            for record in records {
+                assert_eq!(record.status, TerminalCommandFactStatus::Closed);
+            }
+        }
     }
 
     #[test]
@@ -764,6 +797,38 @@ mod tests {
                 is_cursor_at_end: true,
             }),
             Some(" -la".to_string())
+        );
+    }
+
+    #[test]
+    fn history_eviction_keeps_live_query_on_retained_output_only() {
+        let mut ledger = CommandFactLedger::default();
+        let mut command = mark("grep", Some("ps -ef | grep dbx"), false);
+        ledger.create_from_mark(&command);
+        ledger.trim_history(11);
+        assert!(command.trim_history(11));
+        assert_eq!(
+            ledger
+                .transient_command_highlight()
+                .unwrap()
+                .output_start_global_line,
+            0
+        );
+        command.is_closed = true;
+        command.end_line = Some(1);
+        ledger.close_from_mark(&command);
+        assert_eq!(
+            ledger
+                .transient_command_highlight()
+                .unwrap()
+                .output_end_global_line,
+            Some(1)
+        );
+        ledger.trim_history(2);
+        assert!(ledger.transient_command_highlight().is_none());
+        assert_eq!(
+            ledger.facts()[0].command.as_deref(),
+            Some("ps -ef | grep dbx")
         );
     }
 

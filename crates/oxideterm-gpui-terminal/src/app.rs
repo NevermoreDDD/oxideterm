@@ -72,7 +72,9 @@ use crate::trzsz_worker::{
 use image_cache::ImageRenderCache;
 pub(crate) use image_cache::TerminalRenderedImage;
 pub(crate) use ime::TerminalInputHandler;
-use scrollbar::{ScrollbarDrag, ScrollbarGeometry};
+use scrollbar::{
+    HorizontalScrollbarDrag, HorizontalScrollbarGeometry, ScrollbarDrag, ScrollbarGeometry,
+};
 
 #[derive(Clone, Debug)]
 enum TmuxPromptKind {
@@ -91,6 +93,40 @@ struct TmuxPromptState {
 struct TmuxSeparatorDrag {
     separator: TmuxSeparator,
     last_point: TerminalPoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalShortcut {
+    Copy,
+    Paste,
+    Terminate,
+    Kill,
+    PageUp,
+    PageDown,
+    LineUp,
+    LineDown,
+    Top,
+    Bottom,
+}
+
+pub struct TerminalKeybindings {
+    pub bindings: Vec<(gpui::KeyBinding, TerminalShortcut)>,
+    pub normalize: fn(&gpui::Keystroke) -> Option<gpui::Keystroke>,
+}
+impl gpui::Global for TerminalKeybindings {}
+impl TerminalKeybindings {
+    pub fn resolve(&self, key: &gpui::Keystroke) -> Option<TerminalShortcut> {
+        let key = (self.normalize)(key)?;
+        self.bindings
+            .iter()
+            .find(|(binding, _)| {
+                binding
+                    .keystrokes()
+                    .first()
+                    .is_some_and(|binding| key.should_match(binding))
+            })
+            .map(|(_, action)| *action)
+    }
 }
 
 pub type SharedTerminalSession = Arc<Mutex<TerminalSession>>;
@@ -305,6 +341,7 @@ fn terminal_maintenance_interval(
     process_refresh_remaining: Option<Duration>,
     pending_cwd_remaining: Option<Duration>,
     editor_expiry_remaining: Option<Duration>,
+    pending_output_flush_delay: Option<Duration>,
 ) -> Option<Duration> {
     if drain_budget_exhausted {
         return Some(drain_boost_interval);
@@ -316,6 +353,7 @@ fn terminal_maintenance_interval(
         process_refresh_remaining,
         pending_cwd_remaining,
         editor_expiry_remaining,
+        pending_output_flush_delay,
     ]
     .into_iter()
     .flatten()
@@ -407,18 +445,21 @@ pub struct TerminalPane {
     // Command-derived query highlighting is session-only and never becomes a
     // persisted keyword rule or shared backend state.
     command_context_highlighting_enabled: bool,
+    session_selection_highlighting_override: Option<bool>,
+    selection_highlight_cache: Option<SelectionHighlightCache>,
     preferences: TerminalUiPreferences,
     settings: TerminalUiSettings,
     theme: TerminalUiTheme,
     snapshot: TerminalSnapshot,
+    render_mode: TermMode,
     snapshot_dirty: bool,
+    snapshot_deferred_since: Option<Instant>,
     snapshot_generation: u64,
     next_snapshot_line_id: u64,
     terminal_timestamps_enabled: bool,
     // Visual-only metadata keyed by stable snapshot line identity; never write this
     // into the PTY buffer, copied text, or search/indexed terminal content.
-    row_timestamps: Arc<HashMap<u64, TerminalRowTimestamp>>,
-    row_timestamp_retained_min_line: Option<u64>,
+    row_timestamps: Arc<TerminalRowTimestampStore>,
     metrics: TerminalMetrics,
     metrics_dirty: bool,
     selection: Option<TerminalSelection>,
@@ -487,7 +528,14 @@ pub struct TerminalPane {
     smooth_scroll_animation: Option<SmoothScrollAnimation>,
     smooth_scroll_snapshot_cache: Option<SmoothScrollSnapshotCache>,
     scrollbar_drag: Option<ScrollbarDrag>,
+    // Horizontal panning belongs to the visual timestamp overlay and never
+    // changes the backing PTY grid or remote window size.
+    horizontal_scroll_offset_px: Pixels,
+    horizontal_scrollbar_drag: Option<HorizontalScrollbarDrag>,
     tmux_separator_drag: Option<TmuxSeparatorDrag>,
+    pending_tmux_mouse: std::collections::VecDeque<interactions::DeferredTmuxMouse>,
+    tmux_selection_pending: bool,
+    completed_tmux_selection: Option<bool>,
     selection_autoscroll_position: Option<Point<Pixels>>,
     selection_autoscroll_scheduled: bool,
     copy_on_select_generation: u64,
@@ -600,11 +648,28 @@ pub(crate) struct TerminalRowTimestamp {
     source_signature: u64,
 }
 
+/// Visual metadata follows the emulator row, independent of viewport coordinates.
+#[derive(Clone, Default)]
+pub(crate) struct TerminalRowTimestampStore {
+    pub(crate) entries: HashMap<u64, TerminalRowTimestamp>,
+}
+
+impl TerminalRowTimestampStore {
+    pub(crate) fn get(&self, identity: u64) -> Option<&TerminalRowTimestamp> {
+        self.entries.get(&identity)
+    }
+}
+
 #[derive(Clone)]
 struct TerminalSearchCache {
     query: String,
     content_revision: u64,
     matches: Arc<[oxideterm_terminal::TerminalSearchMatch]>,
+}
+
+struct SelectionHighlightCache {
+    selection: TerminalSelection,
+    query: Option<Arc<Zeroizing<String>>>,
 }
 
 struct SmoothScrollSnapshotCache {
@@ -918,12 +983,13 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        let (mut snapshot, session_kind, cwd_integration_launch_state) = {
+        let (mut snapshot, session_kind, cwd_integration_launch_state, render_mode) = {
             let terminal = terminal.lock();
             (
                 terminal.snapshot().with_generation(1),
                 terminal.kind(),
                 terminal.cwd_integration_launch_state(),
+                terminal.mode(),
             )
         };
         let kitty_file_transmission = terminal.lock().kitty_file_transmission_control();
@@ -1005,7 +1071,8 @@ impl TerminalPane {
                         this.tick(cx);
                         let listen_for_backend = backend_activity_enabled
                             && !backend_activity_closed
-                            && !this.terminal_exited
+                            && (!this.terminal_exited
+                                || this.session_kind == TerminalSessionKind::SshPty)
                             && !this.last_drain_budget_exhausted;
                         (
                             this.next_maintenance_interval(),
@@ -1055,16 +1122,19 @@ impl TerminalPane {
             session_highlight_override: None,
             session_semantic_coloring_override: None,
             command_context_highlighting_enabled: true,
+            session_selection_highlighting_override: None,
+            selection_highlight_cache: None,
             preferences: preferences.clone(),
             settings: TerminalUiSettings::from_preferences(&preferences),
             theme: preferences.theme.clone(),
             snapshot,
+            render_mode,
             snapshot_dirty: false,
+            snapshot_deferred_since: None,
             snapshot_generation: 1,
             next_snapshot_line_id,
             terminal_timestamps_enabled: preferences.terminal_timestamps_enabled,
-            row_timestamps: Arc::new(HashMap::new()),
-            row_timestamp_retained_min_line: None,
+            row_timestamps: Arc::new(TerminalRowTimestampStore::default()),
             metrics,
             metrics_dirty: false,
             selection: None,
@@ -1135,7 +1205,12 @@ impl TerminalPane {
             smooth_scroll_animation: None,
             smooth_scroll_snapshot_cache: None,
             scrollbar_drag: None,
+            horizontal_scroll_offset_px: px(0.0),
+            horizontal_scrollbar_drag: None,
             tmux_separator_drag: None,
+            pending_tmux_mouse: Default::default(),
+            tmux_selection_pending: false,
+            completed_tmux_selection: None,
             selection_autoscroll_position: None,
             selection_autoscroll_scheduled: false,
             copy_on_select_generation: 0,
@@ -1203,7 +1278,88 @@ impl TerminalPane {
         self.title.clone()
     }
 
-    fn stamp_snapshot(&mut self, mut snapshot: TerminalSnapshot) -> TerminalSnapshot {
+    fn set_selection(&mut self, selection: Option<TerminalSelection>) {
+        let range = selection.map(|selection| {
+            let (start, end) = selection.normalized();
+            let is_block = selection.mode == TerminalSelectionMode::Block;
+            oxideterm_terminal::TerminalSelectionRange {
+                start_line: start.line,
+                end_line: end.line,
+                start_col: if is_block {
+                    start.col.min(end.col)
+                } else {
+                    start.col
+                },
+                end_col: if is_block {
+                    start.col.max(end.col)
+                } else {
+                    end.col
+                },
+                is_block,
+            }
+        });
+        self.terminal.lock().set_selection(range);
+        self.selection = selection;
+        self.selection_highlight_cache = None;
+    }
+
+    fn sync_selection_from_range(
+        &mut self,
+        range: Option<oxideterm_terminal::TerminalSelectionRange>,
+    ) {
+        let Some(previous) = self.selection else {
+            return;
+        };
+        self.selection = range.map(|range| {
+            let mut start = TerminalGridPoint {
+                line: range.start_line,
+                col: range.start_col,
+            };
+            let mut end = TerminalGridPoint {
+                line: range.end_line,
+                col: range.end_col,
+            };
+            let reversed = (previous.anchor.line, previous.anchor.col)
+                > (previous.head.line, previous.head.col);
+            if previous.mode == TerminalSelectionMode::Block
+                && ((previous.anchor.col > previous.head.col) != reversed)
+            {
+                std::mem::swap(&mut start.col, &mut end.col);
+            }
+            TerminalSelection {
+                anchor: if reversed { end } else { start },
+                head: if reversed { start } else { end },
+                mode: previous.mode,
+            }
+        });
+        if self.selection != Some(previous) {
+            self.selection_highlight_cache = None;
+            // A drag payload refers to its original range; do not apply it after
+            // output changes that range while the pointer gesture is in flight.
+            self.free_type_drag = None;
+        }
+        if self.selection.is_none() {
+            self.selecting = false;
+            self.selection_autoscroll_position = None;
+        }
+    }
+
+    fn stamp_snapshot(&mut self, snapshot: TerminalSnapshot) -> TerminalSnapshot {
+        let selection = {
+            let terminal = self.terminal.lock();
+            self.render_mode = terminal.mode();
+            self.selection.and_then(|_| terminal.selection())
+        };
+        self.stamp_snapshot_with_selection(snapshot, selection)
+    }
+
+    fn stamp_snapshot_with_selection(
+        &mut self,
+        mut snapshot: TerminalSnapshot,
+        selection: Option<oxideterm_terminal::TerminalSelectionRange>,
+    ) -> TerminalSnapshot {
+        self.snapshot_deferred_since = None;
+        self.sync_selection_from_range(selection);
         let backend_reused_rows = snapshot.lines.iter().any(|row| row.line_id != 0);
         reconcile_snapshot_line_ids(
             &mut snapshot,
@@ -1229,32 +1385,24 @@ impl TerminalPane {
         // Match iTerm-style semantics: a row label is the time that row was
         // last modified, not the time it first became visible in the viewport.
         let label = current_terminal_timestamp_label();
-        record_timestampable_snapshot_rows(
-            Arc::make_mut(&mut self.row_timestamps),
-            snapshot,
-            &label,
-        );
+        let store = Arc::make_mut(&mut self.row_timestamps);
+        record_timestampable_snapshot_rows(store, snapshot, &label);
         self.trim_row_timestamps(snapshot);
     }
 
     fn trim_row_timestamps(&mut self, snapshot: &TerminalSnapshot) {
-        let Some(max_line) = snapshot.lines.iter().map(|row| row.line_id).max() else {
-            Arc::make_mut(&mut self.row_timestamps).clear();
-            self.row_timestamp_retained_min_line = None;
+        let store = Arc::make_mut(&mut self.row_timestamps);
+        if snapshot.lines.is_empty() {
+            store.entries.clear();
             return;
-        };
+        }
         let retained_rows = self
             .preferences
             .scrollback_lines
             .saturating_add(snapshot.rows)
             .saturating_add(1024)
-            .max(2048) as u64;
-        let min_line = max_line.saturating_sub(retained_rows);
-        trim_row_timestamp_history(
-            Arc::make_mut(&mut self.row_timestamps),
-            &mut self.row_timestamp_retained_min_line,
-            min_line,
-        );
+            .max(2048);
+        trim_row_timestamp_history(&mut store.entries, retained_rows);
     }
 
     pub fn terminal_timestamps_enabled(&self) -> bool {
@@ -1263,6 +1411,8 @@ impl TerminalPane {
 
     pub fn toggle_terminal_timestamps(&mut self, cx: &mut Context<Self>) {
         self.terminal_timestamps_enabled = !self.terminal_timestamps_enabled;
+        self.horizontal_scroll_offset_px = px(0.0);
+        self.horizontal_scrollbar_drag = None;
         // Timestamp visibility is paint-only. Do not restamp or resize here:
         // both would make old scrollback look like it was modified at toggle time.
         cx.notify();
@@ -1414,6 +1564,10 @@ impl TerminalPane {
         self.command_fact_ledger.ai_records()
     }
 
+    pub fn ai_command_status(&self, id: &str) -> Option<crate::TerminalCommandFactStatus> {
+        self.command_fact_ledger.ai_command_status(id)
+    }
+
     pub fn autosuggest_command_records(&self) -> Vec<TerminalAutosuggestCommandRecord> {
         self.command_fact_ledger.autosuggest_records()
     }
@@ -1446,7 +1600,8 @@ impl TerminalPane {
             .lines
             .get(self.snapshot.cursor_row)
             .is_some_and(|row| row.active_input);
-        if !self.autosuggest_prompt_active
+        if !self.preferences.autosuggest_enabled
+            || !self.autosuggest_prompt_active
             || self.marked_text.is_some()
             || self.tmux_prompt.is_some()
             || self.pending_paste.is_some()
@@ -1507,6 +1662,17 @@ impl TerminalPane {
     fn terminal_ghost_text(&self) -> Option<String> {
         // Keep ordinary terminal suggestions in the pane-owned list instead of painting ghost text.
         self.privilege_prompt_inline_hint.clone()
+    }
+
+    pub fn ai_waiting_for_secret(&self) -> bool {
+        self.privilege_prompt_tracker
+            .prompt_is_waiting_for_secret(Instant::now())
+    }
+
+    // A password answers the running command; it neither takes ownership nor belongs in broadcasts.
+    fn input_answers_privilege_prompt(&self, bytes: &[u8]) -> bool {
+        self.privilege_prompt_tracker
+            .input_answers_prompt(bytes, Instant::now())
     }
 
     pub fn privilege_prompt_snapshot(&self) -> Option<PrivilegePromptSnapshot> {
@@ -1606,12 +1772,19 @@ impl TerminalPane {
     pub fn set_preferences(&mut self, preferences: TerminalUiPreferences, cx: &mut Context<Self>) {
         let mut preferences = preferences;
         self.preference_overrides.apply_to(&mut preferences);
+        if self.preferences.autosuggest_enabled != preferences.autosuggest_enabled {
+            self.autosuggest_selected_index = None;
+            self.autosuggest_dismissed_query = None;
+        }
         if preferences.session_log_options.is_none() && self.session_log.is_some() {
             // An explicit connection-level disable takes effect immediately for an active pane.
             let _ = self.stop_session_log(cx);
         }
         if let Some(highlight_override) = &self.session_highlight_override {
             preferences.highlight_rules = highlight_override.rules.clone();
+        }
+        if self.preferences.selection_highlighting != preferences.selection_highlighting {
+            self.selection_highlight_cache = None;
         }
         if self.session_semantic_coloring_override == Some(preferences.semantic_coloring) {
             self.session_semantic_coloring_override = None;
@@ -1634,11 +1807,10 @@ impl TerminalPane {
             || self.preferences.line_height.to_bits() != preferences.line_height.to_bits();
         let next_settings = TerminalUiSettings::from_preferences(&preferences);
         if !next_settings.command_marks_enabled {
-            self.command_marks.clear();
+            // Hiding marks must not discard the completion facts or aliases of a running command.
             self.command_marks_render_cache_dirty = true;
             self.selected_command_mark_id = None;
             self.hovered_command_mark_id = None;
-            self.command_mark_id_aliases.clear();
         }
         if !next_settings.current_directory_awareness_enabled {
             self.pending_cwd = None;
@@ -1726,6 +1898,28 @@ impl TerminalPane {
             return;
         }
         self.command_context_highlighting_enabled = enabled;
+        cx.notify();
+    }
+
+    pub fn selection_highlighting_enabled(&self) -> bool {
+        self.session_selection_highlighting_override
+            .unwrap_or(self.preferences.selection_highlighting)
+    }
+
+    pub fn selection_highlighting_overridden(&self) -> bool {
+        self.session_selection_highlighting_override.is_some()
+    }
+
+    pub fn set_selection_highlighting_override(
+        &mut self,
+        enabled: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_selection_highlighting_override == enabled {
+            return;
+        }
+        self.session_selection_highlighting_override = enabled;
+        self.selection_highlight_cache = None;
         cx.notify();
     }
 
@@ -2086,6 +2280,7 @@ impl TerminalPane {
     }
 
     fn mark_terminal_content_changed(&mut self, cx: &mut Context<Self>) {
+        self.selection_highlight_cache = None;
         self.terminal_content_revision = self.terminal_content_revision.wrapping_add(1).max(1);
         self.search_cache = None;
         self.schedule_search_refresh(cx);
@@ -2181,7 +2376,8 @@ impl TerminalPane {
     }
 
     pub fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.paste_text_without_broadcast(text, cx) {
+        let secret_entry = self.input_answers_privilege_prompt(text.as_bytes());
+        if self.paste_text_without_broadcast(text, cx) && !secret_entry {
             self.broadcast_user_input(TerminalBroadcastInputKind::Paste, text.as_bytes(), cx);
         }
     }
@@ -2479,7 +2675,7 @@ impl TerminalPane {
         self.clear_smooth_scroll_remainder();
         self.snapshot = self.stamp_snapshot(snapshot);
         self.mark_terminal_content_changed(cx);
-        self.selection = None;
+        self.set_selection(None);
         self.search_query = None;
         self.selected_search_match = None;
         self.reset_command_marks_for_terminal_reset();
@@ -2594,6 +2790,23 @@ impl TerminalPane {
         }
     }
 
+    fn apply_terminal_drain_activity(
+        &mut self,
+        report: &TerminalDrainReport,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        if report.changed {
+            self.last_terminal_activity = now;
+            self.snapshot_dirty = true;
+            self.mark_terminal_content_changed(cx);
+        }
+        // Focus, resize, and cursor changes invalidate rendering without receiving output.
+        if report.drained_bytes > 0 && !report.output_presented {
+            cx.emit(TerminalPaneEvent::OutputActivity);
+        }
+    }
+
     fn tick(&mut self, cx: &mut Context<Self>) {
         let now = Instant::now();
         let budget = self.next_drain_budget();
@@ -2605,14 +2818,7 @@ impl TerminalPane {
             (report, events, mode)
         };
         self.last_drain_budget_exhausted = report.budget_exhausted;
-        if report.changed {
-            self.last_terminal_activity = now;
-            // Parsing stays current for every terminal, but the expensive immutable snapshot is
-            // built only when GPUI actually renders this pane.
-            self.snapshot_dirty = true;
-            self.mark_terminal_content_changed(cx);
-            cx.emit(TerminalPaneEvent::OutputActivity);
-        }
+        self.apply_terminal_drain_activity(&report, now, cx);
         let render_stats_changed = self.update_render_stats(&report, now);
 
         let mut event_effect = TerminalEventEffect::default();
@@ -2669,12 +2875,13 @@ impl TerminalPane {
             CURSOR_BLINK_INTERVAL
                 .saturating_sub(now.saturating_duration_since(self.last_cursor_blink))
         });
-        let (mode, ssh_still_connecting, process_refresh_supported) = {
+        let (mode, ssh_still_connecting, process_refresh_supported, pending_output_flush_delay) = {
             let terminal = self.terminal.lock();
             (
                 terminal.mode(),
                 terminal.kind() == TerminalSessionKind::SshPty && !terminal.is_interactive(),
                 terminal.process_info_probe().is_some(),
+                terminal.pending_output_flush_delay(),
             )
         };
         let needs_process_refresh = (self.settings.free_type_mode
@@ -2710,6 +2917,7 @@ impl TerminalPane {
             process_refresh_remaining,
             pending_cwd_remaining,
             editor_expiry_remaining,
+            pending_output_flush_delay,
         )
     }
 
@@ -3030,7 +3238,31 @@ impl TerminalPane {
                 self.reset_cursor_blink();
                 TerminalEventEffect::notify()
             }
+            TerminalEvent::TmuxPaneSelected { selected } => {
+                self.finish_tmux_mouse_selection(selected, cx);
+                TerminalEventEffect::notify()
+            }
+            TerminalEvent::ProcessingFailed => {
+                self.cancel_pending_tmux_mouse();
+                self.notify_trzsz_connection_lost_if_active();
+                self.notify_modem_connection_lost_if_active();
+                self.terminal_exited = true;
+                self.emit_trzsz_notice(
+                    self.preferences.processing_failed_message.clone(),
+                    None,
+                    TerminalNoticeVariant::Error,
+                );
+                TerminalEventEffect::notify()
+            }
+            TerminalEvent::StartupFailed => {
+                self.cancel_pending_tmux_mouse();
+                self.notify_trzsz_connection_lost_if_active();
+                self.notify_modem_connection_lost_if_active();
+                self.terminal_exited = true;
+                TerminalEventEffect::notify()
+            }
             TerminalEvent::ChildExited(code) => {
+                self.cancel_pending_tmux_mouse();
                 self.notify_trzsz_connection_lost_if_active();
                 self.notify_modem_connection_lost_if_active();
                 let should_emit_exit = !self.terminal_exited;
@@ -3061,6 +3293,10 @@ impl TerminalPane {
                     },
                     cx,
                 );
+                TerminalEventEffect::notify()
+            }
+            TerminalEvent::ModemTransferStartFailed => {
+                self.manual_modem_transfer_failed(cx);
                 TerminalEventEffect::notify()
             }
             TerminalEvent::ModemTransferPrompt { request, transfer } => {
@@ -3150,80 +3386,81 @@ impl TerminalPane {
                 if let TerminalCommandMarkEvent::Closed(mark) = &event {
                     self.observe_terminal_cwd_action_from_closed_command_mark(mark, cx);
                 }
-                if !self.settings.command_marks_enabled {
-                    self.clear_visual_command_marks();
-                } else {
-                    match event {
-                        TerminalCommandMarkEvent::Created(mut mark) => {
-                            if mark.detection_source
-                                == TerminalCommandMarkDetectionSource::ShellIntegration
-                                && let Some((index, submitted_by)) =
-                                    self.shell_integration_dedup_candidate(&mark)
-                            {
-                                let shell_command_id = mark.command_id.clone();
-                                let frontend_command_id =
-                                    self.command_marks[index].command_id.clone();
-                                mark.command_id = frontend_command_id.clone();
-                                mark.submitted_by = Some(submitted_by);
-                                self.command_marks.remove(index);
-                                self.command_mark_id_aliases
-                                    .insert(shell_command_id, frontend_command_id);
-                            }
-                            if let Some(command) = mark.command.as_deref() {
-                                // Shell integration is the terminal-owned
-                                // submitted-command source. Feed it to the
-                                // privilege tracker so bare sudo prompts do not
-                                // depend on lossy key/IME reconstruction.
-                                let previous_state_generation =
-                                    self.privilege_prompt_tracker.state_generation();
-                                self.privilege_prompt_tracker
-                                    .observe_submitted_command(command, Instant::now());
-                                self.finish_privilege_prompt_tracker_update(
-                                    previous_state_generation,
-                                    cx,
-                                );
-                            }
-                            self.command_fact_ledger.create_from_mark(&mark);
+                // Command boundaries drive AI ownership even when their visual marks are hidden.
+                match event {
+                    TerminalCommandMarkEvent::Created(mut mark) => {
+                        if mark.detection_source
+                            == TerminalCommandMarkDetectionSource::ShellIntegration
+                            && let Some((index, submitted_by)) =
+                                self.shell_integration_dedup_candidate(&mark)
+                        {
+                            let shell_command_id = mark.command_id.clone();
+                            let frontend_command_id = self.command_marks[index].command_id.clone();
+                            mark.command_id = frontend_command_id.clone();
+                            mark.submitted_by = Some(submitted_by);
+                            self.command_marks.remove(index);
+                            self.command_mark_id_aliases
+                                .insert(shell_command_id, frontend_command_id);
+                        }
+                        if let Some(command) = mark.command.as_deref() {
+                            // Shell integration is the terminal-owned
+                            // submitted-command source. Feed it to the
+                            // privilege tracker so bare sudo prompts do not
+                            // depend on lossy key/IME reconstruction.
+                            let previous_state_generation =
+                                self.privilege_prompt_tracker.state_generation();
+                            self.privilege_prompt_tracker
+                                .observe_submitted_command(command, Instant::now());
+                            self.finish_privilege_prompt_tracker_update(
+                                previous_state_generation,
+                                cx,
+                            );
+                        }
+                        self.command_fact_ledger.create_from_mark(&mark);
+                        self.command_marks.push(mark);
+                        self.trim_command_marks();
+                    }
+                    TerminalCommandMarkEvent::Closed(mut mark) => {
+                        if let Some(frontend_command_id) =
+                            self.command_mark_id_aliases.remove(&mark.command_id)
+                        {
+                            mark.command_id = frontend_command_id;
+                        }
+                        self.command_fact_ledger.close_from_mark(&mark);
+                        if let Some(existing) = self
+                            .command_marks
+                            .iter_mut()
+                            .find(|candidate| candidate.command_id == mark.command_id)
+                        {
+                            *existing = mark;
+                        } else {
                             self.command_marks.push(mark);
-                            self.trim_command_marks();
-                        }
-                        TerminalCommandMarkEvent::Closed(mut mark) => {
-                            if let Some(frontend_command_id) =
-                                self.command_mark_id_aliases.remove(&mark.command_id)
-                            {
-                                mark.command_id = frontend_command_id;
-                            }
-                            self.command_fact_ledger.close_from_mark(&mark);
-                            if let Some(existing) = self
-                                .command_marks
-                                .iter_mut()
-                                .find(|candidate| candidate.command_id == mark.command_id)
-                            {
-                                *existing = mark;
-                            } else {
-                                self.command_marks.push(mark);
-                            }
-                        }
-                        TerminalCommandMarkEvent::Reset => {
-                            self.clear_visual_command_marks();
                         }
                     }
-                    if let Some(selected_id) = &self.selected_command_mark_id
-                        && !self
-                            .command_marks
-                            .iter()
-                            .any(|mark| mark.command_id == *selected_id)
-                    {
-                        self.selected_command_mark_id = None;
+                    TerminalCommandMarkEvent::Reset => {
+                        self.clear_visual_command_marks();
                     }
-                    if let Some(hovered_id) = &self.hovered_command_mark_id
-                        && !self
-                            .command_marks
-                            .iter()
-                            .any(|mark| mark.command_id == *hovered_id)
-                    {
-                        self.hovered_command_mark_id = None;
+                    TerminalCommandMarkEvent::HistoryTrimmed { lines } => {
+                        self.command_marks
+                            .retain_mut(|mark| mark.trim_history(lines));
+                        self.command_fact_ledger.trim_history(lines);
                     }
+                }
+                if let Some(selected_id) = &self.selected_command_mark_id
+                    && !self
+                        .command_marks
+                        .iter()
+                        .any(|mark| mark.command_id == *selected_id)
+                {
+                    self.selected_command_mark_id = None;
+                }
+                if let Some(hovered_id) = &self.hovered_command_mark_id
+                    && !self
+                        .command_marks
+                        .iter()
+                        .any(|mark| mark.command_id == *hovered_id)
+                {
+                    self.hovered_command_mark_id = None;
                 }
                 self.command_marks_render_cache_dirty = true;
                 TerminalEventEffect::notify()
@@ -3289,7 +3526,8 @@ impl TerminalPane {
     }
 
     pub(crate) fn send_user_protocol_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        if self.send_user_protocol_bytes_without_broadcast(bytes, cx) {
+        let secret_entry = self.input_answers_privilege_prompt(bytes);
+        if self.send_user_protocol_bytes_without_broadcast(bytes, cx) && !secret_entry {
             self.broadcast_user_input(TerminalBroadcastInputKind::Protocol, bytes, cx);
         }
     }
@@ -3504,7 +3742,8 @@ impl TerminalPane {
             cx.notify();
             return;
         }
-        if self.commit_text_without_broadcast(text, cx) {
+        let secret_entry = self.input_answers_privilege_prompt(text.as_bytes());
+        if self.commit_text_without_broadcast(text, cx) && !secret_entry {
             self.broadcast_user_input(TerminalBroadcastInputKind::Text, text.as_bytes(), cx);
         }
     }
@@ -3692,6 +3931,10 @@ impl TerminalPane {
         TERMINAL_CONTENT_PADDING + self.timestamp_gutter_width() + self.command_mark_gutter_width()
     }
 
+    fn terminal_horizontal_scroll_limit(&self) -> Pixels {
+        px(self.timestamp_gutter_width())
+    }
+
     fn command_mark_gutter_width(&self) -> f32 {
         if self.settings.command_marks_enabled {
             TERMINAL_COMMAND_MARK_GUTTER_WIDTH
@@ -3708,12 +3951,19 @@ impl TerminalPane {
         // cell metrics. Expose pane-local facts rather than making workspace
         // code duplicate terminal layout math.
         Some(TerminalCursorAnchor {
-            x: f32::from(cursor_bounds.origin.x) + self.terminal_content_padding_x(),
-            y: f32::from(cursor_bounds.origin.y) + TERMINAL_CONTENT_PADDING,
+            x: self.preferences.padding_horizontal
+                + f32::from(cursor_bounds.origin.x)
+                + self.terminal_content_padding_x()
+                - f32::from(self.horizontal_scroll_offset_px),
+            y: self.preferences.padding_vertical
+                + f32::from(cursor_bounds.origin.y)
+                + TERMINAL_CONTENT_PADDING,
             line_height: self.metrics.line_height_f32(),
             char_width: self.metrics.cell_width_f32(),
-            container_width: f32::from(bounds.size.width),
-            container_height: f32::from(bounds.size.height),
+            container_width: f32::from(bounds.size.width)
+                + self.preferences.padding_horizontal * 2.0,
+            container_height: f32::from(bounds.size.height)
+                + self.preferences.padding_vertical * 2.0,
         })
     }
 }
@@ -3771,15 +4021,20 @@ fn terminal_timestamp_label(hour: u32, minute: u32, second: u32, millis: u32) ->
 }
 
 fn record_timestampable_snapshot_rows(
-    row_timestamps: &mut HashMap<u64, TerminalRowTimestamp>,
+    store: &mut TerminalRowTimestampStore,
     snapshot: &TerminalSnapshot,
     label: &str,
 ) {
     for row in &snapshot.lines {
+        let key = terminal_row_timestamp_identity(row);
+        if key == 0 {
+            continue;
+        }
         // The snapshot signature is a cheap invalidation key. Cursor-only changes
         // still fall through to the content signature comparison below.
-        if row_timestamps
-            .get(&row.line_id)
+        if store
+            .entries
+            .get(&key)
             .is_some_and(|timestamp| timestamp.source_signature == row.signature)
         {
             continue;
@@ -3787,15 +4042,15 @@ fn record_timestampable_snapshot_rows(
 
         if terminal_row_has_timestamp_content(row) {
             let timestamp_signature = terminal_row_timestamp_signature(row);
-            if let Some(timestamp) = row_timestamps.get_mut(&row.line_id) {
+            if let Some(timestamp) = store.entries.get_mut(&key) {
                 if timestamp.signature != timestamp_signature {
                     timestamp.label = label.to_string();
                     timestamp.signature = timestamp_signature;
                 }
                 timestamp.source_signature = row.signature;
             } else {
-                row_timestamps.insert(
-                    row.line_id,
+                store.entries.insert(
+                    key,
                     TerminalRowTimestamp {
                         label: label.to_string(),
                         signature: timestamp_signature,
@@ -3806,41 +4061,25 @@ fn record_timestampable_snapshot_rows(
         } else {
             // Blank viewport rows are recycled later. Removing their metadata
             // prevents new output from inheriting a stale line-modification time.
-            row_timestamps.remove(&row.line_id);
+            store.entries.remove(&key);
         }
     }
 }
 
 fn trim_row_timestamp_history(
     row_timestamps: &mut HashMap<u64, TerminalRowTimestamp>,
-    retained_min_line: &mut Option<u64>,
-    min_line: u64,
+    retained_rows: usize,
 ) {
-    let Some(previous_min_line) = *retained_min_line else {
-        row_timestamps.retain(|line, _| *line >= min_line);
-        *retained_min_line = Some(min_line);
-        return;
-    };
-
-    if min_line <= previous_min_line {
-        // Snapshot identity can restart when a pane is rebuilt. New rows may then be inserted
-        // below the former boundary, so restart incremental trimming from this identity.
-        *retained_min_line = Some(min_line);
+    // IDs are process-wide; other terminals can make them arbitrarily sparse.
+    // Batch pruning bounds memory without scanning the cache on every frame.
+    if row_timestamps.len() <= retained_rows.saturating_add(1024) {
         return;
     }
-
-    let advanced_lines =
-        usize::try_from(min_line.saturating_sub(previous_min_line)).unwrap_or(usize::MAX);
-    if advanced_lines < row_timestamps.len() {
-        // Normal scrolling advances by only a few rows. Removing those keys is
-        // cheaper than scanning the entire retained timestamp history.
-        for line in previous_min_line..min_line {
-            row_timestamps.remove(&line);
-        }
-    } else {
-        row_timestamps.retain(|line, _| *line >= min_line);
-    }
-    *retained_min_line = Some(min_line);
+    let mut identities: Vec<_> = row_timestamps.keys().copied().collect();
+    let remove_count = identities.len() - retained_rows;
+    identities.select_nth_unstable(remove_count);
+    let min_identity = identities[remove_count];
+    row_timestamps.retain(|identity, _| *identity >= min_identity);
 }
 
 fn terminal_row_timestamp_signature(row: &TerminalRow) -> u64 {
@@ -3925,6 +4164,7 @@ mod tests {
                 false,
                 Duration::from_millis(8),
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -4065,6 +4305,96 @@ mod tests {
     }
 
     #[gpui::test]
+    fn terminal_padding_updates_layout_grid_and_input_coordinates(cx: &mut TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            TerminalPane::new_recording_playback(
+                DEFAULT_COLS,
+                DEFAULT_ROWS,
+                TerminalUiPreferences::default(),
+                window,
+                cx,
+            )
+            .expect("test terminal pane")
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(320.0)));
+
+        for (horizontal, vertical) in [(1.0, 1.0), (24.0, 12.0), (0.0, 0.0)] {
+            pane.update(cx, |pane, cx| {
+                let mut preferences = pane.preferences.clone();
+                preferences.padding_horizontal = horizontal;
+                preferences.padding_vertical = vertical;
+                pane.set_preferences(preferences, cx);
+            });
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+
+            pane.update(cx, |pane, cx| {
+                let bounds = pane.bounds.expect("rendered terminal viewport");
+                assert_eq!(bounds.origin, gpui::point(px(horizontal), px(vertical)));
+                assert_eq!(
+                    bounds.size,
+                    gpui::size(px(640.0 - horizontal * 2.0), px(320.0 - vertical * 2.0))
+                );
+                pane.flush_pending_pty_resize(pane.pty_resize_generation, cx);
+                let cell_width = pane.metrics.cell_width_f32();
+                let line_height = pane.metrics.line_height_f32();
+                // Font advances may round just below an integer cell count.
+                // The resized grid must fit, with less than one cell left over.
+                let available_width = 640.0 - horizontal * 2.0 - SCROLLBAR_RESERVED_WIDTH;
+                let available_height = 320.0 - vertical * 2.0;
+                let remaining_width = available_width - pane.snapshot.cols as f32 * cell_width;
+                let remaining_height = available_height - pane.snapshot.rows as f32 * line_height;
+                assert!(remaining_width >= -0.001 && remaining_width < cell_width - 0.001);
+                assert!(remaining_height >= -0.001 && remaining_height < line_height - 0.001);
+
+                let position =
+                    bounds.origin + gpui::point(px(cell_width * 3.5), px(line_height * 2.5));
+                assert_eq!(
+                    pane.terminal_point_for_position(position),
+                    TerminalPoint { row: 2, col: 3 }
+                );
+                // Selection beginning in the left padding must include column zero.
+                let padding_position = gpui::point(px(0.0), position.y);
+                pane.handle_mouse_down(
+                    &gpui::MouseDownEvent {
+                        position: padding_position,
+                        button: gpui::MouseButton::Left,
+                        modifiers: gpui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    cx,
+                );
+                assert_eq!(
+                    pane.selection.expect("padding starts selection").anchor.col,
+                    0
+                );
+                let anchor = pane.cursor_anchor().expect("cursor anchor");
+                assert_eq!(
+                    anchor.x,
+                    horizontal + pane.snapshot.cursor_col as f32 * cell_width
+                );
+                assert_eq!(
+                    anchor.y,
+                    vertical + pane.snapshot.cursor_row as f32 * line_height
+                );
+                assert_eq!(
+                    (anchor.container_width, anchor.container_height),
+                    (640.0, 320.0)
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
     fn direct_user_input_broadcasts_once_for_each_input_path(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
         let pane = cx.update(|window, cx| {
@@ -4117,6 +4447,196 @@ mod tests {
     }
 
     #[gpui::test]
+    fn redraw_only_reports_do_not_emit_unread_output_activity(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let received = events.clone();
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&pane, move |_, event, _| {
+                received.borrow_mut().push(event.clone());
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.apply_terminal_drain_activity(
+                &TerminalDrainReport {
+                    changed: true,
+                    ..Default::default()
+                },
+                Instant::now(),
+                cx,
+            );
+            assert!(pane.snapshot_dirty);
+        });
+        cx.run_until_parked();
+        assert!(!events.borrow().contains(&TerminalPaneEvent::OutputActivity));
+        pane.update(cx, |pane, cx| {
+            pane.apply_terminal_drain_activity(
+                &TerminalDrainReport {
+                    changed: true,
+                    drained_bytes: 12,
+                    output_presented: true,
+                    ..Default::default()
+                },
+                Instant::now(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(!events.borrow().contains(&TerminalPaneEvent::OutputActivity));
+        pane.update(cx, |pane, cx| {
+            pane.apply_terminal_drain_activity(
+                &TerminalDrainReport {
+                    changed: true,
+                    drained_bytes: 12,
+                    ..Default::default()
+                },
+                Instant::now(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| **event == TerminalPaneEvent::OutputActivity)
+                .count(),
+            1
+        );
+    }
+
+    #[gpui::test]
+    fn hidden_command_marks_still_report_ai_command_completion(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences {
+                        command_marks_enabled: false,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            let id = pane
+                .begin_command_mark("printf done", TerminalCommandMarkDetectionSource::Ai, cx)
+                .expect("AI completion tracking must not depend on visual marks");
+            assert_eq!(
+                pane.ai_command_status(&id),
+                Some(crate::TerminalCommandFactStatus::Open)
+            );
+            assert_eq!(pane.command_mark_gutter_width(), 0.0);
+            let mut shell = pane.command_marks.last().unwrap().clone();
+            shell.command_id = "shell-command".into();
+            shell.detection_source = TerminalCommandMarkDetectionSource::ShellIntegration;
+            pane.handle_terminal_event(
+                TerminalEvent::CommandMark(TerminalCommandMarkEvent::Created(shell.clone())),
+                cx,
+            );
+            // Reapplying hidden-mark preferences must keep the shell/frontend ID association.
+            pane.set_preferences(pane.preferences.clone(), cx);
+            shell.is_closed = true;
+            shell.closed_by = Some(TerminalCommandMarkClosedBy::ShellIntegration);
+            shell.end_line = Some(shell.start_line + 1);
+            shell.exit_code = Some(0);
+            shell.finished_at = Some(shell.started_at + 10);
+            pane.handle_terminal_event(
+                TerminalEvent::CommandMark(TerminalCommandMarkEvent::Closed(shell)),
+                cx,
+            );
+            assert_eq!(
+                pane.ai_command_status(&id),
+                Some(crate::TerminalCommandFactStatus::Closed)
+            );
+            let records = pane.ai_command_records();
+            let record = records
+                .iter()
+                .find(|record| record.command_id == id)
+                .unwrap();
+            assert_eq!(
+                (&*record.command, record.exit_code),
+                ("printf done", Some(0))
+            );
+            assert_eq!(pane.command_mark_gutter_width(), 0.0);
+        });
+    }
+
+    #[gpui::test]
+    fn privilege_answers_stay_local_but_interrupts_still_take_over(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        let recorder = cx.new(|_| TerminalBroadcastRecorder {
+            delivered: Vec::new(),
+        });
+        let sink = recorder.downgrade();
+        pane.update(cx, |pane, cx| {
+            pane.test_accepts_input = true;
+            pane.set_input_broadcaster(Some(Rc::new(move |kind, bytes, cx| {
+                sink.update(cx, |sink, _| sink.delivered.push((kind, bytes.to_vec())))
+                    .unwrap();
+            })));
+            let prompt =
+                oxideterm_terminal::detect_terminal_privilege_prompt("[sudo] password for deploy:")
+                    .unwrap();
+            pane.privilege_prompt_tracker.observe_terminal_prompt_event(
+                oxideterm_terminal::TerminalPrivilegePromptEvent::Visible {
+                    prompt: prompt.clone(),
+                    retry: false,
+                },
+                Instant::now(),
+            );
+            assert!(pane.ai_waiting_for_secret());
+            pane.commit_text("secret", cx);
+            pane.paste_text("-suffix", cx);
+            assert!(pane.ai_waiting_for_secret());
+            pane.send_user_protocol_bytes(b"\r", cx);
+            assert!(!pane.ai_waiting_for_secret());
+            pane.privilege_prompt_tracker.observe_terminal_prompt_event(
+                oxideterm_terminal::TerminalPrivilegePromptEvent::Visible {
+                    prompt,
+                    retry: true,
+                },
+                Instant::now(),
+            );
+            pane.send_user_protocol_bytes(b"\x03", cx);
+            assert!(!pane.ai_waiting_for_secret());
+        });
+        assert_eq!(
+            recorder.read_with(cx, |sink, _| sink.delivered.clone()),
+            vec![(TerminalBroadcastInputKind::Protocol, vec![3])]
+        );
+    }
+
+    #[gpui::test]
     fn history_suggestions_follow_prompt_capability_without_requiring_direct_focus(
         cx: &mut TestAppContext,
     ) {
@@ -4151,6 +4671,24 @@ mod tests {
                     .map(|candidate| candidate.command)
                     .collect::<Vec<_>>(),
                 ["docker ps"]
+            );
+
+            let mut preferences = pane.preferences.clone();
+            preferences.autosuggest_enabled = false;
+            pane.set_preferences(preferences.clone(), cx);
+            assert!(
+                pane.terminal_autosuggest_candidates().is_empty(),
+                "disabled suggestions remained visible"
+            );
+            preferences.autosuggest_enabled = true;
+            pane.set_preferences(preferences, cx);
+            assert_eq!(
+                pane.terminal_autosuggest_candidates()
+                    .into_iter()
+                    .map(|candidate| candidate.command)
+                    .collect::<Vec<_>>(),
+                ["docker ps"],
+                "toggling suggestions must preserve the draft and history"
             );
 
             pane.observe_autosuggest_input_bytes(b"\r", cx);
@@ -4218,7 +4756,7 @@ mod tests {
         }
         let mut row = TerminalRow {
             line_id: absolute_line.max(0) as u64,
-            source_id: 0,
+            source_id: absolute_line.max(0) as usize,
             absolute_line,
             cells: Arc::new(cells),
             wrapped: false,
@@ -4289,26 +4827,25 @@ mod tests {
 
     #[test]
     fn row_timestamps_track_last_modified_nonblank_content() {
-        let mut row_timestamps = HashMap::new();
+        let mut store = TerminalRowTimestampStore::default();
         let blank_snapshot = timestamp_test_snapshot(timestamp_test_row(42, "   "));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &blank_snapshot, "10:00:00");
+        record_timestampable_snapshot_rows(&mut store, &blank_snapshot, "10:00:00");
 
-        assert!(!row_timestamps.contains_key(&42));
+        // This fixture uses emulator source identity 42.
+        assert!(!store.entries.contains_key(&42));
 
         let content_snapshot = timestamp_test_snapshot(timestamp_test_row(42, "ls"));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &content_snapshot, "10:00:01");
+        record_timestampable_snapshot_rows(&mut store, &content_snapshot, "10:00:01");
 
         assert_eq!(
-            row_timestamps
-                .get(&42)
-                .map(|timestamp| timestamp.label.as_str()),
+            store.get(42).map(|timestamp| timestamp.label.as_str()),
             Some("10:00:01")
         );
 
         let unchanged_snapshot =
             timestamp_test_snapshot(timestamp_test_row_with_cursor(42, "ls", Some(1), true));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &unchanged_snapshot, "10:00:02");
-        let unchanged_timestamp = row_timestamps.get(&42).expect("timestamped row");
+        record_timestampable_snapshot_rows(&mut store, &unchanged_snapshot, "10:00:02");
+        let unchanged_timestamp = store.get(42).expect("timestamped row");
         assert_eq!(unchanged_timestamp.label, "10:00:01");
         assert_eq!(
             unchanged_timestamp.source_signature,
@@ -4316,11 +4853,9 @@ mod tests {
         );
 
         let changed_snapshot = timestamp_test_snapshot(timestamp_test_row(42, "pwd"));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &changed_snapshot, "10:00:03");
+        record_timestampable_snapshot_rows(&mut store, &changed_snapshot, "10:00:03");
         assert_eq!(
-            row_timestamps
-                .get(&42)
-                .map(|timestamp| timestamp.label.as_str()),
+            store.get(42).map(|timestamp| timestamp.label.as_str()),
             Some("10:00:03")
         );
 
@@ -4329,38 +4864,100 @@ mod tests {
         assert_eq!(label.chars().count(), TERMINAL_TIMESTAMP_LABEL_CELLS);
 
         let cleared_snapshot = timestamp_test_snapshot(timestamp_test_row(42, ""));
-        record_timestampable_snapshot_rows(&mut row_timestamps, &cleared_snapshot, "10:00:04");
+        record_timestampable_snapshot_rows(&mut store, &cleared_snapshot, "10:00:04");
 
-        assert!(!row_timestamps.contains_key(&42));
+        assert!(!store.entries.contains_key(&42));
     }
 
     #[test]
-    fn row_timestamp_history_trims_incrementally_and_handles_rewind() {
-        let timestamp = |line: u64| TerminalRowTimestamp {
-            label: line.to_string(),
-            signature: line,
-            source_signature: line,
+    fn timestamp_identity_survives_burst_output_and_viewport_jumps() {
+        let mut terminal =
+            TerminalSession::recording_playback(20, 3, GraphicsOptions::default(), 10);
+        terminal.feed_recording_output(b"same\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nsame\r\nkept\r\nsame");
+        let before = terminal.snapshot();
+        let kept = before
+            .lines
+            .iter()
+            .find(|row| row.text().trim() == "kept")
+            .unwrap();
+        let original_key = terminal_row_timestamp_identity(kept);
+        let mut store = TerminalRowTimestampStore::default();
+        record_timestampable_snapshot_rows(&mut store, &before, "old");
+        terminal.feed_recording_output(b"\r\nsame\r\nsame\r\nsame\r\nsame");
+        let after = terminal.snapshot();
+        record_timestampable_snapshot_rows(&mut store, &after, "new");
+        for row in after.lines.iter().filter(|row| row.text().trim() == "same") {
+            assert_eq!(
+                store
+                    .get(terminal_row_timestamp_identity(row))
+                    .unwrap()
+                    .label,
+                "new"
+            );
+        }
+        terminal.scroll_to_top();
+        let top = terminal.snapshot();
+        record_timestampable_snapshot_rows(&mut store, &top, "scroll");
+        terminal.scroll_to_display_offset(4);
+        let historical = terminal.snapshot();
+        let kept = historical
+            .lines
+            .iter()
+            .find(|row| row.text().trim() == "kept")
+            .unwrap();
+        record_timestampable_snapshot_rows(&mut store, &historical, "scroll");
+        assert_eq!(terminal_row_timestamp_identity(kept), original_key);
+        assert_eq!(store.get(original_key).unwrap().label, "old");
+    }
+
+    #[test]
+    fn timestamp_identity_follows_local_line_deletion_without_moving_other_rows() {
+        let mut terminal =
+            TerminalSession::recording_playback(20, 4, GraphicsOptions::default(), 10);
+        terminal.feed_recording_output(b"fixed\r\nremoved\r\nkept\r\nlast");
+        let before = terminal.snapshot();
+        let mut store = TerminalRowTimestampStore::default();
+        record_timestampable_snapshot_rows(&mut store, &before, "old");
+        terminal.feed_recording_output(b"\x1b[2;1H\x1b[M");
+        let after = terminal.snapshot();
+        assert_eq!(after.scrollback_lines, before.scrollback_lines);
+        record_timestampable_snapshot_rows(&mut store, &after, "new");
+        for text in ["fixed", "kept", "last"] {
+            let row = after
+                .lines
+                .iter()
+                .find(|row| row.text().trim() == text)
+                .unwrap();
+            assert_eq!(
+                store
+                    .get(terminal_row_timestamp_identity(row))
+                    .unwrap()
+                    .label,
+                "old",
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_cache_bounds_sparse_identities_and_revisited_history() {
+        let timestamp = |id: u64| TerminalRowTimestamp {
+            label: id.to_string(),
+            signature: id,
+            source_signature: id,
         };
-        let mut row_timestamps = (0..6)
-            .map(|line| (line, timestamp(line)))
+        let mut entries = (0..1100)
+            .map(|id| (id * 1000, timestamp(id)))
             .collect::<HashMap<_, _>>();
-        let mut retained_min_line = None;
-
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 2);
-        assert_eq!(retained_min_line, Some(2));
-        assert_eq!(row_timestamps.len(), 4);
-        assert!(row_timestamps.keys().all(|line| *line >= 2));
-
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 4);
-        assert_eq!(retained_min_line, Some(4));
-        assert_eq!(row_timestamps.len(), 2);
-        assert!(row_timestamps.keys().all(|line| *line >= 4));
-
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 1);
-        row_timestamps.insert(1, timestamp(1));
-        trim_row_timestamp_history(&mut row_timestamps, &mut retained_min_line, 3);
-        assert_eq!(retained_min_line, Some(3));
-        assert!(!row_timestamps.contains_key(&1));
+        trim_row_timestamp_history(&mut entries, 50);
+        assert_eq!(entries.len(), 50);
+        assert!(entries.contains_key(&1_099_000));
+        for id in 0..1100 {
+            entries.insert(id, timestamp(id));
+        }
+        trim_row_timestamp_history(&mut entries, 50);
+        assert_eq!(entries.len(), 50);
+        assert!(!entries.contains_key(&1));
     }
 
     #[gpui::test]
@@ -4415,3 +5012,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "app/ssh_worker_tests.rs"]
+mod ssh_worker_tests;

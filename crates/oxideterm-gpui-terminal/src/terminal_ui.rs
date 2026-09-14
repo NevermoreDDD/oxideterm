@@ -9,11 +9,11 @@ use oxideterm_settings::{
     TerminalBackspaceSequence, TerminalDeleteSequence, TerminalSemanticScheme,
 };
 use oxideterm_terminal::{
-    TerminalColor, TerminalCursorShape, TerminalEncoding, TrzszTransferPolicy,
+    TerminalColor, TerminalCursorShape, TerminalEncoding, TerminalRow, TrzszTransferPolicy,
 };
 use oxideterm_terminal_semantic::{
-    CompiledSemanticScheme, SemanticScheme, SemanticSchemeDocument, SemanticShellDialect,
-    compile_scheme_document, compiled_builtin_scheme,
+    CompiledSemanticScheme, SemanticClass, SemanticScheme, SemanticSchemeDocument,
+    SemanticShellDialect, compile_scheme_document, compiled_builtin_scheme,
 };
 use oxideterm_theme::{ThemeTokens, default_tokens};
 
@@ -32,10 +32,13 @@ pub const TERMINAL_FONT: &str = oxideterm_settings::JETBRAINS_MONO_SUBSET_FAMILY
 pub(crate) const TERMINAL_FONT_SIZE: f32 = 14.0;
 pub(crate) const TERMINAL_FONT_WEIGHT: f32 = 400.0;
 pub(crate) const TERMINAL_LINE_HEIGHT_RATIO: f32 = 1.2;
+// User padding is applied outside the element; these coordinates are grid-local.
 pub(crate) const TERMINAL_CONTENT_PADDING: f32 = 0.0;
-// Command marks no longer reserve a left gutter; column-zero terminal text must
-// start at the pane edge.
+// Command marks do not reserve additional space before column zero.
 pub(crate) const TERMINAL_COMMAND_MARK_GUTTER_WIDTH: f32 = 0.0;
+const NESTED_SEMANTIC_COLOR_COUNT: u8 = 6;
+const TERMINAL_SEMANTIC_ERROR_LINE_BAND_OPACITY: f32 = 0.11;
+const TERMINAL_SEMANTIC_WARNING_LINE_BAND_OPACITY: f32 = 0.08;
 pub(crate) const OXIDETERM_TERMINAL_BACKGROUND: u32 = 0x0d0f12;
 pub(crate) const OXIDETERM_TERMINAL_FOREGROUND: u32 = 0xe6e8eb;
 pub(crate) const SCROLLBAR_WIDTH: f32 = 10.0;
@@ -75,6 +78,8 @@ pub struct TerminalUiPreferences {
     pub font_size: f32,
     pub font_weight: f32,
     pub line_height: f32,
+    pub padding_horizontal: f32,
+    pub padding_vertical: f32,
     pub cursor_shape: TerminalCursorShape,
     pub cursor_blink: bool,
     pub scrollback_lines: usize,
@@ -89,10 +94,12 @@ pub struct TerminalUiPreferences {
     pub open_links_with_modifier: bool,
     pub detect_file_paths_as_links: bool,
     pub semantic_coloring: bool,
+    pub selection_highlighting: bool,
     pub semantic_scheme: Arc<CompiledSemanticScheme>,
     pub semantic_shell: SemanticShellDialect,
     pub selection_requires_shift: bool,
     pub free_type_mode: bool,
+    pub autosuggest_enabled: bool,
     pub backspace_sequence: TerminalBackspaceSequence,
     pub delete_sequence: TerminalDeleteSequence,
     pub bidi_enabled: bool,
@@ -108,6 +115,7 @@ pub struct TerminalUiPreferences {
     pub render_policy: EffectiveRenderPolicy,
     pub background: Option<TerminalBackgroundPreferences>,
     pub transparent_background: bool,
+    pub processing_failed_message: String,
     pub paste_labels: TerminalPasteLabels,
     pub kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels,
     pub autosuggest_labels: TerminalAutosuggestLabels,
@@ -192,6 +200,8 @@ impl Default for TerminalUiPreferences {
             font_size: TERMINAL_FONT_SIZE,
             font_weight: TERMINAL_FONT_WEIGHT,
             line_height: TERMINAL_LINE_HEIGHT_RATIO,
+            padding_horizontal: oxideterm_settings::DEFAULT_TERMINAL_PADDING_HORIZONTAL as f32,
+            padding_vertical: oxideterm_settings::DEFAULT_TERMINAL_PADDING_VERTICAL as f32,
             cursor_shape: TerminalCursorShape::Block,
             cursor_blink: true,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
@@ -207,6 +217,7 @@ impl Default for TerminalUiPreferences {
             detect_file_paths_as_links: TERMINAL_DETECT_FILE_PATHS_AS_LINKS,
             // Match persisted settings so standalone terminal views remain opt-in as well.
             semantic_coloring: false,
+            selection_highlighting: false,
             semantic_scheme: resolved_terminal_semantic_scheme(
                 TerminalSemanticScheme::default(),
                 None,
@@ -214,6 +225,7 @@ impl Default for TerminalUiPreferences {
             semantic_shell: SemanticShellDialect::Auto,
             selection_requires_shift: TERMINAL_SELECTION_REQUIRES_SHIFT,
             free_type_mode: TERMINAL_FREE_TYPE_MODE,
+            autosuggest_enabled: true,
             backspace_sequence: TERMINAL_BACKSPACE_SEQUENCE,
             delete_sequence: TERMINAL_DELETE_SEQUENCE,
             bidi_enabled: TERMINAL_BIDI_ENABLED,
@@ -229,6 +241,8 @@ impl Default for TerminalUiPreferences {
             render_policy: EffectiveRenderPolicy::quality(),
             background: None,
             transparent_background: false,
+            processing_failed_message:
+                "Terminal processing stopped. Reconnect this session to continue.".into(),
             paste_labels: TerminalPasteLabels::default(),
             kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels::default(),
             autosuggest_labels: TerminalAutosuggestLabels::default(),
@@ -861,6 +875,86 @@ pub(crate) fn terminal_color_from_hex(hex: u32) -> TerminalColor {
     )
 }
 
+/// Resolves a semantic class through the custom scheme before falling back to terminal colors.
+pub fn terminal_semantic_color(
+    theme: &TerminalUiTheme,
+    class: SemanticClass,
+    semantic_scheme: &CompiledSemanticScheme,
+) -> u32 {
+    if let Some(color) = semantic_scheme
+        .color(class)
+        .and_then(|color| u32::from_str_radix(color.strip_prefix('#')?, 16).ok())
+    {
+        return color;
+    }
+    let terminal = theme.tokens.terminal;
+    match class {
+        SemanticClass::Command => terminal.green,
+        SemanticClass::Keyword => terminal.bright_magenta,
+        SemanticClass::Option => terminal.cyan,
+        SemanticClass::Operator => terminal.bright_yellow,
+        SemanticClass::String => terminal.yellow,
+        SemanticClass::Variable => terminal.bright_blue,
+        SemanticClass::Link => terminal.bright_cyan,
+        SemanticClass::Path => terminal.blue,
+        SemanticClass::Address => terminal.bright_green,
+        SemanticClass::Weekday => terminal.cyan,
+        SemanticClass::Month => terminal.yellow,
+        SemanticClass::Timestamp => terminal.green,
+        SemanticClass::PermissionRead => terminal.bright_cyan,
+        SemanticClass::PermissionWrite => terminal.bright_yellow,
+        SemanticClass::PermissionExecute => terminal.bright_green,
+        SemanticClass::PermissionSpecial => terminal.bright_magenta,
+        SemanticClass::Number => terminal.magenta,
+        SemanticClass::Comment => terminal.bright_black,
+        SemanticClass::Error => terminal.bright_red,
+        SemanticClass::Warning => terminal.bright_yellow,
+        SemanticClass::Success => terminal.bright_green,
+        SemanticClass::Info => terminal.bright_blue,
+    }
+}
+
+/// Resolves presentation variants while keeping the base semantic palette shared by every view.
+pub fn terminal_semantic_variant_color(
+    theme: &TerminalUiTheme,
+    class: SemanticClass,
+    style_variant: Option<u8>,
+    semantic_scheme: &CompiledSemanticScheme,
+) -> u32 {
+    let Some(depth) = style_variant.filter(|_| class == SemanticClass::Operator) else {
+        return terminal_semantic_color(theme, class, semantic_scheme);
+    };
+    let terminal = theme.tokens.terminal;
+    // Six terminal-theme colors keep nested delimiters distinct without creating a second palette.
+    match depth % NESTED_SEMANTIC_COLOR_COUNT {
+        0 => terminal.yellow,
+        1 => terminal.cyan,
+        2 => terminal.green,
+        3 => terminal.blue,
+        4 => terminal.red,
+        _ => terminal.magenta,
+    }
+}
+
+/// Returns the restrained line treatment used for explicit error and warning envelopes.
+pub fn terminal_semantic_line_band(
+    theme: &TerminalUiTheme,
+    class: SemanticClass,
+) -> Option<(u32, f32)> {
+    // Low-opacity bands retain the original terminal background and keep token text dominant.
+    match class {
+        SemanticClass::Error => Some((
+            theme.tokens.ui.error,
+            TERMINAL_SEMANTIC_ERROR_LINE_BAND_OPACITY,
+        )),
+        SemanticClass::Warning => Some((
+            theme.tokens.ui.warning,
+            TERMINAL_SEMANTIC_WARNING_LINE_BAND_OPACITY,
+        )),
+        _ => None,
+    }
+}
+
 impl TerminalUiTheme {
     pub fn new(background: u32, foreground: u32, cursor: u32) -> Self {
         Self {
@@ -944,6 +1038,11 @@ pub(crate) fn terminal_timestamp_gutter_width(metrics: &TerminalMetrics, enabled
     } else {
         0.0
     }
+}
+
+/// Emulator-owned identity is stable across scrolling, eviction and local row movement.
+pub(crate) fn terminal_row_timestamp_identity(row: &TerminalRow) -> u64 {
+    row.source_id as u64
 }
 
 pub(crate) fn fallback_cell_width(window: &mut Window, font: &Font, font_size: Pixels) -> Pixels {
@@ -1043,13 +1142,34 @@ pub(crate) fn terminal_font_features(font_ligatures: bool) -> FontFeatures {
         // GPUI enables the font's default OpenType features when no override is supplied.
         FontFeatures::default()
     } else {
-        FontFeatures::disable_ligatures()
+        // Standard Latin ligatures must follow the same switch as contextual
+        // programming ligatures; required script shaping remains enabled.
+        FontFeatures(Arc::new(
+            ["liga", "clig", "calt"]
+                .map(|tag| (tag.to_owned(), 0))
+                .into(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabling_terminal_ligatures_covers_standard_and_contextual_features() {
+        let features = terminal_font_features(false);
+        for tag in ["calt", "liga", "clig"] {
+            assert!(
+                features
+                    .tag_value_list()
+                    .iter()
+                    .any(|(name, value)| name == tag && *value == 0),
+                "{tag} must be disabled"
+            );
+        }
+        assert!(terminal_font_features(true).tag_value_list().is_empty());
+    }
 
     #[test]
     fn custom_font_stack_uses_first_family_and_preserves_fallback_order() {

@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::CHAT_STREAM_TIMEOUT;
-use super::common::{ParsedStreamLine, stream_sse_response};
+use super::common::{ParsedStreamLine, StreamParseResult, stream_sse_response};
 
 static GEMINI_TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -25,14 +25,13 @@ pub(crate) async fn stream_gemini_completion(
         config.api_key.as_ref().map(|api_key| api_key.as_str()),
     )?;
     let url = gemini_stream_url(&config.base_url, &config.model)?;
-    let client = oxideterm_network_proxy::application_http_client_builder()
-        .context("failed to apply application proxy to AI chat client")?
-        .timeout(CHAT_STREAM_TIMEOUT)
-        .build()
-        .context("failed to create Gemini chat client")?;
+    // Reuse the application pool while keeping the query-string API key request-scoped.
+    let client = oxideterm_network_proxy::application_http_client()
+        .context("failed to acquire application Gemini chat client")?;
     let body = gemini_chat_body(&config, &messages);
     let response = client
         .post(&url)
+        .timeout(CHAT_STREAM_TIMEOUT)
         // Gemini requires the API key as a query parameter. Let reqwest attach
         // it to the request and strip URLs from transport errors below.
         .query(&[("alt", "sse"), ("key", api_key)])
@@ -40,18 +39,17 @@ pub(crate) async fn stream_gemini_completion(
         .json(&body)
         .send()
         .await
-        .map_err(|error| {
-            anyhow!(
-                "failed to connect to Gemini provider: {}",
-                error.without_url()
-            )
-        })?;
+        .map_err(|error| anyhow::Error::new(error.without_url()))?;
     if !response.status().is_success() {
+        super::retry::check_transient_response(&response)?;
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
         return Err(anyhow!(parse_gemini_error(status, &error_text)));
     }
-    let _ = stream_sse_response(response, &events, parse_gemini_data_line).await?;
+    let result = stream_sse_response(response, &events, parse_gemini_data_line).await?;
+    if !matches!(result, StreamParseResult::Done) {
+        return Err(anyhow!("ai_stream_interrupted"));
+    }
     let _ = events.send(AiStreamEvent::Done);
     Ok(())
 }
@@ -280,51 +278,78 @@ pub(crate) fn parse_gemini_data_line(line: &str) -> ParsedStreamLine {
     }
 
     let mut events = Vec::new();
-    if let Ok(json) = serde_json::from_str::<Value>(data)
-        && let Some(parts) = json
+    if let Ok(json) = serde_json::from_str::<Value>(data) {
+        if let Some(usage) = json.get("usageMetadata") {
+            events.push(AiStreamEvent::Usage {
+                input_tokens: usage.get("promptTokenCount").and_then(Value::as_u64),
+                output_tokens: usage
+                    .get("candidatesTokenCount")
+                    .and_then(Value::as_u64)
+                    .map(|tokens| {
+                        tokens.saturating_add(
+                            usage
+                                .get("thoughtsTokenCount")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
+                        )
+                    }),
+            });
+        }
+        if let Some(parts) = json
             .get("candidates")
             .and_then(Value::as_array)
             .and_then(|candidates| candidates.first())
             .and_then(|candidate| candidate.get("content"))
             .and_then(|content| content.get("parts"))
             .and_then(Value::as_array)
-    {
-        for part in parts {
-            // Gemini attaches thoughtSignature to the part itself. Forward the
-            // complete part before projecting its visible text or tool call.
-            events.push(AiStreamEvent::ProviderResponsePart {
-                provider_type: "gemini".to_string(),
-                part: part.clone(),
-            });
-            if let Some(text) = part
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-            {
-                events.push(AiStreamEvent::Content(text.to_string()));
-            }
-            if let Some(function_call) = part.get("functionCall") {
-                let id = format!(
-                    "gemini-{}",
-                    GEMINI_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
-                );
-                let name = function_call
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let arguments = function_call
-                    .get("args")
-                    .filter(|args| gemini_js_truthy(args))
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}))
-                    .to_string();
-                events.push(AiStreamEvent::ToolCallComplete {
-                    id,
-                    name,
-                    arguments,
+        {
+            for part in parts {
+                // Gemini attaches thoughtSignature to the part itself. Forward the
+                // complete part before projecting its visible text or tool call.
+                events.push(AiStreamEvent::ProviderResponsePart {
+                    provider_type: "gemini".to_string(),
+                    part: part.clone(),
                 });
+                if let Some(text) = part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
+                    events.push(AiStreamEvent::Content(text.to_string()));
+                }
+                if let Some(function_call) = part.get("functionCall") {
+                    let id = format!(
+                        "gemini-{}",
+                        GEMINI_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+                    );
+                    let name = function_call
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let arguments = function_call
+                        .get("args")
+                        .filter(|args| gemini_js_truthy(args))
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}))
+                        .to_string();
+                    events.push(AiStreamEvent::ToolCallComplete {
+                        id,
+                        name,
+                        arguments,
+                    });
+                }
             }
+        }
+        if let Some(reason) = json
+            .pointer("/candidates/0/finishReason")
+            .and_then(Value::as_str)
+        {
+            events.push(if reason == "STOP" {
+                AiStreamEvent::Done
+            } else {
+                AiStreamEvent::Error("ai_output_incomplete".into())
+            });
         }
     }
     ParsedStreamLine {
@@ -369,6 +394,7 @@ mod tests {
 
     fn config(model: &str, effort: &str) -> AiChatStreamConfig {
         AiChatStreamConfig {
+            api_protocol: crate::AiApiProtocol::default(),
             execution_backend: AiExecutionBackend::Provider,
             provider_id: Some("gemini".to_string()),
             acp_agent_id: None,

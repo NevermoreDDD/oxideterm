@@ -81,7 +81,12 @@ fn openai_tool_definitions(tools: &[AiToolDefinition]) -> Vec<Value> {
 }
 
 fn apply_reasoning_options(body: &mut serde_json::Map<String, Value>, config: &AiChatStreamConfig) {
-    let effort = AiReasoningLevel::parse(config.reasoning_effort.as_deref().unwrap_or("auto"));
+    let requested = config.reasoning_effort.as_deref().unwrap_or("auto");
+    let effort = if config.provider_type == "xai" {
+        crate::normalize_reasoning_level_for_model("xai", &config.model, requested)
+    } else {
+        AiReasoningLevel::parse(requested)
+    };
     if effort == AiReasoningLevel::Auto {
         return;
     }
@@ -303,6 +308,7 @@ mod tests {
 
     fn config(provider_type: &str, reasoning_effort: &str) -> AiChatStreamConfig {
         AiChatStreamConfig {
+            api_protocol: crate::AiApiProtocol::default(),
             execution_backend: AiExecutionBackend::Provider,
             provider_id: Some("provider".to_string()),
             acp_agent_id: None,

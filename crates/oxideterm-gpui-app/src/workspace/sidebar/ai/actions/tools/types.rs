@@ -20,16 +20,7 @@ pub(in crate::workspace) struct AiOrchestratorRuntimeSnapshot {
     pub(in crate::workspace) model_visible_settings: serde_json::Value,
 }
 
-/// Provider-side services that are safe for the background model loop to own.
-/// Application runtime owners deliberately remain on the GPUI broker side.
-#[derive(Clone)]
-pub(in crate::workspace) struct AiModelBackendServices {
-    pub(in crate::workspace) rag_store: std::sync::Arc<oxideterm_ai::RagStore>,
-    pub(in crate::workspace) ai_mcp_registry: oxideterm_ai::McpRegistry,
-    pub(in crate::workspace) ai_key_store: oxideterm_ai::AiProviderKeyStore,
-    pub(in crate::workspace) ai_providers: Vec<serde_json::Value>,
-    pub(in crate::workspace) ai_embedding_config: Option<serde_json::Value>,
-}
+use crate::workspace::ai_state::agents::AiModelBackendServices;
 
 /// Concrete application adapters used only after the GPUI broker validates a
 /// live capability handle. This type must never enter a provider task.
@@ -98,6 +89,20 @@ pub(in crate::workspace) enum AiSftpTransferError {
 }
 
 pub(in crate::workspace) enum AiStreamDeliveryEvent {
+    Checkpoint(oxideterm_ai::agent::AgentCheckpoint),
+    HistoryBarrier(tokio::sync::oneshot::Sender<bool>),
+    ToolResourcesRequested {
+        tool_session_id: ToolSessionId,
+        name: String,
+        args: serde_json::Value,
+        sender: tokio::sync::oneshot::Sender<Result<Vec<oxideterm_ai::RuntimeOwnerKey>, String>>,
+    },
+    AgentCommandRequested {
+        dispatch: Option<oxideterm_ai::agent::AgentDispatch>,
+        tool_session_id: ToolSessionId,
+        call: AiToolCall,
+        sender: tokio::sync::oneshot::Sender<AiExecutedToolResult>,
+    },
     Stream(AiStreamEvent),
     PromptUsage {
         last_user_message_id: Option<String>,
@@ -158,6 +163,11 @@ pub(in crate::workspace) enum AiStreamDeliveryEvent {
         round_id: Option<String>,
         round_number: Option<i64>,
     },
+    UserQuestionRequested {
+        call: AiToolCall,
+        dispatch: Option<oxideterm_ai::agent::AgentDispatch>,
+        sender: tokio::sync::oneshot::Sender<zeroize::Zeroizing<String>>,
+    },
     ToolApprovalRequested {
         tool_call_id: String,
         name: String,
@@ -190,6 +200,8 @@ pub(in crate::workspace) enum AiStreamDeliveryEvent {
         sender: tokio::sync::oneshot::Sender<Option<String>>,
     },
     ToolExecutionRequested {
+        dispatch: Option<oxideterm_ai::agent::AgentDispatch>,
+        leases: Vec<oxideterm_ai::agent::AgentToolLease>,
         tool_session_id: ToolSessionId,
         tool_call_id: String,
         name: String,
@@ -198,4 +210,22 @@ pub(in crate::workspace) enum AiStreamDeliveryEvent {
         dangerous_command_approved: bool,
         sender: tokio::sync::oneshot::Sender<AiExecutedToolResult>,
     },
+}
+
+#[derive(Clone)]
+pub(in crate::workspace) struct AiToolRunContext {
+    arguments: zeroize::Zeroizing<String>,
+    generation: u64,
+    conversation_id: String,
+    assistant_id: String,
+    dispatch: Option<oxideterm_ai::agent::AgentDispatch>,
+}
+
+impl AiToolRunContext {
+    fn resource(&self, workspace: &WorkspaceApp, cx: &App, kind: oxideterm_ai::agent::OwnedResourceKind,
+        label: &str) -> Option<oxideterm_ai::agent::AgentResourceRecord> {
+        let ai = workspace.ai_entity.read(cx);
+        let run = ai.agent_run(self.generation)?;
+        ai.agents.services.runtime.register_resource(&run, kind, AgentText::new(label)).ok()
+    }
 }

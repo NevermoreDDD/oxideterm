@@ -67,6 +67,8 @@ pub enum SelectAnchorId {
     SettingsCustomThemeDuplicate,
     SettingsUpdateProxyMode,
     SettingsUpdateProxyProtocol,
+    SettingsIdeFontFamily,
+    SettingsIdeCjkFontFamily,
     SettingsTerminalFontFamily,
     SettingsTerminalCjkFontFamily,
     SettingsTerminalFontSizeSlider,
@@ -94,8 +96,6 @@ pub enum SelectAnchorId {
     SettingsNetworkProxyProtocol,
     SettingsNetworkProxyAuth,
     SettingsAiProviderTemplate,
-    SettingsAiContextMaxChars,
-    SettingsAiContextVisibleLines,
     SettingsAiEmbeddingProvider,
     SettingsKnowledgeCollectionScope,
     SettingsKnowledgeDocumentFormat,
@@ -156,6 +156,8 @@ pub enum SelectAnchorId {
     CloudSyncAuthMode,
     CloudSyncConflictStrategy,
     IdeAgentStatus,
+    IdeFileEncoding,
+    IdeFileLineEnding,
     TerminalBroadcastMenu,
     TerminalHighlightRuleSet,
     TerminalCommandBar,
@@ -189,6 +191,8 @@ impl SelectAnchorId {
                 | Self::SettingsAppearanceBackgroundFit
                 | Self::SettingsCustomThemeDuplicate
                 | Self::SettingsTerminalFontFamily
+                | Self::SettingsIdeFontFamily
+                | Self::SettingsIdeCjkFontFamily
                 | Self::SettingsTerminalCjkFontFamily
                 | Self::SettingsTerminalEncoding
                 | Self::SettingsTerminalBackspaceSequence
@@ -213,8 +217,6 @@ impl SelectAnchorId {
                 | Self::SettingsNetworkProxyProtocol
                 | Self::SettingsNetworkProxyAuth
                 | Self::SettingsAiProviderTemplate
-                | Self::SettingsAiContextMaxChars
-                | Self::SettingsAiContextVisibleLines
                 | Self::SettingsAiEmbeddingProvider
                 | Self::SettingsKnowledgeCollectionScope
                 | Self::SettingsKnowledgeDocumentFormat

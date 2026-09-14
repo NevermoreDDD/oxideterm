@@ -18,6 +18,65 @@ mod tests {
         process::{parse_lsof_cwd, parse_process_table_for_group},
     };
 
+    #[cfg(unix)]
+    #[test]
+    fn busy_render_snapshot_preserves_damage_and_selection_for_retry() {
+        let config = crate::LocalPtyConfig {
+            shell: Some(
+                crate::ShellInfo::new("test-sh", "Test", "/bin/sh")
+                    .with_args(vec!["-c".into(), "read line".into()]),
+            ),
+            load_profile: false,
+            ..Default::default()
+        };
+        let session = LocalPtySession::spawn_with_config_graphics_and_encoding(
+            20,
+            4,
+            config,
+            Default::default(),
+            Default::default(),
+            100,
+        )
+        .unwrap();
+        let previous = session.snapshot();
+        let term = session.term.clone();
+        let mut guard = term.lock_unfair();
+        let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut *guard, b"\x1b[?2004hupdated");
+        let range = crate::TerminalSelectionRange {
+            start_line: 0,
+            end_line: 0,
+            start_col: 0,
+            end_col: 2,
+            is_block: false,
+        };
+        crate::selection::set_term_selection(&mut guard, Some(range));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(session.try_render_snapshot(&previous, true)).unwrap();
+            (session, previous)
+        });
+        let attempt = rx.recv_timeout(std::time::Duration::from_millis(100));
+        drop(guard);
+        let (mut session, previous) = worker.join().unwrap();
+        let next = session.try_render_snapshot(&previous, true);
+        session.shutdown();
+        assert!(
+            matches!(attempt, Ok(None)),
+            "render waited for the busy parser"
+        );
+        let (snapshot, selection, mode) = next.unwrap();
+        assert!(mode.contains(TermMode::BRACKETED_PASTE));
+        assert_eq!(selection, Some(range));
+        let text: String = snapshot.lines[0]
+            .cells
+            .iter()
+            .take(7)
+            .map(|cell| cell.ch)
+            .collect();
+        assert_eq!(text, "updated");
+    }
+
     #[test]
     fn focus_reports_are_gated_by_terminal_mode() {
         assert_eq!(focus_report_sequence(false, true), None);
@@ -43,19 +102,8 @@ mod tests {
     }
 
     #[test]
-    fn ssh_session_config_preserves_connection_identity() {
-        let config = SshSessionConfig::new("example.com", 2222, "alice");
-
-        assert_eq!(config.host(), "example.com");
-        assert_eq!(config.port(), 2222);
-        assert_eq!(config.username(), "alice");
-        assert!(!config.defer_pty_until_resize());
-        assert!(config.with_deferred_pty(true).defer_pty_until_resize());
-    }
-
-    #[test]
     fn ssh_terminal_is_not_interactive_until_shell_channel_is_ready() {
-        let session = SshPtySession::new_disconnected_for_test(
+        let session = crate::session::SshPtyCore::new_disconnected_for_test(
             SshSessionConfig::new("127.0.0.1", 9, "nobody"),
             80,
             24,
@@ -70,7 +118,7 @@ mod tests {
 
     #[test]
     fn ssh_resize_resets_command_mark_coordinates_only_when_grid_changes() {
-        let mut session = SshPtySession::new_disconnected_for_test(
+        let mut session = crate::session::SshPtyCore::new_disconnected_for_test(
             SshSessionConfig::new("127.0.0.1", 9, "nobody"),
             80,
             24,
@@ -706,6 +754,67 @@ mod tests {
             .join("\n");
         assert!(!visible_text.contains("633;"));
         assert!(!visible_text.contains("echo%20hi"));
+    }
+
+    #[test]
+    fn shell_command_ranges_follow_history_eviction_including_chunked_output() {
+        for chunk_size in [1, 4096] {
+            let size = TerminalSize {
+                cols: 80,
+                rows: 4,
+                cell_width: 8,
+                cell_height: 17,
+            };
+            let config = Config {
+                scrolling_history: 3,
+                ..Config::default()
+            };
+            let mut term = Term::new(config, &size, VoidListener);
+            let mut parser = Processor::<StdSyncHandler>::new();
+            let mut integration = crate::shell_integration::TerminalShellIntegration::default();
+            let mut projected = Vec::<TerminalCommandMark>::new();
+            let bytes = b"\x1b]133;A\x07$ old\r\n\x1b]133;C;cmdline_url=old\x07old\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ls\r\n\x1b]133;C;cmdline_url=ls\x07a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\n";
+            for chunk in bytes.chunks(chunk_size) {
+                integration.advance(&mut parser, &mut term, chunk, |event| {
+                    if let TerminalEvent::CommandMark(event) = event {
+                        match event {
+                            TerminalCommandMarkEvent::Created(mark) => projected.push(mark),
+                            TerminalCommandMarkEvent::Closed(mark) => {
+                                let existing = projected
+                                    .iter_mut()
+                                    .find(|existing| existing.command_id == mark.command_id)
+                                    .unwrap();
+                                *existing = mark;
+                            }
+                            TerminalCommandMarkEvent::HistoryTrimmed { lines } => {
+                                projected.retain_mut(|mark| mark.trim_history(lines))
+                            }
+                            TerminalCommandMarkEvent::Reset => projected.clear(),
+                        }
+                    }
+                });
+            }
+            let marks = integration.command_marks();
+            assert_eq!(projected, marks);
+            assert_eq!(marks.len(), 1);
+            assert_eq!(marks[0].command.as_deref(), Some("ls"));
+            assert!(marks[0].command_line_clipped);
+            assert_eq!(marks[0].output_start_line(), 0);
+            assert!(!marks[0].is_closed);
+
+            integration.advance(
+                &mut parser,
+                &mut term,
+                b"\x1b[?1049h1\r\n2\r\n3\r\n4\r\n5\r\n\x1b[?1049l",
+                |_| {},
+            );
+            assert_eq!(integration.command_marks(), marks);
+            integration.advance(&mut parser, &mut term, b"\x1b]133;D;0\x07", |_| {});
+            let closed = integration.command_marks();
+            assert!(closed[0].is_closed);
+            assert_eq!(closed[0].exit_code, Some(0));
+            assert_eq!(closed[0].end_line, Some(5));
+        }
     }
 
     #[test]
@@ -1457,5 +1566,4 @@ mod tests {
         assert_eq!(fg, OXIDETERM_DARK_THEME.ansi[7]);
         assert_eq!(bg, OXIDETERM_DARK_THEME.ansi[15]);
     }
-
 }

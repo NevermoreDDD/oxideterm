@@ -52,6 +52,8 @@ pub struct AiProviderView {
     pub models: Vec<String>,
     pub enabled: bool,
     pub custom: bool,
+    #[serde(default)]
+    pub api_protocol: AiApiProtocol,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -122,11 +124,21 @@ pub struct AiFollowUpSuggestion {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiHistoryRange {
+    pub branch_id: String,
+    pub first_message_id: Option<String>,
+    pub last_message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiMessageBranches {
     pub total: usize,
     pub active_index: usize,
     #[serde(default)]
     pub tails: HashMap<usize, Vec<AiChatMessage>>,
+    #[serde(default)]
+    pub refs: HashMap<usize, AiHistoryRange>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -140,6 +152,8 @@ pub struct AiChatMessageMetadata {
     pub compacted_at_ms: Option<i64>,
     #[serde(default)]
     pub original_messages: Option<Vec<AiChatMessage>>,
+    #[serde(default)]
+    pub original_ref: Option<AiHistoryRange>,
     #[serde(default)]
     pub original_user_count: Option<usize>,
 }
@@ -164,6 +178,8 @@ pub struct AiConversation {
     // Keep additive fields at the end because MessagePack stores structs positionally.
     #[serde(default)]
     pub turn_count: usize,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 fn default_messages_loaded() -> bool {
@@ -233,8 +249,17 @@ pub enum AiToolChoice {
     Named(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiApiProtocol {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
 #[derive(Clone)]
 pub struct AiChatStreamConfig {
+    pub api_protocol: AiApiProtocol,
     pub execution_backend: AiExecutionBackend,
     pub provider_id: Option<String>,
     pub acp_agent_id: Option<String>,
@@ -259,6 +284,10 @@ pub struct AiChatStreamConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AiStreamEvent {
+    Usage {
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
     Content(String),
     Thinking(String),
     /// Opaque provider metadata that must survive a provider-owned replay.
@@ -278,4 +307,30 @@ pub enum AiStreamEvent {
     },
     Done,
     Error(String),
+}
+
+impl AiChatStreamConfig {
+    pub fn uses_responses(&self) -> bool {
+        self.api_protocol == AiApiProtocol::Responses
+            && matches!(
+                self.provider_type.as_str(),
+                "openai" | "openai_compatible" | "xai"
+            )
+    }
+
+    pub fn response_state_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        // Bind opaque state to the endpoint and model without retaining a URL in metadata.
+        let mut identity = Sha256::new();
+        for part in [
+            self.provider_id.as_deref().unwrap_or_default(),
+            &self.provider_type,
+            &self.base_url,
+            &self.model,
+        ] {
+            identity.update((part.len() as u64).to_le_bytes());
+            identity.update(part.as_bytes());
+        }
+        format!("responses:{:x}", identity.finalize())
+    }
 }

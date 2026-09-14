@@ -166,10 +166,7 @@ pub(super) async fn connect_native_rdp(
 ) -> connector::ConnectorResult<(ConnectionResult, UpgradedRdpFramed, EgfxSessionBridge)> {
     let mut deferred_inputs = VecDeque::new();
     let socket = {
-        let connect = TcpStream::connect((
-            config.transport_destination.host(),
-            config.transport_destination.port(),
-        ));
+        let connect = connect_rdp_transport(config);
         tokio::pin!(connect);
         loop {
             tokio::select! {
@@ -744,8 +741,18 @@ pub(super) async fn run_native_rdp_active_session(
                     RdpInputEvent::Clipboard(message) => {
                         process_clipboard_message(&mut active_stage, message)?
                     }
-                    RdpInputEvent::SetClipboardText(text) => {
-                        advertise_local_clipboard_text(&mut active_stage, text)?
+                    RdpInputEvent::SetClipboardText { text, paste } => {
+                        advertise_local_clipboard_text(&mut active_stage, text, paste, output_tx)?
+                    }
+                    RdpInputEvent::PasteClipboard(generation) => {
+                        let ready = active_stage.get_svc_processor_mut::<CliprdrClient>()
+                            .and_then(|cliprdr| cliprdr.downcast_backend_mut::<ClientClipboardBackend>())
+                            .is_some_and(|backend| backend.take_ready_paste(generation));
+                        if ready {
+                            active_stage.process_fastpath_input(&mut image, &rdp_paste_input_events())?
+                        } else {
+                            Vec::new()
+                        }
                     }
                     RdpInputEvent::SetClipboardData(data) => {
                         advertise_local_clipboard_data(&mut active_stage, data)?
@@ -1211,4 +1218,38 @@ pub(super) fn client_rdp_event_can_be_dropped_under_backpressure(
     event: &RemoteDesktopHelperEvent,
 ) -> bool {
     matches!(event, RemoteDesktopHelperEvent::Cursor { .. })
+}
+
+pub(super) async fn connect_rdp_transport(
+    config: &ClientRdpConfig,
+) -> Result<TcpStream, oxideterm_network_proxy::tcp::TcpProxyError> {
+    use oxideterm_network_proxy::tcp::{
+        UpstreamProxyAuth, UpstreamProxyConfig, UpstreamProxyProtocol, dial_initial_tcp,
+    };
+    let proxy = config
+        .socks_proxy
+        .as_ref()
+        .map(|proxy| UpstreamProxyConfig {
+            protocol: UpstreamProxyProtocol::Socks5,
+            host: proxy.host.clone(),
+            port: proxy.port,
+            remote_dns: proxy.remote_dns,
+            no_proxy: proxy.no_proxy.clone(),
+            auth: match &proxy.auth {
+                None => UpstreamProxyAuth::None,
+                Some(auth) => UpstreamProxyAuth::Password {
+                    username: auth.username.clone(),
+                    password: zeroize::Zeroizing::new(auth.password.expose_secret().to_string()),
+                },
+            },
+        });
+    // The caller selects between this complete dial attempt and Disconnect; DNS and SOCKS
+    // negotiation share the timeout, and cancelling drops the unestablished transport.
+    dial_initial_tcp(
+        config.transport_destination.host(),
+        config.transport_destination.port(),
+        30,
+        proxy.as_ref(),
+    )
+    .await
 }

@@ -270,6 +270,7 @@ fn main() {
         cx.activate(true);
         cx.on_action(quit);
         cx.bind_keys(platform::app_key_bindings(&startup_settings));
+        keybindings::install_context_keybindings(&startup_settings.keybindings.overrides, cx);
         cx.set_menus(platform::app_menus(&I18n::default()));
 
         let desktop_presence_menu = desktop_presence_menu(&I18n::new(locale_from_settings(
@@ -335,7 +336,7 @@ fn open_main_workspace_window(
 ) -> anyhow::Result<()> {
     let window_bounds = initial_window_bounds(cx, &window_ui);
     cx.open_window(
-        platform::window_options_with_bounds(window_bounds),
+        platform::workspace_window_options_with_bounds(window_bounds),
         |window, cx| {
             let desktop_presence_rx = match oxideterm_desktop_presence::install_for_window(
                 window,
@@ -460,8 +461,7 @@ fn looks_like_connection_uri(value: &str) -> bool {
 }
 
 fn quit(_: &Quit, cx: &mut App) {
-    oxideterm_desktop_presence::request_quit();
-    cx.quit();
+    workspace::request_app_quit(cx);
 }
 
 fn desktop_presence_menu(i18n: &I18n) -> oxideterm_desktop_presence::DesktopPresenceMenu {

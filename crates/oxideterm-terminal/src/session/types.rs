@@ -42,7 +42,7 @@ pub enum SerialControlLine {
     RequestToSend,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SerialLineEnding {
     Lf,
     CrLf,
@@ -56,7 +56,7 @@ impl Default for SerialLineEnding {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SerialDisplayMode {
     Text,
     Hex,
@@ -69,7 +69,7 @@ impl Default for SerialDisplayMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SerialSendMode {
     Text,
     Hex,
@@ -81,7 +81,7 @@ impl Default for SerialSendMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SerialRuntimeOptions {
     pub line_ending: SerialLineEnding,
     pub output_line_ending: SerialLineEnding,
@@ -140,6 +140,9 @@ pub trait TerminalSessionBackend: Send {
     }
     fn read_pending(&mut self) -> bool;
     fn read_pending_with_budget(&mut self, budget: TerminalDrainBudget) -> TerminalDrainReport;
+    fn pending_output_flush_delay(&self) -> Option<Duration> {
+        None
+    }
     fn activity_receiver(&self) -> TerminalActivityReceiver;
     fn take_events(&mut self) -> Vec<TerminalEvent>;
     fn write_input(&mut self, bytes: &[u8]) -> Result<()>;
@@ -188,6 +191,15 @@ pub trait TerminalSessionBackend: Send {
     fn feed_trzsz_terminal_output(&mut self, _bytes: &[u8]) {}
     fn interrupt_trzsz_transfer(&mut self) {}
     fn finish_trzsz_transfer(&mut self) {}
+    fn begin_modem_transfer(
+        &mut self,
+        request: TerminalModemTransferRequest,
+    ) -> Result<Option<ModemTransfer>> {
+        self.start_modem_transfer(request)
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("Unable to start terminal transfer"))
+    }
+
     fn start_modem_transfer(
         &mut self,
         _request: TerminalModemTransferRequest,
@@ -197,6 +209,9 @@ pub trait TerminalSessionBackend: Send {
     fn interrupt_modem_transfer(&mut self) {}
     fn finish_modem_transfer(&mut self) {}
     fn mode(&self) -> TermMode;
+    fn begin_tmux_pane_selection(&mut self, col: usize, row: usize) -> Result<Option<bool>> {
+        self.select_tmux_pane_at(col, row).map(Some)
+    }
     fn select_tmux_pane_at(&mut self, _col: usize, _row: usize) -> Result<bool> {
         Ok(false)
     }
@@ -239,6 +254,8 @@ pub trait TerminalSessionBackend: Send {
     fn search_source(&self) -> Option<crate::TerminalSearchSource> {
         None
     }
+    fn set_selection(&self, selection: Option<crate::TerminalSelectionRange>);
+    fn selection(&self) -> Option<crate::TerminalSelectionRange>;
     fn clear_buffer(&mut self);
     fn buffer_text(&self) -> String {
         String::new()
@@ -250,6 +267,16 @@ pub trait TerminalSessionBackend: Send {
     fn snapshot_incremental(&self, previous: &TerminalSnapshot) -> TerminalSnapshot {
         let _ = previous;
         self.snapshot()
+    }
+    /// Background parsers may defer a render without consuming pending grid damage.
+    /// Disable deferral after a bounded interval to request a fair turn under continuous output.
+    fn try_render_snapshot(
+        &self,
+        previous: &TerminalSnapshot,
+        allow_defer: bool,
+    ) -> Option<(TerminalSnapshot, Option<crate::TerminalSelectionRange>, TermMode)> {
+        let _ = allow_defer;
+        Some((self.snapshot_incremental(previous), self.selection(), self.mode()))
     }
     fn snapshot_with_display_offset(
         &self,

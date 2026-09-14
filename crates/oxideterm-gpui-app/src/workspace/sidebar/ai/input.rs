@@ -52,6 +52,8 @@ impl WorkspaceApp {
             self.i18n.t("ai.input.placeholder_disabled")
         } else if !model_selected {
             self.i18n.t("ai.model_selector.select_model")
+        } else if self.ai_entity.read(cx).active_user_question().is_some() {
+            self.i18n.t("ai.questions.hint")
         } else {
             self.i18n.t("ai.input.placeholder")
         };
@@ -180,21 +182,20 @@ window.focus(&this.focus_handle, cx);
         let send_disabled = !enabled || !model_selected || self.ai_entity.read(cx).chat_ui().draft.trim().is_empty();
         let action_focused = self.ai_entity.read(cx).chat_ui().footer_focus == Some(AiChatFooterAction::Submit)
             && (self.ai_entity.read(cx).chat_is_loading() || !send_disabled);
-        let action = if self.ai_entity.read(cx).chat_is_loading() {
-            ai_stop_button(
-                &self.tokens,
-                self.i18n.t("ai.input.stop"),
-                Self::render_lucide_icon(LucideIcon::StopCircle, 12.0, rgb(self.tokens.ui.error)),
-                action_focused,
-            )
-        } else {
-            ai_send_button(
-                &self.tokens,
-                self.i18n.t("ai.input.send_btn"),
-                send_disabled,
-                action_focused,
-            )
-        };
+        let can_supplement = self.ai_entity.read(cx).can_supplement_agent();
+        let loading = self.ai_entity.read(cx).chat_is_loading();
+        let action = ai_send_button(
+            &self.tokens,
+            self.i18n.t(if self.ai_entity.read(cx).active_user_question().is_some() {
+                "ai.questions.answer"
+            } else if loading {
+                "ai.queue.enqueue"
+            } else {
+                "ai.input.send_btn"
+            }),
+            send_disabled,
+            action_focused,
+        );
         let frame = ai_chat_input_frame(&self.tokens, focused)
             .child(ai_chat_input_editor(&self.tokens, input));
         let footer_leading = if self.ai_entity.read(cx).chat_is_loading() {
@@ -215,7 +216,7 @@ window.focus(&this.focus_handle, cx);
                     SelectableTextRole::PlainDocument,
                     "ai-input-footer",
                     "thinking",
-                    self.i18n.t("ai.input.thinking"),
+                    self.i18n.t(if self.ai_entity.read(cx).active_user_question().is_some() { "ai.questions.waiting" } else { "ai.input.thinking" }),
                     self.tokens.ui.accent,
                     cx,
                 )))
@@ -225,9 +226,39 @@ window.focus(&this.focus_handle, cx);
                 .into_any_element()
         };
         let footer_trailing = div()
+            .min_w_0()
+            .flex_1()
             .flex()
+            .flex_wrap()
+            .justify_end()
             .items_center()
             .gap(px(6.0))
+            .when(loading, |row| {
+                row.child(self.agent_control(
+                    "ai-stop-running-group".into(), self.i18n.t("ai.input.stop"),
+                    ai_stop_button(&self.tokens, self.i18n.t("ai.input.stop"),
+                        Self::render_lucide_icon(LucideIcon::StopCircle, 12.0, rgb(self.tokens.ui.error)), false),
+                    |this, _, cx| this.cancel_ai_chat_stream(cx), cx,
+                ))
+            })
+            .when(loading && !send_disabled, |row| {
+                let row = if can_supplement {
+                    row.child(self.agent_button(
+                        "ai-steer-draft".into(),
+                        self.i18n.t("ai.queue.steer"),
+                        |this, _, cx| this.steer_ai_chat_draft(cx),
+                        cx,
+                    ))
+                } else {
+                    row
+                };
+                row.child(self.agent_button(
+                    "ai-interrupt-draft".into(),
+                    self.i18n.t("ai.queue.interrupt_send"),
+                    |this, _, cx| this.interrupt_and_send_ai_chat_draft(cx),
+                    cx,
+                ))
+            })
             .when(!self.ai_entity.read(cx).chat_is_loading(), |row| {
                 row.child(
                     div()
@@ -242,9 +273,7 @@ window.focus(&this.focus_handle, cx);
                     this.ai_entity.update(cx, |ai, _cx| {
                         ai.clear_chat_footer_focus();
                     });
-                    if this.ai_entity.read(cx).chat_is_loading() {
-                        this.cancel_ai_chat_stream(cx);
-                    } else if !send_disabled {
+                    if !send_disabled {
                         this.send_ai_chat_draft(cx);
                     }
                     cx.stop_propagation();
@@ -264,15 +293,117 @@ window.focus(&this.focus_handle, cx);
             &self.tokens,
             self.context_sidebar_content_background(self.tokens.ui.bg),
         )
-            .relative()
-            .when_some(self.render_ai_acp_authentication_prompt(cx), |root, prompt| {
-                root.child(prompt)
+        .relative()
+        .when_some(
+            self.render_ai_acp_authentication_prompt(cx),
+            |root, prompt| root.child(prompt),
+        )
+        .when(self.ai_should_show_context_chips(cx), |root| {
+            root.child(self.render_ai_context_chips(cx))
+        })
+        .when_some(self.render_ai_message_queue(cx), |root, queue| {
+            root.child(queue)
+        })
+        .child(frame)
+        .into_any_element()
+    }
+
+    fn render_ai_message_queue(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ai = self.ai_entity.read(cx);
+        let conversation = ai.conversation_state().active_conversation_id.clone()?;
+        let turns = ai.queued_chat_turns.get(&conversation)?;
+        if turns.is_empty() {
+            return None;
+        }
+        let loading = ai.chat_is_loading();
+        let can_steer = ai.can_supplement_agent();
+        let rows: Vec<_> = turns
+            .iter()
+            .map(|turn| {
+                (
+                    turn.id.clone(),
+                    turn.content.to_string(),
+                    turn.config.model.clone(),
+                )
             })
-            .when(self.ai_should_show_context_chips(cx), |root| {
-                root.child(self.render_ai_context_chips(cx))
-            })
-            .child(frame)
-            .into_any_element()
+            .collect();
+        let mut block = ai_tool_block(&self.tokens)
+            .w_full()
+            .min_w_0()
+            .child(ai_tool_heading(
+                &self.tokens,
+                self.i18n
+                    .t(if loading {
+                        "ai.queue.heading"
+                    } else {
+                        "ai.queue.paused"
+                    })
+                    .replace("{{count}}", &rows.len().to_string()),
+            ));
+        for (index, (id, text, model)) in rows.into_iter().enumerate() {
+            let mut actions = div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(px(self.tokens.spacing.one));
+            for (action, key) in [
+                ("edit", "ai.queue.edit"),
+                ("remove", "ai.queue.remove"),
+                ("up", "ai.queue.move_up"),
+                ("send", "ai.queue.send_now"),
+            ] {
+                if (action == "up" && index == 0) || (action == "send" && loading && !can_steer) {
+                    continue;
+                }
+                let cid = conversation.clone();
+                let id = id.clone();
+                let key = if action == "send" && loading {
+                    "ai.queue.steer"
+                } else {
+                    key
+                };
+                actions = actions.child(self.agent_button(
+                    format!("queue-{action}-{id}"),
+                    self.i18n.t(key),
+                    move |this, _, cx| {
+                        this.apply_ai_queue_action(&cid, &id, action, cx);
+                    },
+                    cx,
+                ));
+            }
+            block = block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .border_b_1()
+                    .border_color(rgb(self.tokens.ui.border))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(self.tokens.metrics.ui_text_sm))
+                            .child(text),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(self.tokens.metrics.ui_text_xs))
+                            .text_color(rgb(self.tokens.ui.text_muted))
+                            .child(model),
+                    )
+                    .child(actions),
+            );
+        }
+        Some(
+            div()
+                .id("ai-message-queue")
+                .w_full()
+                .max_h(px(180.0))
+                .overflow_y_scroll()
+                .child(block)
+                .into_any_element(),
+        )
     }
 
     fn render_ai_acp_authentication_prompt(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

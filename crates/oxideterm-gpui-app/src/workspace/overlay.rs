@@ -574,7 +574,10 @@ impl WorkspaceOverlayEntity {
                 .iter()
                 .position(|dismissed| dismissed == &attempt_id)
             {
-                if event.status != ConnectionTraceStatus::Running {
+                if matches!(
+                    event.status,
+                    ConnectionTraceStatus::Ready | ConnectionTraceStatus::Cancelled
+                ) {
                     self.dismissed_connection_traces.remove(position);
                 }
                 continue;
@@ -742,12 +745,15 @@ impl WorkspaceOverlayEntity {
         let Some(trace) = self.connection_trace_cards.get(attempt_id) else {
             return false;
         };
-        // Keep a bounded tombstone so late progress cannot reopen a card the user dismissed.
-        if trace.latest.status == ConnectionTraceStatus::Running
-            && !self
-                .dismissed_connection_traces
-                .iter()
-                .any(|dismissed| dismissed == attempt_id)
+        // Keep a bounded workflow tombstone so retries and late progress cannot
+        // reopen a card without cancelling its runtime-owned connection job.
+        if !matches!(
+            trace.latest.status,
+            ConnectionTraceStatus::Ready | ConnectionTraceStatus::Cancelled
+        ) && !self
+            .dismissed_connection_traces
+            .iter()
+            .any(|dismissed| dismissed == attempt_id)
         {
             self.dismissed_connection_traces
                 .push_back(attempt_id.to_string());
@@ -1072,23 +1078,17 @@ impl WorkspaceOverlayEntity {
             deferred(
                 div()
                     .absolute()
-                    .top_0()
+                    .top(px(
+                        tokens.metrics.titlebar_height + tokens.metrics.tabbar_height
+                    ))
                     .right_0()
-                    .bottom_0()
-                    .left_0()
                     .flex()
-                    .items_center()
-                    .justify_center()
-                    .p(px(24.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(720.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(tokens.spacing.three))
-                            .children(cards),
-                    ),
+                    .flex_col()
+                    .gap(px(tokens.spacing.three))
+                    .p(px(tokens.metrics.ui_toast_padding))
+                    .w(px(tokens.metrics.ui_toast_width))
+                    .max_w(px(tokens.metrics.ui_toast_width))
+                    .children(cards),
             )
             .with_priority(CONNECTION_CARD_LAYER_PRIORITY)
             .into_any_element(),
@@ -1120,17 +1120,33 @@ fn render_connection_card(
         .then(|| connection_trace_status_text(i18n, event));
     let endpoint = event.endpoint.clone();
     let attempt_id_for_close = attempt_id.to_string();
-    let close = toast_close(tokens)
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            let _ = overlay.update(cx, |overlay, cx| {
-                if overlay.dismiss_connection_trace(&attempt_id_for_close, Instant::now()) {
-                    overlay.schedule_next_deadline(cx);
-                    cx.notify();
-                }
-            });
-            cx.stop_propagation();
-        })
-        .into_any_element();
+    // Reserve header space for the close action; the absolute toast control
+    // overlaps connection labels in the narrower corner card.
+    let close = oxideterm_gpui_ui::icon_button(
+        tokens,
+        svg()
+            .path("lucide/x.svg")
+            .size(px(tokens.metrics.ui_toast_close_size))
+            .text_color(rgb(tokens.ui.text))
+            .into_any_element(),
+        oxideterm_gpui_ui::IconButtonOptions::opaque_toolbar(
+            tokens.metrics.ui_toast_close_size + tokens.spacing.two,
+            oxideterm_gpui_ui::button::ButtonRadius::Sm,
+        ),
+    )
+    .flex_none()
+    .self_start()
+    .debug_selector(|| "connection-card-close".to_string())
+    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+        let _ = overlay.update(cx, |overlay, cx| {
+            if overlay.dismiss_connection_trace(&attempt_id_for_close, Instant::now()) {
+                overlay.schedule_next_deadline(cx);
+                cx.notify();
+            }
+        });
+        cx.stop_propagation();
+    })
+    .into_any_element();
 
     let header = div()
         .w_full()
@@ -1157,6 +1173,8 @@ fn render_connection_card(
             div()
                 .min_w_0()
                 .flex_1()
+                .debug_selector(|| "connection-card-heading".to_string())
+                .overflow_hidden()
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
@@ -1192,6 +1210,7 @@ fn render_connection_card(
             .padding(oxideterm_gpui_ui::SurfacePadding::Spacious),
     )
     .w_full()
+    .debug_selector(|| "connection-card".to_string())
     .flex()
     .flex_col()
     .gap(px(tokens.spacing.three * 2.0))
@@ -1688,6 +1707,83 @@ mod tests {
 
     use super::*;
 
+    struct ConnectionCardTestRoot {
+        overlay: Entity<WorkspaceOverlayEntity>,
+    }
+
+    impl Render for ConnectionCardTestRoot {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut tokens = oxideterm_theme::default_tokens();
+            tokens.apply_motion(oxideterm_theme::UiMotionProfile::Off);
+            let cards = self.overlay.update(cx, |overlay, cx| {
+                overlay.render_connection_cards(&tokens, &I18n::default(), cx)
+            });
+            div().size_full().children(cards)
+        }
+    }
+
+    #[gpui::test]
+    fn failed_connection_card_close_has_its_own_click_target_and_stays_dismissed(
+        cx: &mut TestAppContext,
+    ) {
+        let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::ZERO, cx));
+        let event = ConnectionTraceEvent {
+            attempt_id: "failed-reconnect".to_string(),
+            node_id: NodeId::new("node-1"),
+            stage: ConnectionTraceStage::OpeningTransport,
+            status: ConnectionTraceStatus::Failed,
+            progress: 30.0,
+            elapsed_ms: 1000,
+            detail: Some("Connection timed out".to_string()),
+            label: Some("Production server with a long connection name".to_string()),
+            endpoint: Some("operator@long-hostname.example.test:2222".to_string()),
+            step_index: Some(1),
+            total_steps: Some(1),
+            mode: ConnectionTraceMode::Reconnect,
+        };
+        overlay.update(cx, |overlay, _| {
+            overlay.apply_connection_trace_events(vec![event.clone()], Instant::now());
+        });
+        let (_, cx) = cx.add_window_view(|_, _| ConnectionCardTestRoot {
+            overlay: overlay.clone(),
+        });
+        cx.simulate_resize(gpui::size(px(720.0), px(600.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx.debug_bounds("connection-card").expect("visible card");
+        let heading = cx.debug_bounds("connection-card-heading").expect("heading");
+        let close = cx
+            .debug_bounds("connection-card-close")
+            .expect("close button");
+        assert!(card.contains(&close.origin) && card.contains(&close.bottom_right()));
+        assert!(close.size.width >= px(24.0) && close.size.height >= px(24.0));
+        assert!(
+            close.left() >= heading.right(),
+            "close target overlaps the heading"
+        );
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        cx.update(|_, cx| {
+            overlay.update(cx, |overlay, _| {
+                assert!(
+                    !overlay
+                        .connection_trace_cards
+                        .contains_key("failed-reconnect")
+                );
+                overlay.apply_connection_trace_events(
+                    vec![ConnectionTraceEvent {
+                        status: ConnectionTraceStatus::Running,
+                        ..event
+                    }],
+                    Instant::now(),
+                );
+                assert!(
+                    !overlay
+                        .connection_trace_cards
+                        .contains_key("failed-reconnect")
+                );
+            });
+        });
+    }
+
     fn notice(index: usize) -> TerminalNotice {
         TerminalNotice {
             title: format!("notice-{index}"),
@@ -1739,7 +1835,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dismissed_connection_card_stays_hidden_until_the_attempt_finishes(cx: &mut TestAppContext) {
+    fn dismissed_connection_card_stays_hidden_across_retries_until_the_workflow_finishes(
+        cx: &mut TestAppContext,
+    ) {
         let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::ZERO, cx));
         let event = |stage, status, progress| ConnectionTraceEvent {
             attempt_id: "dismissed-attempt".to_string(),
@@ -1753,7 +1851,7 @@ mod tests {
             endpoint: None,
             step_index: Some(1),
             total_steps: Some(1),
-            mode: ConnectionTraceMode::Connect,
+            mode: ConnectionTraceMode::Reconnect,
         };
 
         overlay.update(cx, |overlay, _cx| {
@@ -1771,8 +1869,23 @@ mod tests {
             overlay.apply_connection_trace_events(
                 vec![event(
                     ConnectionTraceStage::Authentication,
+                    ConnectionTraceStatus::Failed,
+                    100.0,
+                )],
+                now,
+            );
+            assert!(
+                overlay
+                    .dismissed_connection_traces
+                    .iter()
+                    .any(|attempt_id| attempt_id == "dismissed-attempt")
+            );
+
+            overlay.apply_connection_trace_events(
+                vec![event(
+                    ConnectionTraceStage::OpeningTransport,
                     ConnectionTraceStatus::Running,
-                    72.0,
+                    30.0,
                 )],
                 now,
             );

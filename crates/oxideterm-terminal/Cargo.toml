@@ -11,6 +11,7 @@ async-channel.workspace = true
 crossbeam-channel.workspace = true
 fernomade-predict = { path = "../fernomade/predict" }
 libc.workspace = true
+memchr.workspace = true
 oxideterm-ssh = { path = "../oxideterm-ssh" }
 oxideterm-modem-transfer = { path = "../oxideterm-modem-transfer" }
 oxideterm-mosh = { path = "../oxideterm-mosh" }
@@ -22,6 +23,7 @@ oxideterm-tmux = { path = "../oxideterm-tmux" }
 oxideterm-trzsz = { path = "../oxideterm-trzsz" }
 polling.workspace = true
 serialport.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tempfile = "3.23"
@@ -32,6 +34,8 @@ zeroize.workspace = true
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
+russh = { path = "../russh" }
+rand10.workspace = true
 criterion.workspace = true
 
 [[bench]]

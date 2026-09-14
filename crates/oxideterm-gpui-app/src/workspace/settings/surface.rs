@@ -285,14 +285,18 @@ impl WorkspaceApp {
                     settings.ai.enabled,
                 )
             }
-            (AiSettingsPage::Tools, 1) => {
+            (AiSettingsPage::Tools, 1) => self.ai_disabled_settings_card(
+                self.render_ai_agent_settings(cx),
+                self.settings_store.settings().ai.enabled,
+            ),
+            (AiSettingsPage::Tools, 2) => {
                 let settings = self.settings_store.settings();
                 self.ai_disabled_settings_card(
                     self.ai_skills_section(settings, cx),
                     settings.ai.enabled,
                 )
             }
-            (AiSettingsPage::Tools, 2) => {
+            (AiSettingsPage::Tools, 3) => {
                 let settings = self.settings_store.settings();
                 self.ai_disabled_settings_card(
                     self.ai_mcp_servers_section(settings, cx),
@@ -426,20 +430,12 @@ impl WorkspaceApp {
                 launch_at_login.pending.hash(&mut hasher);
                 launch_at_login.error.hash(&mut hasher);
                 settings.general.minimize_to_tray_on_close.hash(&mut hasher);
-                settings
-                    .general
-                    .external_connection_uris_enabled
-                    .hash(&mut hasher);
                 let cli = self.settings_workspace.read(cx).cli_companion_snapshot();
                 cli.loading.hash(&mut hasher);
                 cli.error.is_some().hash(&mut hasher);
                 cli.status.hash(&mut hasher);
                 let app_lock_section_index =
-                    if cfg!(any(target_os = "windows", target_os = "macos")) {
-                        6
-                    } else {
-                        5
-                    };
+                    2 + usize::from(cfg!(any(target_os = "windows", target_os = "macos")));
                 if index
                     == oxideterm_settings_model::SETTINGS_SECTION_HEADER_ITEM_COUNT
                         + app_lock_section_index
@@ -476,6 +472,10 @@ impl WorkspaceApp {
                 // jumping when the icon picker updates its selected badge.
             }
             SettingsTab::Network => {
+                self.settings_workspace
+                    .read(cx)
+                    .expanded_mcp_client
+                    .hash(&mut hasher);
                 settings.network.upstream_proxy.is_some().hash(&mut hasher);
                 settings
                     .network
@@ -593,6 +593,28 @@ impl WorkspaceApp {
                             .hash(&mut hasher);
                     }
                     (AiSettingsPage::Tools, 3) => {
+                        let ai = self.ai_entity.read(cx);
+                        ai.agents.settings_model_picker_open.hash(&mut hasher);
+                        ai.conversation_state()
+                            .active_conversation_id
+                            .hash(&mut hasher);
+                        if let Some(conversation) = ai.conversation_state().active_conversation() {
+                            conversation.title.hash(&mut hasher);
+                            let options = ai.agent_options(&conversation.id);
+                            options.enabled.hash(&mut hasher);
+                            options
+                                .default_model
+                                .as_ref()
+                                .map(|model| (&model.provider_id, &model.model))
+                                .hash(&mut hasher);
+                        }
+                        for provider in ai_provider_views(settings) {
+                            provider.id.hash(&mut hasher);
+                            provider.enabled.hash(&mut hasher);
+                            provider.models.hash(&mut hasher);
+                        }
+                    }
+                    (AiSettingsPage::Tools, 4) => {
                         let registry = self.skill_registry.read();
                         for skill in registry.records() {
                             skill.id.hash(&mut hasher);
@@ -607,14 +629,15 @@ impl WorkspaceApp {
             SettingsTab::Knowledge => {
                 let ai = self.ai_entity.read(cx);
                 ai.knowledge_selected_collection_id().hash(&mut hasher);
+                ai.knowledge_document_page_index().hash(&mut hasher);
+                ai.knowledge_embedding_config_expanded().hash(&mut hasher);
                 ai.knowledge_error().is_some().hash(&mut hasher);
                 ai.knowledge_import_progress().hash(&mut hasher);
                 ai.knowledge_embedding_progress().hash(&mut hasher);
                 ai.knowledge_reindex_progress().hash(&mut hasher);
             }
             SettingsTab::Keybindings => {
-                // The toolbar owns the moving scope indicator. Keep row zero
-                // mounted while filtered table rows are replaced underneath it.
+                // Keep the search control mounted while scope filtering replaces tables.
                 if index > 0 {
                     let keybinding_state = self.settings_workspace.read(cx);
                     format!("{:?}", keybinding_state.keybinding_scope_filter()).hash(&mut hasher);
@@ -624,6 +647,17 @@ impl WorkspaceApp {
                         .hash(&mut hasher);
                 }
                 settings.keybindings.overrides.len().hash(&mut hasher);
+                for entry in &self
+                    .plugin_entity
+                    .read(cx)
+                    .registry()
+                    .contributions()
+                    .runtime_keybindings
+                {
+                    entry.plugin_id.hash(&mut hasher);
+                    entry.normalized_keybinding.hash(&mut hasher);
+                    entry.label.hash(&mut hasher);
+                }
             }
             _ => {}
         }
@@ -656,6 +690,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn visible_keybinding_scope_count(&self, cx: &App) -> usize {
+        let catalog = self.keybinding_definitions(cx);
         let keybinding_state = self.settings_workspace.read(cx);
         let query = keybinding_state
             .keybinding_search_query()
@@ -667,10 +702,17 @@ impl WorkspaceApp {
             crate::keybindings::ActionScope::Terminal,
             crate::keybindings::ActionScope::Split,
             crate::keybindings::ActionScope::Palette,
+            crate::keybindings::ActionScope::Editor,
+            crate::keybindings::ActionScope::Sftp,
+            crate::keybindings::ActionScope::FileManager,
+            crate::keybindings::ActionScope::Preview,
+            crate::keybindings::ActionScope::RemoteDesktop,
+            crate::keybindings::ActionScope::Plugin,
+            crate::keybindings::ActionScope::AiPanel,
         ]
         .into_iter()
         .filter(|scope| {
-            crate::keybindings::ACTION_DEFINITIONS
+            catalog
                 .iter()
                 .filter(|definition| definition.scope == *scope)
                 .filter(|definition| {
@@ -680,7 +722,7 @@ impl WorkspaceApp {
                     if query.is_empty() {
                         return true;
                     }
-                    let label = self.i18n.t(&definition.label_key()).to_lowercase();
+                    let label = self.keybinding_label(definition).to_lowercase();
                     label.contains(&query) || definition.id.to_lowercase().contains(&query)
                 })
         })
@@ -1161,6 +1203,9 @@ impl WorkspaceApp {
         settings: &PersistedSettings,
         cx: &mut Context<Self>,
     ) {
+        if previous_settings.keybindings != settings.keybindings {
+            crate::keybindings::install_context_keybindings(&settings.keybindings.overrides, cx);
+        }
         install_application_proxy_policy_from_settings(settings, &self.connection_store);
         if previous_settings.appearance.app_icon != settings.appearance.app_icon {
             // Replacing the macOS application icon decodes the bundled image on the main thread,

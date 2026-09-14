@@ -433,14 +433,6 @@ pub fn set_ai_enabled_confirmed(settings: &mut PersistedSettings, value: bool) {
     settings.ai.enabled_confirmed = value;
 }
 
-pub fn set_ai_context_max_chars(settings: &mut PersistedSettings, value: i64) {
-    settings.ai.context_max_chars = value;
-}
-
-pub fn set_ai_context_lines(settings: &mut PersistedSettings, value: i64) {
-    settings.ai.context_visible_lines = value;
-}
-
 pub fn set_ai_context_source_ide(settings: &mut PersistedSettings, value: bool) {
     settings.ai.context_sources.ide = value;
 }
@@ -514,6 +506,10 @@ pub fn set_terminal_trigger_shell_execution(settings: &mut PersistedSettings, va
 
 pub fn set_diagnostics_debug_logging(settings: &mut PersistedSettings, value: bool) {
     settings.diagnostics.debug_logging = value;
+}
+
+pub fn set_terminal_autosuggest_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.autosuggest.enabled = value;
 }
 
 pub fn set_autosuggest_local_history(settings: &mut PersistedSettings, value: bool) {

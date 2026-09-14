@@ -1,16 +1,7 @@
 impl WorkspaceApp {
     pub(in crate::workspace) fn ensure_ai_chat_initialized(&mut self, cx: &mut App) {
-        let outcome = self.ai_entity.update(cx, |ai, _cx| {
-            ai.ensure_chat_initialized(default_ai_conversations_path())
-        });
-        if matches!(outcome, AiChatInitializationOutcome::Loaded) {
-            self.reset_ai_message_list(cx);
-        }
-    }
-
-    fn reset_ai_message_list(&mut self, cx: &mut App) {
-        self.ai_entity.update(cx, |ai, _cx| {
-            ai.reset_chat_message_list();
+        self.ai_entity.update(cx, |ai, cx| {
+            ai.ensure_chat_initialized(default_ai_conversations_path(),cx);
         });
     }
 
@@ -132,7 +123,18 @@ impl WorkspaceApp {
         cx.notify();
     }
 
+    pub(in crate::workspace) fn set_ai_conversation_archived(&mut self, id: &str, archived: bool, cx: &mut App) {
+        self.ai_entity.update(cx, |ai, _| ai.set_conversation_archived(id, archived));
+    }
+
     pub(in crate::workspace) fn delete_ai_conversation(&mut self, id: &str, cx: &mut App) {
+        let generations = self.ai_entity.read(cx).conversation_stream_generations(id);
+        self.ai_entity.update(cx, |ai, _cx| ai.cancel_chat_stream_for(id));
+        self.ai_runtime_context.update(cx, |runtime, _cx| {
+            for generation in generations {
+                runtime.finish_tool_session(generation, oxideterm_ai::RuntimeRevocationReason::ToolSessionCancelled);
+            }
+        });
         self.ai_background_tasks.update(cx, |tasks, _cx| {
             tasks.cancel_owner(id);
         });
@@ -150,8 +152,18 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn clear_ai_conversations(&mut self, cx: &mut App) {
+        let mut ids: std::collections::HashSet<String> = match self.ai_entity.read(cx).history.store.as_ref().map(|store| store.conversation_ids()).transpose() {
+            Ok(ids) => ids.unwrap_or_default().into_iter().collect(),
+            Err(_) => {
+                self.ai_entity.update(cx, |ai, _| ai.history_load_failed());
+                return;
+            }
+        };
+        ids.extend(self.ai_entity.read(cx).conversation_state().conversations.iter().map(|conversation| conversation.id.clone()));
         // Cancel the live generation before clearing its routing identifier.
         self.cancel_ai_chat_stream_without_notify(cx);
+        self.ai_entity.update(cx, |ai, _| ai.reset_conversation_lists_after_clear());
+        for id in ids { self.delete_ai_conversation(&id, cx); }
         self.acp_entity.update(cx, |entity, _cx| {
             entity.close_all_threads(false);
         });
@@ -169,7 +181,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn cancel_ai_chat_stream_without_notify(&mut self, cx: &mut App) {
-        let cancelled_generation = self.ai_entity.read(cx).chat_stream_generation();
+        let cancelled_generations = self.ai_entity.read(cx).conversation_state().active_conversation_id.as_deref().map(|id| self.ai_entity.read(cx).conversation_stream_generations(id)).unwrap_or_default();
         let active_conversation_id = self
             .ai_entity
             .read(cx)
@@ -192,10 +204,10 @@ impl WorkspaceApp {
         // An abort can leave a UI delivery queued behind the model task. Revoke
         // its lease before that delivery can reach a terminal or other owner.
         self.ai_runtime_context.update(cx, |runtime, _cx| {
-            runtime.finish_tool_session(
-                cancelled_generation,
+            for generation in cancelled_generations { runtime.finish_tool_session(
+                generation,
                 oxideterm_ai::RuntimeRevocationReason::ToolSessionCancelled,
-            );
+            ); }
         });
         if let Some(conversation_id) = conversation_id.as_deref() {
             self.persist_ai_stopped_assistant_turns(conversation_id, &stopped_turns, cx);
@@ -228,12 +240,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn retry_ai_chat_initialization(&mut self, cx: &mut Context<Self>) {
-        let outcome = self.ai_entity.update(cx, |ai, _cx| {
-            ai.retry_chat_initialization(default_ai_conversations_path())
-        });
-        if matches!(outcome, AiChatInitializationOutcome::Loaded) {
-            self.reset_ai_message_list(cx);
-        }
+        self.ai_entity.update(cx, |ai, cx| ai.retry_chat_initialization(default_ai_conversations_path(),cx));
         cx.notify();
     }
 

@@ -12,6 +12,7 @@ use crate::{AiPolicySafetyMode, AiToolChoice, AiToolUsePolicy};
 
 fn test_stream_config(provider_type: &str) -> AiChatStreamConfig {
     AiChatStreamConfig {
+        api_protocol: crate::AiApiProtocol::default(),
         execution_backend: AiExecutionBackend::Provider,
         provider_id: Some("provider".to_string()),
         acp_agent_id: None,
@@ -430,6 +431,7 @@ fn settings_provider_mutations_stay_out_of_gpui() {
     assert!(providers[1].get("defaultModel").is_none());
 
     let empty_default_provider = AiProviderView {
+        api_protocol: crate::AiApiProtocol::default(),
         id: "custom-empty".into(),
         provider_type: "openai_compatible".into(),
         name: "Empty".into(),
@@ -485,8 +487,6 @@ fn settings_provider_mutations_stay_out_of_gpui() {
         serde_json::Map::from_iter([("custom-ollama-2".into(), serde_json::json!({}))]);
     let mut user_context_windows =
         serde_json::Map::from_iter([("custom-ollama-2".into(), serde_json::json!({}))]);
-    let mut model_max_response_tokens =
-        serde_json::Map::from_iter([("custom-ollama-2".into(), serde_json::json!({}))]);
 
     active_provider_id = Some("custom-ollama-2".into());
     let removed = remove_provider_at_with_scoped_settings(
@@ -496,7 +496,6 @@ fn settings_provider_mutations_stay_out_of_gpui() {
         &mut reasoning_provider_overrides,
         &mut reasoning_model_overrides,
         &mut user_context_windows,
-        &mut model_max_response_tokens,
         1,
     );
     assert_eq!(removed.as_deref(), Some("custom-ollama-2"));
@@ -505,7 +504,6 @@ fn settings_provider_mutations_stay_out_of_gpui() {
     assert!(reasoning_provider_overrides.is_empty());
     assert!(reasoning_model_overrides.is_empty());
     assert!(user_context_windows.is_empty());
-    assert!(model_max_response_tokens.is_empty());
 }
 
 #[test]
@@ -858,7 +856,6 @@ fn shared_provider_key_debug_is_redacted() {
     let debug = format!("{key:?}");
 
     assert_eq!(debug, "SharedAiProviderKey(<redacted>)");
-    assert!(!debug.contains("provider-secret-value"));
 }
 
 #[test]
@@ -931,22 +928,8 @@ fn parses_and_sanitizes_follow_up_suggestions() {
 #[test]
 fn chat_request_overrides_inject_current_context_as_system_message() {
     let mut history = vec![AiChatMessage {
-        id: "u1".into(),
-        role: AiChatRole::User,
-        content: "#buffer explain".into(),
-        timestamp_ms: 1,
-        model: None,
         context: Some("--- #buffer ---\nerror output".into()),
-        is_streaming: false,
-        thinking_content: None,
-        metadata: None,
-        tool_call_id: None,
-        tool_calls: Vec::new(),
-        turn: None,
-        transcript_ref: None,
-        summary_ref: None,
-        branches: None,
-        suggestions: Vec::new(),
+        ..chat_message("u1", AiChatRole::User, "#buffer explain")
     }];
 
     apply_chat_request_overrides(&mut history, Some("explain".into()), None);
@@ -958,35 +941,18 @@ fn chat_request_overrides_inject_current_context_as_system_message() {
 }
 
 #[test]
-fn chat_persistence_missing_file_defaults() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = AiChatPersistenceStore::new(dir.path().join("missing.redb"));
-
-    assert_eq!(store.load_state().unwrap(), AiChatState::default());
-}
-
-#[test]
 fn chat_persistence_save_state_rejects_stale_projection_snapshots() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chat_history.redb");
     let store = AiChatPersistenceStore::new(&path);
+    assert_eq!(store.load_state().unwrap(), AiChatState::default());
     let mut state = AiChatState::default();
     let conversation_id =
         state.create_conversation("conversation-stale".into(), Some("Stale".into()), 42, None);
     state.add_message(
         &conversation_id,
         AiChatMessage {
-            id: "assistant-1".into(),
-            role: AiChatRole::Assistant,
-            content: "fresh projection".into(),
             timestamp_ms: 43,
-            model: None,
-            context: None,
-            is_streaming: false,
-            thinking_content: None,
-            metadata: None,
-            tool_call_id: None,
-            tool_calls: Vec::new(),
             turn: Some(serde_json::json!({
                 "id": "assistant-1",
                 "status": "complete",
@@ -994,10 +960,7 @@ fn chat_persistence_save_state_rejects_stale_projection_snapshots() {
                 "toolRounds": [],
                 "plainTextSummary": "fresh projection",
             })),
-            transcript_ref: None,
-            summary_ref: None,
-            branches: None,
-            suggestions: Vec::new(),
+            ..chat_message("assistant-1", AiChatRole::Assistant, "fresh projection")
         },
     );
 
@@ -1063,22 +1026,20 @@ fn chat_persistence_hydrates_interrupted_stream_as_closed_turn() {
     state.add_message(
         &conversation_id,
         AiChatMessage {
-            id: "assistant-1".into(),
-            role: AiChatRole::Assistant,
-            content: "Partial answer".into(),
             timestamp_ms: 2,
             model: Some("deepseek-v4-pro".into()),
-            context: None,
             is_streaming: true,
             thinking_content: Some("working".into()),
-            metadata: None,
-            tool_call_id: None,
             tool_calls: vec![serde_json::json!({
                 "id": "call-1",
                 "name": "get_state",
                 "arguments": "{}",
                 "status": "running",
                 "result": serde_json::Value::Null,
+            }), serde_json::json!({
+                "id": "question-1", "name": "ask_user", "arguments": "{}",
+                "status": "waiting_user", "approvalGeneration": 42,
+                "result": {"question":"Which environment?","options":["Staging","Production"]}
             })],
             turn: Some(serde_json::json!({
                 "id": "assistant-1",
@@ -1100,10 +1061,7 @@ fn chat_persistence_hydrates_interrupted_stream_as_closed_turn() {
                 }],
                 "plainTextSummary": "Partial answer",
             })),
-            transcript_ref: None,
-            summary_ref: None,
-            branches: None,
-            suggestions: Vec::new(),
+            ..chat_message("assistant-1", AiChatRole::Assistant, "Partial answer")
         },
     );
 
@@ -1112,6 +1070,7 @@ fn chat_persistence_hydrates_interrupted_stream_as_closed_turn() {
     let loaded = store.load_state().unwrap();
     let message = &loaded.conversations[0].messages[0];
     assert!(!message.is_streaming);
+    assert_eq!(message.tool_calls[1]["status"], "rejected");
     let turn = message.turn.as_ref().expect("turn");
     assert_eq!(
         turn.get("status").and_then(serde_json::Value::as_str),
@@ -1146,38 +1105,16 @@ fn chat_persistence_replays_completed_stream_turn_and_transcript_order() {
     state.add_message(
         &conversation_id,
         AiChatMessage {
-            id: "user-1".into(),
-            role: AiChatRole::User,
-            content: "open terminal".into(),
             timestamp_ms: 2,
-            model: None,
-            context: None,
-            is_streaming: false,
-            thinking_content: None,
-            metadata: None,
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-            turn: None,
-            transcript_ref: None,
-            summary_ref: None,
-            branches: None,
-            suggestions: Vec::new(),
+            ..chat_message("user-1", AiChatRole::User, "open terminal")
         },
     );
     state.add_message(
         &conversation_id,
         AiChatMessage {
-            id: "assistant-1".into(),
-            role: AiChatRole::Assistant,
-            content: "Opened.".into(),
             timestamp_ms: 3,
             model: Some("deepseek-v4-pro".into()),
-            context: None,
-            is_streaming: false,
             thinking_content: Some("Need a terminal".into()),
-            metadata: None,
-            tool_call_id: None,
-            tool_calls: Vec::new(),
             turn: Some(serde_json::json!({
                 "id": "assistant-1",
                 "status": "complete",
@@ -1204,9 +1141,7 @@ fn chat_persistence_replays_completed_stream_turn_and_transcript_order() {
                 "startEntryId": "transcript-user-user-1",
                 "endEntryId": "assistant-1",
             })),
-            summary_ref: None,
-            branches: None,
-            suggestions: Vec::new(),
+            ..chat_message("assistant-1", AiChatRole::Assistant, "Opened.")
         },
     );
 
@@ -1684,6 +1619,7 @@ fn chat_persistence_preserves_message_branches() {
     );
     let mut edited = chat_message("message-live", AiChatRole::User, "new prompt");
     edited.branches = Some(AiMessageBranches {
+        refs: Default::default(),
         total: 2,
         active_index: 1,
         tails: HashMap::from([(
@@ -1790,7 +1726,7 @@ fn chat_persistence_keeps_more_than_legacy_conversation_limit() {
 }
 
 #[test]
-fn chat_persistence_keeps_more_than_legacy_message_limit() {
+fn chat_persistence_preserves_long_history_across_repeated_saves() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chat_history.redb");
     let store = AiChatPersistenceStore::new(&path);
@@ -1798,9 +1734,8 @@ fn chat_persistence_keeps_more_than_legacy_message_limit() {
     let conversation_id =
         state.create_conversation("long-conversation".into(), Some("Long".into()), 1, None);
 
-    // Local retention is intentionally wider than prompt history. The prompt
-    // budget and automatic compaction remain responsible for model input size.
-    for index in 0..250 {
+    // Cross the former 2,000-message retention boundary with distinguishable content.
+    for index in 0..2_105 {
         state.add_message(
             &conversation_id,
             chat_message(
@@ -1812,9 +1747,20 @@ fn chat_persistence_keeps_more_than_legacy_message_limit() {
     }
     store.save_state(state).unwrap();
 
-    let reloaded = store.load_conversation(&conversation_id).unwrap().unwrap();
-    assert_eq!(reloaded.messages.len(), 250);
-    assert_eq!(reloaded.messages.first().unwrap().id, "message-0");
+    for _ in 0..2 {
+        let reloaded = store.load_state().unwrap();
+        let messages = &reloaded.conversations[0].messages;
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.id.clone(), message.content.clone()))
+                .collect::<Vec<_>>(),
+            (0..2_105)
+                .map(|index| (format!("message-{index}"), format!("content-{index}")))
+                .collect::<Vec<_>>()
+        );
+        store.save_state(reloaded).unwrap();
+    }
 }
 
 #[test]
@@ -2063,5 +2009,127 @@ fn gemini_signed_parts_round_trip_without_rebuilding() {
                 "thoughtSignature": "call-signature",
             },
         ])
+    );
+}
+
+#[path = "responses_tests.rs"]
+mod responses;
+
+#[test]
+fn provider_token_limits_are_not_reported_as_completed_turns() {
+    assert_eq!(
+        parse_openai_data_line(
+            r#"data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}"#
+        )
+        .events,
+        vec![
+            AiStreamEvent::Content("partial".into()),
+            AiStreamEvent::Error("ai_output_incomplete".into())
+        ]
+    );
+    let events=parse_gemini_data_line(r#"data: {"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}]}"#).events;
+    assert_eq!(
+        events.last(),
+        Some(&AiStreamEvent::Error("ai_output_incomplete".into()))
+    );
+    assert_eq!(
+        parse_anthropic_data_line(
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#
+        )
+        .events,
+        vec![AiStreamEvent::Error("ai_output_incomplete".into())]
+    );
+}
+
+#[tokio::test]
+async fn xai_template_discovers_language_models_with_the_stored_key() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut provider = new_provider_from_template(
+        provider_template_by_type("xai"),
+        "grok-provider".into(),
+        "xAI (Grok)".into(),
+        1,
+    );
+    assert_eq!(provider["baseUrl"], "https://api.x.ai/v1");
+    assert_eq!(provider["apiProtocol"], "responses");
+    assert_eq!(provider["models"], serde_json::json!(["grok-4.6"]));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    provider["baseUrl"] =
+        serde_json::json!(format!("http://{}/v1", listener.local_addr().unwrap()));
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(stream.read_u8().await.unwrap());
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        assert!(headers.starts_with("GET /v1/language-models HTTP/1.1"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer fixture-key")
+        );
+        let body = serde_json::json!({"models":[{"id":"grok-4.6","input_modalities":["text","image"],"output_modalities":["text"]},{"id":"grok-4.5","output_modalities":["text"]}]}).to_string();
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+    });
+    let view = provider_views(&[provider])[0].clone();
+    assert_eq!(view.api_protocol, AiApiProtocol::Responses);
+    let refresh = fetch_provider_models(view, Some(zeroize::Zeroizing::new("fixture-key".into())))
+        .await
+        .unwrap();
+    assert_eq!(refresh.models, vec!["grok-4.5", "grok-4.6"]);
+    server.await.unwrap();
+    assert_eq!(
+        model_context_window(
+            "grok-4.6",
+            &serde_json::Map::new(),
+            None,
+            &serde_json::Map::new()
+        ),
+        500_000
+    );
+}
+
+#[test]
+fn deepseek_flash_template_has_current_name_and_capabilities() {
+    let provider = new_provider_from_template(
+        provider_template_by_type("deepseek"),
+        "deepseek-provider".into(),
+        "DeepSeek".into(),
+        1,
+    );
+    assert_eq!(
+        provider["models"],
+        serde_json::json!(["deepseek-flash", "deepseek-v4-pro"])
+    );
+    for model in [
+        "deepseek-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    ] {
+        assert_eq!(
+            model_context_window(
+                model,
+                &serde_json::Map::new(),
+                None,
+                &serde_json::Map::new()
+            ),
+            1_048_576
+        );
+    }
+    let capability = model_reasoning_capability("deepseek", "deepseek-flash");
+    assert!(capability.known_model);
+    assert_eq!(
+        capability.request_format,
+        AiReasoningRequestFormat::DeepSeek
+    );
+    assert_eq!(
+        capability.levels,
+        vec![
+            AiReasoningLevel::None,
+            AiReasoningLevel::Low,
+            AiReasoningLevel::High,
+            AiReasoningLevel::Max
+        ]
     );
 }

@@ -754,6 +754,8 @@ impl Drop for StandaloneSftpSecondaryForm {
 }
 
 pub(in crate::workspace) struct NewConnectionForm {
+    // Reauthentication submits into the existing logical session, never a second sidebar row.
+    pub(in crate::workspace) standalone_connection_id: Option<String>,
     pub(in crate::workspace) transport: NewConnectionTransport,
     /// Selects one discovered shell for this one-shot local terminal launch.
     pub(in crate::workspace) local_shell_id: Option<String>,
@@ -787,6 +789,10 @@ pub(in crate::workspace) struct NewConnectionForm {
     pub(in crate::workspace) standalone_sftp_secondary: StandaloneSftpSecondaryForm,
     pub(in crate::workspace) saved_password_keychain_id: Option<String>,
     pub(in crate::workspace) password_loaded: bool,
+    // A revealed value is presentation state until the user edits it.
+    pub(in crate::workspace) password_from_store: bool,
+    pub(in crate::workspace) password_load_id: Option<u64>,
+    pub(in crate::workspace) password_load_failed: bool,
     pub(in crate::workspace) password_visible: bool,
     pub(in crate::workspace) key_path: String,
     pub(in crate::workspace) managed_key_id: String,
@@ -1056,6 +1062,7 @@ impl fmt::Debug for NewConnectionForm {
 impl Default for NewConnectionForm {
     fn default() -> Self {
         Self {
+            standalone_connection_id: None,
             transport: NewConnectionTransport::Ssh,
             local_shell_id: None,
             name: String::new(),
@@ -1080,6 +1087,9 @@ impl Default for NewConnectionForm {
             standalone_sftp_secondary: StandaloneSftpSecondaryForm::default(),
             saved_password_keychain_id: None,
             password_loaded: true,
+            password_from_store: false,
+            password_load_id: None,
+            password_load_failed: false,
             password_visible: false,
             key_path: String::new(),
             managed_key_id: String::new(),
@@ -1222,6 +1232,36 @@ pub(in crate::workspace) fn form_from_remote_desktop_profile(
     form.remote_desktop_session_options = profile.session_options;
     form.remote_desktop_profile_id = Some(profile.id.clone());
     form.remote_desktop_ssh_gateway_connection_id = profile.ssh_gateway_connection_id.clone();
+    match &profile.upstream_proxy {
+        oxideterm_connections::SavedUpstreamProxyPolicy::Direct => {
+            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Direct
+        }
+        oxideterm_connections::SavedUpstreamProxyPolicy::UseGlobal => {
+            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::UseGlobal
+        }
+        oxideterm_connections::SavedUpstreamProxyPolicy::Custom { proxy } => {
+            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Custom;
+            form.upstream_proxy_protocol = proxy.protocol;
+            form.upstream_proxy_host = proxy.host.clone();
+            form.upstream_proxy_port = proxy.port.to_string();
+            form.upstream_proxy_remote_dns = proxy.remote_dns;
+            form.upstream_proxy_no_proxy = proxy.no_proxy.clone();
+            match &proxy.auth {
+                oxideterm_connections::SavedUpstreamProxyAuth::None => {
+                    form.upstream_proxy_auth = NewConnectionUpstreamProxyAuth::None
+                }
+                oxideterm_connections::SavedUpstreamProxyAuth::Password {
+                    username,
+                    keychain_id,
+                    ..
+                } => {
+                    form.upstream_proxy_auth = NewConnectionUpstreamProxyAuth::Password;
+                    form.upstream_proxy_username = username.clone();
+                    form.upstream_proxy_password_keychain_id = keychain_id.clone();
+                }
+            }
+        }
+    }
     form.saved_password_keychain_id = profile.credential_ref.clone();
     form.save_password = profile.credential_ref.is_some();
     form.group = profile.group.clone().unwrap_or(ungrouped_label);
@@ -1423,6 +1463,15 @@ pub(in crate::workspace) fn toggle_connection_secret_field_visibility(
 ) -> bool {
     match field {
         NewConnectionField::Password => {
+            if form.password_visible && form.password_from_store {
+                // Hiding a saved value releases the preview; replacement drafts stay editable.
+                zeroize::Zeroize::zeroize(&mut form.password);
+                form.password_from_store = false;
+                form.password_loaded = false;
+                if form.focused_field == NewConnectionField::Password {
+                    clear_connection_selection(form);
+                }
+            }
             form.password_visible = !form.password_visible;
             true
         }
@@ -1675,7 +1724,9 @@ pub(in crate::workspace) fn next_connection_field(
     if upstream_proxy_policy == NewConnectionUpstreamProxyPolicy::Custom
         && matches!(
             transport,
-            NewConnectionTransport::Ssh | NewConnectionTransport::StandaloneSftp
+            NewConnectionTransport::Ssh
+                | NewConnectionTransport::StandaloneSftp
+                | NewConnectionTransport::Rdp
         )
     {
         fields.extend([
@@ -1872,6 +1923,15 @@ pub(in crate::workspace) fn next_standalone_sftp_field(
     fields[next]
 }
 
+pub(in crate::workspace) fn password_draft_mut(form: &mut NewConnectionForm) -> &mut String {
+    // Typing supersedes any pending read, even if the replacement is later cleared.
+    form.password_loaded = true;
+    form.password_load_id = None;
+    form.password_load_failed = false;
+    form.password_from_store = false;
+    &mut form.password
+}
+
 pub(in crate::workspace) fn current_connection_field_mut(
     form: &mut NewConnectionForm,
 ) -> &mut String {
@@ -1880,7 +1940,7 @@ pub(in crate::workspace) fn current_connection_field_mut(
         NewConnectionField::Host => &mut form.host,
         NewConnectionField::Port => &mut form.port,
         NewConnectionField::Username => &mut form.username,
-        NewConnectionField::Password => &mut form.password,
+        NewConnectionField::Password => password_draft_mut(form),
         NewConnectionField::KeyPath => &mut form.key_path,
         NewConnectionField::ManagedKeyId => &mut form.managed_key_id,
         NewConnectionField::CertPath => &mut form.cert_path,
@@ -2472,6 +2532,20 @@ mod tests {
             domain: Some("EXAMPLE".to_string()),
             credential_ref: Some("remote-desktop:remote-1".to_string()),
             ssh_gateway_connection_id: Some("gateway-1".to_string()),
+            upstream_proxy: SavedUpstreamProxyPolicy::Custom {
+                proxy: oxideterm_connections::SavedUpstreamProxyConfig {
+                    protocol: oxideterm_connections::SavedUpstreamProxyProtocol::Socks5,
+                    host: "proxy.test".into(),
+                    port: 1080,
+                    remote_dns: false,
+                    no_proxy: "*.internal".into(),
+                    auth: oxideterm_connections::SavedUpstreamProxyAuth::Password {
+                        username: "proxy-user".into(),
+                        keychain_id: Some("proxy-reference".into()),
+                        plaintext_password: None,
+                    },
+                },
+            },
             read_only: true,
             session_options,
             created_at: now,
@@ -2503,6 +2577,20 @@ mod tests {
         );
         assert!(form.save_password);
         assert!(form.password.is_empty());
+        assert_eq!(
+            form.upstream_proxy_policy,
+            super::NewConnectionUpstreamProxyPolicy::Custom
+        );
+        assert_eq!(form.upstream_proxy_host, "proxy.test");
+        assert_eq!(form.upstream_proxy_port, "1080");
+        assert_eq!(form.upstream_proxy_username, "proxy-user");
+        assert_eq!(
+            form.upstream_proxy_password_keychain_id.as_deref(),
+            Some("proxy-reference")
+        );
+        assert!(form.upstream_proxy_password.is_empty());
+        assert!(!form.upstream_proxy_remote_dns);
+        assert_eq!(form.upstream_proxy_no_proxy, "*.internal");
     }
 
     #[test]

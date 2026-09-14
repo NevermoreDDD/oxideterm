@@ -45,6 +45,7 @@ impl WorkspaceApp {
                 }
                 "enter" => {
                     self.resolve_ai_tool_candidate_selection(
+                        selection.generation,
                         selection.tool_call_id,
                         Some(selection.selected_index),
                         cx,
@@ -53,6 +54,7 @@ impl WorkspaceApp {
                 }
                 "escape" => {
                     self.resolve_ai_tool_candidate_selection(
+                        selection.generation,
                         selection.tool_call_id,
                         None,
                         cx,
@@ -304,7 +306,7 @@ impl WorkspaceApp {
                     }
                     true
                 }
-                "enter" if !event.keystroke.modifiers.shift && !self.ai_entity.read(cx).chat_is_loading() => {
+                "enter" if !event.keystroke.modifiers.shift => {
                     self.send_ai_chat_draft(cx);
                     true
                 }
@@ -343,7 +345,6 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match action {
-            AiChatFooterAction::Submit if self.ai_entity.read(cx).chat_is_loading() => self.cancel_ai_chat_stream(cx),
             AiChatFooterAction::Submit if !self.ai_entity.read(cx).chat_ui().draft.trim().is_empty() => {
                 self.send_ai_chat_draft(cx)
             }

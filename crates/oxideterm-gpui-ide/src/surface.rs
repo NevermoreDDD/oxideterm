@@ -203,6 +203,8 @@ impl IdeSurfaceMount {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdeRuntimeSettings {
     pub auto_save: bool,
+    pub editor_font_family: String,
+    pub editor_font_weight: f32,
     pub editor_font_fallback: Option<String>,
     pub editor_font_size: f32,
     pub editor_line_height: f32,
@@ -215,6 +217,11 @@ impl Default for IdeRuntimeSettings {
     fn default() -> Self {
         Self {
             auto_save: false,
+            editor_font_family: oxideterm_theme::default_tokens()
+                .metrics
+                .markdown_code_font_family
+                .into(),
+            editor_font_weight: 400.0,
             editor_font_fallback: None,
             editor_font_size: 14.0,
             editor_line_height: 1.2,
@@ -250,6 +257,7 @@ struct ProjectOpenResult {
 
 #[derive(Clone, Debug)]
 struct FileOpenResult {
+    format: oxideterm_ide_core::TextFileFormat,
     location: IdeLocation,
     text: String,
     version: SavedFileVersion,
@@ -489,6 +497,7 @@ pub struct IdeSurface {
     conflict_state: Option<ConflictState>,
     pending_restore_files: Vec<String>,
     pending_restore_dirty_contents: BTreeMap<String, String>,
+    pending_restore_file_formats: BTreeMap<String, TextFileFormat>,
     pending_reconnect_restore_node_id: Option<String>,
     pending_reconnect_restore_files_remaining: usize,
     last_error: Option<String>,
@@ -512,6 +521,8 @@ pub struct IdeSurface {
     agent_opt_in_open: bool,
     agent_opt_in_remember: bool,
     agent_status_menu: Option<AgentStatusMenu>,
+    file_format_menu: Option<FileFormatMenu>,
+    file_format_bounds: [Option<Bounds<Pixels>>; 2],
     agent_status_trigger_bounds: Option<Bounds<Pixels>>,
     agent_remove_confirm_open: bool,
     agent_action: Option<AgentActionKind>,
@@ -545,3 +556,5 @@ include!("surface/render_dialogs.rs");
 include!("surface/render_helpers.rs");
 include!("surface/tree_row.rs");
 include!("surface/helpers.rs");
+
+include!("surface/file_format.rs");

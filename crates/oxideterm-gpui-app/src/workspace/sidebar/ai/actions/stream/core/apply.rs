@@ -154,6 +154,7 @@ impl AiWorkspaceEntity {
         }
         // Advance only after the ACP prompt completed successfully. Failed or
         // cancelled turns retain the previous cursor so context is never lost.
+        self.history_metadata_changed(conversation_id);
         self.persist_chat_state();
         true
     }
@@ -174,6 +175,7 @@ impl AiWorkspaceEntity {
         let Some(mut state) = ai_acp_session_state(conversation) else {
             return false;
         };
+        let title_changed = matches!(&update, oxideterm_ai::AcpSessionStateUpdate::SessionInfo { title: Some(title), .. } if !title.trim().is_empty());
         match update {
             oxideterm_ai::AcpSessionStateUpdate::ConfigOptions(config_options) => {
                 synchronize_ai_acp_config_selections(
@@ -213,6 +215,8 @@ impl AiWorkspaceEntity {
             return false;
         };
         metadata.insert(AI_ACP_SESSION_METADATA_KEY.to_string(), value);
+        self.history_metadata_changed(conversation_id);
+        if title_changed { self.history_title_changed(conversation_id); }
         self.persist_chat_state();
         true
     }
@@ -227,7 +231,7 @@ impl AiWorkspaceEntity {
         session_modes: Option<oxideterm_ai::AcpSessionModeState>,
         agent_id: &str,
     ) -> bool {
-        let current_generation = self.chat_stream_generation();
+        let current_generation = if self.is_chat_stream_generation(generation) { generation } else { return false; };
         let applied = apply_ai_acp_session_started_to_conversations(
             &mut self.conversation_state_mut().conversations,
             current_generation,
@@ -240,6 +244,7 @@ impl AiWorkspaceEntity {
             agent_id,
         );
         if applied {
+            self.history_metadata_changed(conversation_id);
             self.persist_chat_state();
         }
         applied
@@ -253,30 +258,26 @@ impl AiWorkspaceEntity {
         event: AiStreamEvent,
         safe_error: Option<String>,
     ) -> AiStreamApplyOutcome {
-        if !self.is_chat_stream_generation(generation) {
+        if !self.chat_stream_matches(generation, conversation_id, message_id) {
             return AiStreamApplyOutcome::Stale;
         }
         match event {
+            AiStreamEvent::Usage { .. } => AiStreamApplyOutcome::Applied,
             AiStreamEvent::Content(chunk) => {
-                self.update_chat_message(conversation_id, message_id, |message| {
-                    message.content.push_str(&chunk);
-                    append_ai_turn_text_part(message, "text", &chunk, false);
-                });
+                self.append_chat_stream_text(conversation_id, message_id, &chunk, false);
                 AiStreamApplyOutcome::Applied
             }
             AiStreamEvent::Thinking(chunk) => {
-                self.update_chat_message(conversation_id, message_id, |message| {
-                    message
-                        .thinking_content
-                        .get_or_insert_with(String::new)
-                        .push_str(&chunk);
-                    append_ai_turn_text_part(message, "thinking", &chunk, true);
-                });
+                self.append_chat_stream_text(conversation_id, message_id, &chunk, true);
                 AiStreamApplyOutcome::Applied
             }
-            AiStreamEvent::ProviderResponsePart { .. } => {
-                // The live tool loop consumes provider replay metadata before
-                // UI delivery; other stream surfaces intentionally ignore it.
+            AiStreamEvent::ProviderResponsePart {
+                provider_type,
+                part,
+            } => {
+                self.update_chat_message(conversation_id, message_id, |message| {
+                    oxideterm_ai::append_responses_round(message, &provider_type, part);
+                });
                 AiStreamApplyOutcome::Applied
             }
             AiStreamEvent::ToolCall {
@@ -330,6 +331,8 @@ impl AiWorkspaceEntity {
                 AiStreamApplyOutcome::Applied
             }
             AiStreamEvent::Done => {
+                let child = self.is_child_stream(generation);
+                let agent = self.agent_run(generation);
                 self.update_chat_message(conversation_id, message_id, |message| {
                     // Older prompts asked models to append a private evidence block.
                     // Keep the visible answer and remove only that transport artifact.
@@ -339,11 +342,17 @@ impl AiWorkspaceEntity {
                     set_ai_turn_status(message, "complete");
                 });
                 self.complete_chat_stream(generation);
-                self.set_chat_loading(false);
+                if !child {
+                    self.set_conversation_loading(conversation_id, false);
+                    if let Some(agent) = agent { self.agents.groups.remove(&agent.group_id); }
+                }
+                self.refresh_agent_records();
                 self.persist_chat_state();
                 AiStreamApplyOutcome::Completed
             }
             AiStreamEvent::Error(_) => {
+                let child = self.is_child_stream(generation);
+                let agent = self.agent_run(generation);
                 let safe_error = safe_error.unwrap_or_default();
                 self.update_chat_message(conversation_id, message_id, |message| {
                     message.is_streaming = false;
@@ -357,7 +366,11 @@ impl AiWorkspaceEntity {
                     set_ai_turn_status(message, "error");
                 });
                 self.complete_chat_stream(generation);
-                self.set_chat_loading(false);
+                if !child {
+                    self.set_conversation_loading(conversation_id, false);
+                    if let Some(agent) = agent { self.agents.groups.remove(&agent.group_id); }
+                }
+                self.refresh_agent_records();
                 self.persist_chat_state();
                 AiStreamApplyOutcome::Failed(safe_error)
             }
@@ -430,8 +443,14 @@ impl WorkspaceApp {
         event: AiStreamEvent,
         cx: &mut Context<Self>,
     ) {
-        let safe_error = matches!(&event, AiStreamEvent::Error(_))
-            .then(|| self.i18n.t("settings_view.ai.acp_agent_error_unknown"));
+        let safe_error = match &event {
+            AiStreamEvent::Error(error) => Some(
+                self.i18n.t(oxideterm_ai::stream_error_label(error)
+                    .unwrap_or("settings_view.ai.acp_agent_error_unknown")),
+            ),
+            _ => None,
+        };
+        let child_message = self.ai_entity.read(cx).is_agent_message(message_id);
         let outcome = self.ai_entity.update(cx, |ai, _cx| {
             ai.apply_stream_event_state(
                 generation,
@@ -450,13 +469,16 @@ impl WorkspaceApp {
                         oxideterm_ai::RuntimeRevocationReason::ToolSessionFinished,
                     );
                 });
+                if child_message { self.ai_entity.read(cx).persist_agent_records(); return; }
                 self.persist_ai_assistant_turn_end(
                     conversation_id,
                     message_id,
                     "complete",
                     cx,
                 );
-                self.maybe_start_ai_auto_compaction(conversation_id, cx);
+                if !self.send_next_queued_ai_message(conversation_id, cx) {
+                    self.maybe_start_ai_auto_compaction(conversation_id, cx);
+                }
             }
             AiStreamApplyOutcome::Failed(safe_error) => {
                 self.ai_runtime_context.update(cx, |runtime, _cx| {
@@ -465,6 +487,10 @@ impl WorkspaceApp {
                         oxideterm_ai::RuntimeRevocationReason::ToolSessionFinished,
                     );
                 });
+                if child_message {
+                    self.notify_ai_agent_attention(conversation_id, message_id, "ai.agents.failed", cx);
+                    self.ai_entity.read(cx).persist_agent_records(); return;
+                }
                 // Provider errors may contain response bodies or request
                 // metadata. Only a localized stable category reaches the
                 // conversation, diagnostics, notifications, and persistence.
@@ -646,7 +672,11 @@ impl WorkspaceApp {
         {
             return;
         }
+        if name == "ask_user" && matches!(status, "completed" | "error" | "rejected") {
+            self.ai_entity.update(cx, |ai, _| { ai.pending_user_questions.remove(&(generation, tool_call_id.to_owned())); });
+        }
         let persisted_arguments = sanitize_ai_tool_arguments_for_persistence(arguments);
+        if status == "pending_user_approval" { self.notify_ai_agent_attention(conversation_id, message_id, "ai.agents.approval", cx); }
         let persisted_result = result
             .as_ref()
             .map(|result| oxideterm_ai::sanitize_tool_result_json_for_persistence(name, result));
@@ -674,6 +704,9 @@ impl WorkspaceApp {
                     round_id_override.as_deref(),
                     round_number_override,
                 );
+                if let Some(call) = message.tool_calls.iter_mut().find(|call| call.get("id").and_then(serde_json::Value::as_str) == Some(tool_call_id)) {
+                    call["approvalGeneration"] = serde_json::json!(generation);
+                }
                 let (id, number) = ai_turn_round_for_tool_call_with_override(
                     message,
                     tool_call_id,
@@ -684,6 +717,16 @@ impl WorkspaceApp {
                 round_number = Some(number);
             });
         });
+        if result.is_some() || matches!(status, "rejected" | "completed" | "error") {
+            self.ai_entity.update(cx, |ai, _cx| {
+                let run = ai.agent_run(generation);
+                ai.agents.tool_leases.retain(|(_, id), leases| id != tool_call_id || !leases.iter().any(|lease| Some(&lease.lease().owner) == run.as_ref()));
+            });
+        }
+        if self.ai_entity.read(cx).is_agent_message(message_id) {
+            if should_persist { self.ai_entity.read(cx).persist_agent_records(); }
+            return;
+        }
         if should_persist {
             let now = ai_now_ms();
             let round_id_value = round_id.clone();

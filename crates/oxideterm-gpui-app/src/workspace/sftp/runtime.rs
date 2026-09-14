@@ -50,6 +50,33 @@ struct SftpRemoteListOutcome {
     changed: bool,
 }
 
+fn sftp_open_presentation(
+    preferred: oxideterm_settings::SftpPresentationPreference,
+    existing_tab: bool,
+    sftp_tab_active: bool,
+) -> oxideterm_settings::SftpPresentationPreference {
+    // The sidebar is hidden while an SFTP tab is active and must not take over
+    // its shared entity. Existing tabs also retain their detached-window routing.
+    if existing_tab || sftp_tab_active {
+        oxideterm_settings::SftpPresentationPreference::Tab
+    } else {
+        preferred
+    }
+}
+
+fn sidebar_sftp_target(
+    opened: Option<&NodeId>,
+    pinned: bool,
+    focused: Option<NodeId>,
+) -> Option<NodeId> {
+    let opened = opened?;
+    if pinned {
+        Some(opened.clone())
+    } else {
+        focused
+    }
+}
+
 impl SftpWorkspaceEntity {
     fn remote_load_state(&self) -> SftpRemoteLoadState {
         SftpRemoteLoadState {
@@ -865,7 +892,11 @@ impl WorkspaceApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.settings_store.settings().sftp.presentation {
+        match self.sftp_presentation_for_node(
+            &node_id,
+            self.settings_store.settings().sftp.presentation,
+            cx,
+        ) {
             oxideterm_settings::SftpPresentationPreference::Ask => {
                 self.sftp_presentation_request = Some(SftpPresentationRequest {
                     node_id,
@@ -881,6 +912,22 @@ impl WorkspaceApp {
                 self.open_sftp_sidebar_surface(node_id, remote_path, cx);
             }
         }
+    }
+
+    fn sftp_presentation_for_node(
+        &self,
+        node_id: &NodeId,
+        preferred: oxideterm_settings::SftpPresentationPreference,
+        cx: &App,
+    ) -> oxideterm_settings::SftpPresentationPreference {
+        sftp_open_presentation(
+            preferred,
+            self.sftp_tab_nodes
+                .values()
+                .any(|existing| existing == node_id),
+            self.active_tab(cx)
+                .is_some_and(|tab| tab.kind == TabKind::Sftp),
+        )
     }
 
     pub(in crate::workspace) fn open_sftp_tab_surface(
@@ -1089,7 +1136,7 @@ impl WorkspaceApp {
             return;
         };
         self.edit_settings(|settings| settings.sftp.presentation = preference, cx);
-        match preference {
+        match self.sftp_presentation_for_node(&request.node_id, preference, cx) {
             oxideterm_settings::SftpPresentationPreference::Ask => {}
             oxideterm_settings::SftpPresentationPreference::Tab => {
                 self.open_sftp_tab_surface(request.node_id, request.remote_path, cx);
@@ -1106,6 +1153,8 @@ impl WorkspaceApp {
         remote_path: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // An explicit request for another server stays visible until the user enables following.
+        self.embedded_sftp_pinned = self.active_ssh_terminal_node_id(cx).as_ref() != Some(&node_id);
         self.embedded_sftp_node_id = Some(node_id.clone());
         self.active_ssh_node_id = Some(node_id.clone());
         self.expanded_ssh_nodes.insert(node_id.clone());
@@ -1134,6 +1183,7 @@ impl WorkspaceApp {
         }
 
         self.embedded_sftp_node_id = None;
+        self.embedded_sftp_pinned = false;
         self.embedded_sftp_sidebar_resizing = false;
         if self
             .sftp_presentation_request
@@ -1159,6 +1209,14 @@ impl WorkspaceApp {
         true
     }
 
+    pub(in crate::workspace) fn embedded_sftp_target(&self, cx: &App) -> Option<NodeId> {
+        sidebar_sftp_target(
+            self.embedded_sftp_node_id.as_ref(),
+            self.embedded_sftp_pinned,
+            self.active_ssh_terminal_node_id(cx),
+        )
+    }
+
     pub(in crate::workspace) fn activate_embedded_sftp_sidebar_if_visible(
         &mut self,
         cx: &mut Context<Self>,
@@ -1171,9 +1229,31 @@ impl WorkspaceApp {
         {
             return;
         }
-        let Some(node_id) = self.embedded_sftp_node_id.clone() else {
+        let target = self.embedded_sftp_target(cx);
+        let previous = {
+            let sftp = self.sftp_view.read(cx);
+            (sftp.current_surface_id == Some(SftpSurfaceId::Sidebar))
+                .then(|| sftp.current_remote_id.clone())
+                .flatten()
+        };
+        if let Some(previous) = previous.filter(|previous| {
+            Some(previous)
+                != target
+                    .as_ref()
+                    .map(|node| SftpRemoteId::Node(node.clone()))
+                    .as_ref()
+        }) {
+            // Retire pending dialogs and selections with the old target. Transfers
+            // retain their own remote identity and node consumer.
+            self.sftp_view.update(cx, |sftp, cx| {
+                sftp.deactivate_view(SftpSurfaceId::Sidebar, &previous, cx);
+            });
+            self.ime_marked_text = None;
+        }
+        let Some(node_id) = target else {
             return;
         };
+        self.embedded_sftp_node_id = Some(node_id.clone());
         let already_active = {
             let sftp = self.sftp_view.read(cx);
             sftp.current_surface_id == Some(SftpSurfaceId::Sidebar)
@@ -1412,7 +1492,10 @@ impl WorkspaceApp {
                 };
                 !self.sidebar_collapsed
                     && self.effective_sidebar_panel_section() == SidebarSection::Sessions
-                    && self.embedded_sftp_node_id.as_ref() == Some(node_id)
+                    && !self
+                        .active_tab(cx)
+                        .is_some_and(|tab| tab.kind == TabKind::Sftp)
+                    && self.embedded_sftp_target(cx).as_ref() == Some(node_id)
             }
         }
     }
@@ -1719,6 +1802,45 @@ mod remote_load_state_tests {
     use super::*;
 
     #[test]
+    fn reopening_expanded_sftp_keeps_directory_load_on_visible_tab() {
+        use oxideterm_settings::SftpPresentationPreference;
+
+        let mut sftp = SftpWorkspaceEntity::default();
+        let remote = SftpRemoteId::Node(NodeId::new("reopened-server"));
+        let tab = SftpSurfaceId::Tab(TabId(1));
+        sftp.activate_view(SftpSurfaceId::Sidebar, remote.clone());
+        sftp.activate_view(tab, remote.clone());
+        // Complete the initial listing before repeating the sidebar action.
+        sftp.start_remote_load(tab, &remote)
+            .expect("initial tab load");
+        sftp.set_remote_load_state(sftp.remote_load_state().complete());
+        let presentation = sftp_open_presentation(SftpPresentationPreference::Sidebar, true, true);
+        let surface = match presentation {
+            SftpPresentationPreference::Tab => tab,
+            SftpPresentationPreference::Sidebar => SftpSurfaceId::Sidebar,
+            SftpPresentationPreference::Ask => panic!("existing tab must not ask again"),
+        };
+        sftp.activate_view(surface, remote.clone());
+
+        assert!(sftp.start_remote_load(tab, &remote).is_some());
+        assert!(!sftp.remote_load_pending);
+        assert!(sftp.remote_load_inflight);
+    }
+
+    #[test]
+    fn sftp_presentation_reuses_tabs_without_changing_first_open_preference() {
+        use oxideterm_settings::SftpPresentationPreference::{Ask, Sidebar, Tab};
+
+        for preference in [Ask, Sidebar, Tab] {
+            assert_eq!(sftp_open_presentation(preference, false, false), preference);
+            // Reuse an existing tab even when another tab or window is focused.
+            assert_eq!(sftp_open_presentation(preference, true, false), Tab);
+            // A different node must not activate a hidden sidebar either.
+            assert_eq!(sftp_open_presentation(preference, false, true), Tab);
+        }
+    }
+
+    #[test]
     fn sftp_ready_event_preserves_pending_terminal_cwd() {
         let mut sftp = SftpWorkspaceEntity::default();
         // The shared session may become ready after the terminal cwd has queued a newer load.
@@ -1836,6 +1958,25 @@ fn apply_tauri_transfer_completion(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_follows_focus_unless_pinned_and_stays_closed_until_opened() {
+        let a = NodeId::new("a");
+        let b = NodeId::new("b");
+        assert_eq!(
+            sidebar_sftp_target(Some(&a), false, Some(b.clone())),
+            Some(b.clone())
+        );
+        assert_eq!(
+            sidebar_sftp_target(Some(&a), true, Some(b.clone())),
+            Some(a.clone())
+        );
+        assert_eq!(sidebar_sftp_target(Some(&a), false, None), None);
+        assert_eq!(sidebar_sftp_target(Some(&a), true, None), Some(a));
+        assert_eq!(sidebar_sftp_target(None, false, Some(b)), None);
+    }
+
     #[test]
     fn stale_node_sftp_errors_are_connection_unavailable() {
         assert!(oxideterm_sftp::error_is_connection_unavailable(

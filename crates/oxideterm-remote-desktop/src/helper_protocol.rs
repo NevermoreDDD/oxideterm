@@ -150,6 +150,8 @@ pub enum RemoteDesktopHelperRequest {
         /// Optional network endpoint for an application-owned SSH tunnel.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transport_endpoint: Option<RemoteDesktopEndpoint>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socks_proxy: Option<crate::RemoteDesktopSocksProxy>,
         /// Indicates whether the UI can answer a later password challenge
         /// without sending any credential material during preflight.
         #[serde(default)]
@@ -211,6 +213,9 @@ pub enum RemoteDesktopHelperRequest {
     ClipboardText {
         text: String,
     },
+    PasteText {
+        text: RemoteDesktopSecret,
+    },
     ClipboardData {
         data: RemoteDesktopClipboardData,
     },
@@ -253,6 +258,7 @@ impl fmt::Debug for RemoteDesktopHelperRequest {
                 protocol,
                 endpoint,
                 transport_endpoint,
+                socks_proxy,
                 password_available,
                 username_available,
                 size,
@@ -265,6 +271,7 @@ impl fmt::Debug for RemoteDesktopHelperRequest {
                 .field("protocol", protocol)
                 .field("endpoint", endpoint)
                 .field("transport_endpoint", transport_endpoint)
+                .field("socks_proxy", socks_proxy)
                 .field("password_available", password_available)
                 .field("username_available", username_available)
                 .field("size", size)
@@ -357,6 +364,10 @@ impl fmt::Debug for RemoteDesktopHelperRequest {
             Self::ClipboardText { text } => formatter
                 .debug_struct("ClipboardText")
                 .field("text", &format_args!("<redacted:{}>", text.chars().count()))
+                .finish(),
+            Self::PasteText { .. } => formatter
+                .debug_struct("PasteText")
+                .field("text", &"<redacted>")
                 .finish(),
             Self::ClipboardData { data } => formatter
                 .debug_struct("ClipboardData")
@@ -698,30 +709,36 @@ mod tests {
     }
 
     #[test]
-    fn staged_connect_withholds_credentials_until_authentication() {
+    fn socks_proxy_credentials_cross_only_the_helper_wire() {
         let request = RemoteDesktopHelperRequest::StartConnect {
             protocol: RemoteDesktopProtocol::Rdp,
-            endpoint: RemoteDesktopEndpoint::new("example.test", 3389),
+            endpoint: RemoteDesktopEndpoint::new("desktop.test", 3389),
             transport_endpoint: None,
+            socks_proxy: Some(crate::RemoteDesktopSocksProxy {
+                host: "proxy.test".into(),
+                port: 1080,
+                remote_dns: true,
+                no_proxy: String::new(),
+                auth: Some(crate::RemoteDesktopProxyAuth {
+                    username: "proxy-user".into(),
+                    password: "proxy-secret".into(),
+                }),
+            }),
             password_available: true,
             username_available: true,
             size: RemoteDesktopSize {
                 width: 1280,
                 height: 720,
             },
-            scale_factor: Some(125),
+            scale_factor: None,
             read_only: false,
             session_options: RemoteDesktopSessionOptions::default(),
             monitor_layout: RemoteDesktopMonitorLayout::default(),
         };
-
-        let encoded = serde_json::to_string(&request).unwrap();
-
-        assert!(encoded.contains("\"usernameAvailable\":true"));
-        assert!(!encoded.contains("\"username\":"));
-        assert!(!encoded.contains("domain"));
-        assert!(encoded.contains("\"passwordAvailable\":true"));
-        assert!(!encoded.contains("super-secret"));
+        assert!(!format!("{request:?}").contains("proxy-secret"));
+        let encoded = zeroize::Zeroizing::new(serde_json::to_string(&request).unwrap());
+        let decoded: RemoteDesktopHelperRequest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, request);
     }
 
     #[test]

@@ -61,10 +61,10 @@ pub use oxideterm_sftp::{
 pub use oxideterm_x11_forwarding::{X11ForwardPolicy, X11ForwardTrust};
 pub use reconnect::{
     MAX_RETAINED_RECONNECT_JOBS, PhaseEvent, PhaseResult, ReconnectForwardRestorePlan,
-    ReconnectForwardRule, ReconnectForwardRuleSnapshot, ReconnectIdeSnapshot, ReconnectJob,
-    ReconnectNodeConnectionSnapshot, ReconnectNodeTerminalSnapshot, ReconnectNodeTransferSnapshot,
-    ReconnectOrchestratorStore, ReconnectPhase, ReconnectProgress, ReconnectSnapshot,
-    ReconnectTiming,
+    ReconnectForwardRule, ReconnectForwardRuleSnapshot, ReconnectIdeFileFormat,
+    ReconnectIdeSnapshot, ReconnectJob, ReconnectNodeConnectionSnapshot,
+    ReconnectNodeTerminalSnapshot, ReconnectNodeTransferSnapshot, ReconnectOrchestratorStore,
+    ReconnectPhase, ReconnectProgress, ReconnectSnapshot, ReconnectTiming,
 };
 pub use router::{
     FlatNode, NodeEventEmitter, NodeEventReceiver, NodeEventSequencer, NodeEventSubscription,
@@ -81,9 +81,10 @@ pub use transport::kerberos_credentials_available;
 pub use transport::{
     BoxedSshForwardStream, KeyboardInteractivePrompt, KeyboardInteractivePromptRequest,
     KeyboardInteractiveResponses, ManagedKeyResolver, RemoteForwardHandler, RemoteForwardedTcpIp,
-    SshCommandOutput, SshForwardStream, SshOutputChunk, SshPromptError, SshPromptHandler,
-    SshPtyHandle, SshSecretCommandOutput, SshShellChannel, SshTransportClient, SshTransportCommand,
-    SshTransportError, X11ForwardHandler, X11ForwardedChannel,
+    SshCommandOutput, SshForwardStream, SshOutputBoundary, SshOutputCancellation, SshOutputChunk,
+    SshPromptError, SshPromptHandler, SshPtyHandle, SshSecretCommandOutput, SshShellChannel,
+    SshTransportClient, SshTransportCommand, SshTransportError, X11ForwardHandler,
+    X11ForwardedChannel,
 };
 pub use upstream_proxy::{
     UpstreamProxyAuth, UpstreamProxyConfig, UpstreamProxyError, UpstreamProxyProtocol,

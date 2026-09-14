@@ -6,6 +6,42 @@ use oxideterm_editor_core::{BufferOffset, LineCol};
 
 use super::{EditorSaveStatus, TextEditorView, coords::floor_char_boundary, input};
 
+/// Host-resolved shortcuts share the app's persisted keybindings without
+/// coupling this reusable editor to the application settings crate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorShortcut {
+    Save,
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    Undo,
+    Redo,
+    AddNextMatch,
+    Find,
+}
+
+pub struct EditorKeybindings {
+    pub bindings: Vec<(gpui::KeyBinding, EditorShortcut)>,
+    pub normalize: fn(&gpui::Keystroke) -> Option<gpui::Keystroke>,
+}
+impl gpui::Global for EditorKeybindings {}
+
+impl EditorKeybindings {
+    pub fn resolve(&self, key: &gpui::Keystroke) -> Option<EditorShortcut> {
+        let key = (self.normalize)(key)?;
+        self.bindings
+            .iter()
+            .find(|(binding, _)| {
+                binding
+                    .keystrokes()
+                    .first()
+                    .is_some_and(|binding| key.should_match(binding))
+            })
+            .map(|(_, action)| *action)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EditorCommand {
     Save,
@@ -105,41 +141,64 @@ impl TextEditorView {
             self.activate_caret_blink(cx);
         }
 
-        if matches_tauri_plain_mod_key(key, modifiers, "s") {
-            self.save(window, cx);
-            return;
-        }
-        if matches_tauri_plain_mod_key(key, modifiers, "c") {
-            self.copy_selection_to_clipboard(cx);
-            return;
-        }
-        if matches_tauri_plain_mod_key(key, modifiers, "x") {
-            self.cut_selection_to_clipboard(cx);
-            return;
-        }
-        if matches_tauri_plain_mod_key(key, modifiers, "v") {
-            self.paste_from_clipboard(cx);
-            return;
-        }
-        if matches_tauri_plain_mod_key(key, modifiers, "a") {
-            self.select_all(cx);
-            return;
-        }
-        if matches_tauri_mod_key(key, modifiers, "z") {
-            if modifiers.shift {
-                self.redo(cx);
-            } else {
-                self.undo(cx);
+        if let Some(bindings) = cx.try_global::<EditorKeybindings>() {
+            if let Some(shortcut) = bindings.resolve(&event.keystroke) {
+                match shortcut {
+                    EditorShortcut::Save => self.save(window, cx),
+                    EditorShortcut::Copy => {
+                        self.copy_selection_to_clipboard(cx);
+                    }
+                    EditorShortcut::Cut => {
+                        self.cut_selection_to_clipboard(cx);
+                    }
+                    EditorShortcut::Paste => self.paste_from_clipboard(cx),
+                    EditorShortcut::SelectAll => self.select_all(cx),
+                    EditorShortcut::Undo => self.undo(cx),
+                    EditorShortcut::Redo => self.redo(cx),
+                    EditorShortcut::AddNextMatch => self.add_next_find_match_as_cursor(cx),
+                    // The IDE owns the search UI and handles this on the bubble path.
+                    EditorShortcut::Find => return,
+                }
+                cx.stop_propagation();
+                return;
             }
-            return;
-        }
-        if matches_tauri_plain_mod_key(key, modifiers, "y") {
-            self.redo(cx);
-            return;
-        }
-        if matches_tauri_plain_mod_key(key, modifiers, "d") {
-            self.add_next_find_match_as_cursor(cx);
-            return;
+        } else {
+            if matches_tauri_plain_mod_key(key, modifiers, "s") {
+                self.save(window, cx);
+                return;
+            }
+            if matches_tauri_plain_mod_key(key, modifiers, "c") {
+                self.copy_selection_to_clipboard(cx);
+                return;
+            }
+            if matches_tauri_plain_mod_key(key, modifiers, "x") {
+                self.cut_selection_to_clipboard(cx);
+                return;
+            }
+            if matches_tauri_plain_mod_key(key, modifiers, "v") {
+                self.paste_from_clipboard(cx);
+                return;
+            }
+            if matches_tauri_plain_mod_key(key, modifiers, "a") {
+                self.select_all(cx);
+                return;
+            }
+            if matches_tauri_mod_key(key, modifiers, "z") {
+                if modifiers.shift {
+                    self.redo(cx);
+                } else {
+                    self.undo(cx);
+                }
+                return;
+            }
+            if matches_tauri_plain_mod_key(key, modifiers, "y") {
+                self.redo(cx);
+                return;
+            }
+            if matches_tauri_plain_mod_key(key, modifiers, "d") {
+                self.add_next_find_match_as_cursor(cx);
+                return;
+            }
         }
         if commits_platform_text {
             return;
@@ -212,7 +271,7 @@ impl TextEditorView {
         let target_index = current_index
             .saturating_add_signed(row_delta)
             .min(max_index);
-        let Some(target_row) = rows.get(target_index).copied() else {
+        let Some(target_row) = rows.get(target_index) else {
             return;
         };
         let preferred_column = self.cursor.preferred_column_or(current_screen_column);
@@ -276,10 +335,7 @@ impl TextEditorView {
     }
 
     fn after_history_change(&mut self, cx: &mut Context<Self>) {
-        if let Some(syntax) = self.syntax.as_mut() {
-            let _ = self.buffer.with_text(|text| syntax.reparse(text));
-        }
-        self.refresh_highlights();
+        self.request_syntax(None, true, cx);
         self.clear_folds_after_buffer_change();
         self.refresh_find_matches();
         self.secondary_selections.clear();

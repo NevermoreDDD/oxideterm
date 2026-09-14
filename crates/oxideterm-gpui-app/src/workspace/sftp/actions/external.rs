@@ -50,6 +50,8 @@ impl WorkspaceApp {
         let Some(node_id) = self.visible_sftp_node_id(cx) else {
             return;
         };
+        let generation = self.sftp_view.read(cx).view_generation;
+        let remote_path = self.sftp_view.read(cx).remote_path.clone();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -61,6 +63,18 @@ impl WorkspaceApp {
                 return;
             };
             let _ = workspace.update(cx, |workspace, cx| {
+                if workspace.visible_sftp_node_id(cx).as_ref() != Some(&node_id)
+                    || workspace.sftp_view.read(cx).view_generation != generation
+                    || workspace.sftp_view.read(cx).remote_path != remote_path
+                {
+                    workspace.push_sftp_toast(
+                        workspace.i18n.t("sftp.sidebar.upload_target_changed"),
+                        None,
+                        TerminalNoticeVariant::Warning,
+                        cx,
+                    );
+                    return;
+                }
                 // The selected paths enter the same node-owned transfer path as
                 // drag-and-drop uploads; the picker does not create a transport.
                 workspace.queue_sftp_external_upload_paths_for_node(node_id, &paths, cx);

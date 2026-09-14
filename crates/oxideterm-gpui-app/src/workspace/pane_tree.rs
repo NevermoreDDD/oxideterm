@@ -63,6 +63,9 @@ fn serial_profile_line_ending(
 #[derive(Clone)]
 struct TerminalInputBroadcastRoute {
     source_pane_id: PaneId,
+    session_id: TerminalSessionId,
+    ai_runtime: gpui::WeakEntity<crate::workspace::ai_runtime_context::AiRuntimeContextEntity>,
+    agent_resources: oxideterm_ai::agent::AgentResourceCoordinator,
     tab_host: gpui::WeakEntity<tabs::WorkspaceTabHostEntity>,
     terminal: gpui::WeakEntity<WorkspaceTerminalEntity>,
 }
@@ -73,6 +76,13 @@ impl TerminalInputBroadcastRoute {
     }
 
     fn deliver(&self, kind: TerminalBroadcastInputKind, bytes: &[u8], cx: &mut App) {
+        if let Some(runtime) = self.ai_runtime.upgrade() {
+            if let Some(key) = runtime.read(cx).terminal_resource_key(self.session_id) {
+                if self.agent_resources.has_owner(&key) {
+                    self.agent_resources.invalidate(&key);
+                }
+            }
+        }
         let Some(tab_host) = self.tab_host.upgrade() else {
             return;
         };
@@ -105,6 +115,20 @@ impl TerminalInputBroadcastRoute {
             terminal.filter_broadcast_targets(candidates)
         });
         for pane_id in targets {
+            let session_id = tab_host
+                .read(cx)
+                .tabs()
+                .iter()
+                .find_map(|tab| tab.root_pane.as_ref()?.session_id_for_pane(pane_id));
+            if let Some(runtime) = self.ai_runtime.upgrade() {
+                if let Some(key) =
+                    session_id.and_then(|id| runtime.read(cx).terminal_resource_key(id))
+                {
+                    if self.agent_resources.has_owner(&key) {
+                        self.agent_resources.invalidate(&key);
+                    }
+                }
+            }
             let Some(pane) = tab_host.read(cx).panes().get(&pane_id).cloned() else {
                 continue;
             };
@@ -130,6 +154,9 @@ impl WorkspaceApp {
         let terminal_label = pane.read(cx).title().to_string();
         let broadcaster = TerminalInputBroadcastRoute {
             source_pane_id: pane_id,
+            session_id,
+            ai_runtime: self.ai_runtime_context.downgrade(),
+            agent_resources: self.ai_entity.read(cx).agents.services.resources.clone(),
             tab_host: self.tab_host.downgrade(),
             terminal: self.terminal.downgrade(),
         }
@@ -511,6 +538,7 @@ impl WorkspaceApp {
         }) {
             self.register_terminal_pane(pane_id, session_id, pane.clone(), window, cx);
             self.bind_terminal_location(target.tab_id, pane_id, session_id, cx);
+            self.activate_embedded_sftp_sidebar_if_visible(cx);
             self.needs_active_pane_focus = true;
             pane.update(cx, |pane, cx| pane.focus(window, cx));
             cx.notify();
@@ -545,6 +573,7 @@ impl WorkspaceApp {
         });
         if mounted {
             self.bind_terminal_location(target.tab_id, pane_id, session_id, cx);
+            self.activate_embedded_sftp_sidebar_if_visible(cx);
             self.needs_active_pane_focus = true;
             self.focus_active_pane(window, cx);
             cx.notify();
@@ -613,6 +642,7 @@ impl WorkspaceApp {
             })
             .is_some()
         {
+            self.activate_embedded_sftp_sidebar_if_visible(cx);
             self.needs_active_pane_focus = true;
             self.focus_active_pane(window, cx);
             cx.notify();
@@ -668,6 +698,7 @@ impl WorkspaceApp {
         self.tab_host.update(cx, |tab_host, _| {
             tab_host.reset_to_single_pane(tab_id, active_pane_id, active_session_id);
         });
+        self.activate_embedded_sftp_sidebar_if_visible(cx);
         self.needs_active_pane_focus = true;
         self.focus_active_pane(window, cx);
         cx.notify();
@@ -779,6 +810,8 @@ impl WorkspaceApp {
                             let pane_id = *pane_id;
                             let tab_id = tab_id;
                             move |this, _event, window, cx| {
+                                // Release logical input ownership before focusing the native pane.
+                                this.blur_text_inputs(cx);
                                 if let Some(tab_id) = tab_id {
                                     this.tab_host.update(cx, |tab_host, _| {
                                         tab_host.set_active_pane(Some(tab_id), pane_id);
@@ -791,6 +824,7 @@ impl WorkspaceApp {
                                         tab_host.set_active_pane(None, pane_id);
                                     });
                                 }
+                                this.activate_embedded_sftp_sidebar_if_visible(cx);
                                 if let Some(pane) =
                                     this.tab_host.read(cx).panes().get(&pane_id).cloned()
                                 {

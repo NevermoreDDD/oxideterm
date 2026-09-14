@@ -206,8 +206,8 @@ impl AiActionResultLite {
 pub(in crate::workspace) async fn run_local_ai_command(
     command: &str,
     cwd: Option<&str>,
-    timeout_secs: u64,
     dangerous_command_approved: bool,
+    resource: Option<oxideterm_ai::agent::AgentResourceRecord>,
 ) -> AiActionResultLite {
     if oxideterm_ai::has_denied_commands(
         "run_command",
@@ -218,7 +218,7 @@ pub(in crate::workspace) async fn run_local_ai_command(
             ok: false,
             summary: "Local command failed.".to_string(),
             output: "Command denied for security reasons".to_string(),
-            data: serde_json::Value::Null,
+            data: serde_json::json!({"executionState": "not_started"}),
             error_code: Some("local_command_error".to_string()),
             error_message: Some("Command denied for security reasons".to_string()),
             risk: "execute",
@@ -250,7 +250,7 @@ pub(in crate::workspace) async fn run_local_ai_command(
                 ok: false,
                 summary: "Local command failed.".to_string(),
                 output: format!("Working directory does not exist: {cwd}"),
-                data: serde_json::Value::Null,
+                data: serde_json::json!({"executionState": "not_started"}),
                 error_code: Some("local_command_error".to_string()),
                 error_message: Some("Working directory does not exist.".to_string()),
                 risk: "execute",
@@ -264,11 +264,18 @@ pub(in crate::workspace) async fn run_local_ai_command(
         }
         process.current_dir(path);
     }
-    let timeout_secs = ai_local_exec_timeout_secs(timeout_secs);
-    match tokio::time::timeout(Duration::from_secs(timeout_secs), process.output()).await {
-        Ok(Ok(output)) => {
-            let stdout = truncate_ai_local_exec_output(&String::from_utf8_lossy(&output.stdout));
-            let stderr = truncate_ai_local_exec_output(&String::from_utf8_lossy(&output.stderr));
+    let evidence_record = resource.clone();
+    let mut dispatched = false;
+    let result = match async {
+        let process = oxideterm_ai::agent::AgentProcess::spawn(&mut process)?.track(resource);
+        dispatched = true;
+        process.output().await
+    }.await {
+        Ok(output) => {
+            let stdout_bytes = zeroize::Zeroizing::new(output.stdout);
+            let stderr_bytes = zeroize::Zeroizing::new(output.stderr);
+            let stdout = truncate_ai_local_exec_output(&String::from_utf8_lossy(&stdout_bytes));
+            let stderr = truncate_ai_local_exec_output(&String::from_utf8_lossy(&stderr_bytes));
             let exit_code = output.status.code();
             let has_output = !stdout.trim().is_empty() || !stderr.trim().is_empty();
             let ok = output.status.success() || (exit_code.is_none() && has_output);
@@ -306,7 +313,7 @@ pub(in crate::workspace) async fn run_local_ai_command(
                 data: serde_json::json!({
                     "exitCode": exit_code,
                     "timedOut": false,
-                    "executionState": if output.status.success() { "completed" } else { "output_captured" },
+                    "executionState": "completed",
                     "visibleInTerminal": false,
                 }),
                 error_code: (!ok).then(|| "local_command_failed".to_string()),
@@ -323,11 +330,11 @@ pub(in crate::workspace) async fn run_local_ai_command(
                 state_version: None,
             }
         }
-        Ok(Err(error)) => AiActionResultLite {
+        Err(error) => AiActionResultLite {
             ok: false,
             summary: "Local command failed.".to_string(),
             output: error.to_string(),
-            data: serde_json::Value::Null,
+            data: serde_json::json!({"executionState": if dispatched { "unknown" } else { "not_started" }}),
             error_code: Some("local_command_error".to_string()),
             error_message: Some("The local command could not be started.".to_string()),
             risk: "execute",
@@ -338,29 +345,10 @@ pub(in crate::workspace) async fn run_local_ai_command(
             verified: None,
             state_version: None,
         },
-        Err(_) => AiActionResultLite {
-            ok: false,
-            summary: "Local command timed out.".to_string(),
-            output: format!(
-                "[stderr]\nCommand timed out after {timeout_secs}s\n[exit_code: unknown]"
-            ),
-            data: serde_json::json!({
-                "exitCode": serde_json::Value::Null,
-                "timedOut": true,
-                "executionState": "timeout",
-                "visibleInTerminal": false,
-            }),
-            error_code: Some("local_command_timeout".to_string()),
-            error_message: Some("Command timed out.".to_string()),
-            risk: "execute",
-            target: None,
-            targets: Vec::new(),
-            next_actions: Vec::new(),
-            observations: Vec::new(),
-            verified: None,
-            state_version: None,
-        },
-    }
+
+    };
+    if let Some(record) = evidence_record { record.outcome(&result.output); }
+    result
 }
 
 pub(in crate::workspace) fn configure_ai_local_command_process(
@@ -376,12 +364,6 @@ pub(in crate::workspace) fn configure_ai_local_command_process(
     {
         let _ = process;
     }
-}
-
-pub(in crate::workspace) fn ai_local_exec_timeout_secs(timeout_secs: u64) -> u64 {
-    // Tauri's local_exec_command caps the backend timeout at 60 seconds even if
-    // a caller bypasses the tool schema bounds.
-    timeout_secs.min(60)
 }
 
 pub(in crate::workspace) fn ai_memory_settings_json(

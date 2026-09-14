@@ -1,4 +1,9 @@
-use std::{path::Path, sync::OnceLock, time::SystemTime};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+    time::SystemTime,
+};
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Debug)]
 pub struct TerminalShellToken {
@@ -24,11 +29,9 @@ struct HistoryFileSnapshot {
     len: u64,
 }
 
-#[derive(Clone, Debug)]
 struct LocalShellHistoryCache {
-    home: std::path::PathBuf,
     files: Vec<HistoryFileSnapshot>,
-    commands: Vec<String>,
+    commands: Zeroizing<Vec<String>>,
 }
 
 pub fn tokenize_terminal_command_line(
@@ -203,46 +206,68 @@ pub fn terminal_autosuggest_fuzzy_score(command: &str, query: &str) -> f64 {
 }
 
 pub fn load_local_shell_history_commands() -> Vec<String> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    load_local_shell_history_commands_from_home(Path::new(&home))
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    #[cfg(windows)]
+    let app_data = std::env::var_os("APPDATA");
+    #[cfg(not(windows))]
+    let app_data: Option<std::ffi::OsString> = None;
+    load_local_shell_history_commands_from_paths(&local_shell_history_paths(
+        home.as_deref().map(Path::new),
+        app_data.as_deref().map(Path::new),
+    ))
 }
 
-fn load_local_shell_history_commands_from_home(home: &Path) -> Vec<String> {
+fn local_shell_history_paths(home: Option<&Path>, app_data: Option<&Path>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(home) = home {
+        files.extend(
+            [
+                ".zsh_history",
+                ".bash_history",
+                ".zhistory",
+                ".local/share/fish/fish_history",
+            ]
+            .map(|file| home.join(file)),
+        );
+    }
+    if let Some(app_data) = app_data {
+        files
+            .push(app_data.join("Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"));
+    }
+    files
+}
+
+fn load_local_shell_history_commands_from_paths(files: &[PathBuf]) -> Vec<String> {
     const MAX_HISTORY_BYTES: usize = 512 * 1024;
     const MAX_COMMANDS: usize = 500;
     static LOCAL_SHELL_HISTORY: OnceLock<std::sync::Mutex<Option<LocalShellHistoryCache>>> =
         OnceLock::new();
-    let files = [
-        ".zsh_history",
-        ".bash_history",
-        ".zhistory",
-        ".local/share/fish/fish_history",
-    ];
-    let home = home.to_path_buf();
-    let snapshots = history_file_snapshots(&home, &files);
+    let snapshots = history_file_snapshots(files);
     let cache = LOCAL_SHELL_HISTORY.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache.lock()
         && let Some(cache) = guard.as_ref()
-        && cache.home == home
         && cache.files == snapshots
     {
-        return cache.commands.clone();
+        return cache.commands.to_vec();
     }
 
     let mut commands = Vec::new();
-    for file in files {
-        let path = home.join(file);
-        let Ok(mut content) = std::fs::read(&path) else {
+    for path in files {
+        let Ok(content) = std::fs::read(path) else {
             continue;
         };
-        if content.len() > MAX_HISTORY_BYTES {
-            content = content[content.len() - MAX_HISTORY_BYTES..].to_vec();
-        }
+        // History remains shell-owned; temporary reads and cached copies are cleared on drop.
+        let content = Zeroizing::new(content);
+        let tail = &content[content.len().saturating_sub(MAX_HISTORY_BYTES)..];
+        let text = Zeroizing::new(String::from_utf8_lossy(tail).into_owned());
         commands.extend(parse_terminal_history_file(
-            file,
-            &String::from_utf8_lossy(&content),
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+            &text,
         ));
     }
     if commands.len() > MAX_COMMANDS {
@@ -250,22 +275,20 @@ fn load_local_shell_history_commands_from_home(home: &Path) -> Vec<String> {
     }
     if let Ok(mut guard) = cache.lock() {
         *guard = Some(LocalShellHistoryCache {
-            home,
             files: snapshots,
-            commands: commands.clone(),
+            commands: Zeroizing::new(commands.clone()),
         });
     }
     commands
 }
 
-fn history_file_snapshots(home: &Path, files: &[&str]) -> Vec<HistoryFileSnapshot> {
+fn history_file_snapshots(files: &[PathBuf]) -> Vec<HistoryFileSnapshot> {
     files
         .iter()
-        .filter_map(|file| {
-            let path = home.join(file);
+        .filter_map(|path| {
             let metadata = std::fs::metadata(&path).ok()?;
             Some(HistoryFileSnapshot {
-                path,
+                path: path.clone(),
                 modified: metadata.modified().ok(),
                 len: metadata.len(),
             })
@@ -274,6 +297,24 @@ fn history_file_snapshots(home: &Path, files: &[&str]) -> Vec<HistoryFileSnapsho
 }
 
 fn parse_terminal_history_file(path: &str, content: &str) -> Vec<String> {
+    if path == "ConsoleHost_history.txt" {
+        let mut commands = Vec::new();
+        let mut command = Zeroizing::new(String::new());
+        for line in content.trim_start_matches('\u{feff}').lines() {
+            // PSReadLine appends a backtick to each non-final line of a history entry.
+            if let Some(line) = line.strip_suffix('`') {
+                command.push_str(line);
+                command.push('\n');
+            } else {
+                command.push_str(line);
+                if !command.trim().is_empty() {
+                    commands.push(command.trim().to_owned());
+                }
+                command.zeroize();
+            }
+        }
+        return commands;
+    }
     if path.contains("fish_history") {
         return content
             .lines()
@@ -301,6 +342,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_history_loads_without_home_and_refreshes_after_shell_writes() {
+        let app_data = tempfile::tempdir().unwrap();
+        let paths = local_shell_history_paths(None, Some(app_data.path()));
+        let path = app_data
+            .path()
+            .join("Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "Get-Date\r\n").unwrap();
+        assert_eq!(
+            load_local_shell_history_commands_from_paths(&paths),
+            ["Get-Date"]
+        );
+        std::fs::write(&path, "Get-Date\r\nGet-Process\r\n").unwrap();
+        assert_eq!(
+            load_local_shell_history_commands_from_paths(&paths),
+            ["Get-Date", "Get-Process"]
+        );
+    }
+
+    #[test]
+    fn psreadline_history_restores_multiline_commands() {
+        assert_eq!(
+            parse_terminal_history_file(
+                "ConsoleHost_history.txt",
+                "Get-Date\r\nWrite-Output `\r\n  'hello'\r\n"
+            ),
+            ["Get-Date", "Write-Output \n  'hello'"]
+        );
+    }
+
+    #[test]
     fn tokenizes_quoted_and_escaped_shell_input() {
         let parsed = tokenize_terminal_command_line("git add 'two words' three\\ four", 8);
 
@@ -325,7 +397,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            load_local_shell_history_commands_from_home(home.path()),
+            load_local_shell_history_commands_from_paths(&local_shell_history_paths(
+                Some(home.path()),
+                None
+            )),
             ["TOKEN=value deploy", "cargo test --workspace"]
         );
     }

@@ -2,19 +2,370 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::{
-    SemanticClass, SemanticLineRole, SemanticScheme, classify_line, classify_line_with_scheme,
-    semantic_output_role_for_command,
+    SemanticClass, SemanticLineRole, SemanticScheme, classify_line,
+    classify_line_with_compiled_scheme, classify_line_with_scheme, compiled_builtin_scheme,
+    semantic_line_emphasis, semantic_output_role_for_command,
 };
 #[cfg(feature = "shell-syntax")]
-use crate::{
-    SemanticShellDialect, classify_line_with_compiled_scheme_and_shell, compiled_builtin_scheme,
-};
+use crate::{SemanticShellDialect, classify_line_with_compiled_scheme_and_shell};
 
 fn matched_texts(text: &str) -> Vec<(&str, SemanticClass)> {
     classify_line(text, SemanticLineRole::Output)
         .into_iter()
         .map(|span| (&text[span.range], span.class))
         .collect()
+}
+
+#[test]
+fn structured_output_variants_preserve_column_identity() {
+    for (command, text, expected) in [
+        (
+            "ls -ln",
+            "-rw-r--r-- 1 1000 100 42 Sep 4 12:30 file",
+            vec![
+                ("1000", SemanticClass::Variable),
+                ("100", SemanticClass::Variable),
+            ],
+        ),
+        (
+            "ls -lo",
+            "-rw-r--r-- 1 alice 42 Sep 4 12:30 file",
+            vec![
+                ("alice", SemanticClass::Variable),
+                ("42", SemanticClass::Number),
+            ],
+        ),
+        (
+            "ls -lg",
+            "-rw-r--r-- 1 staff 42 Sep 4 12:30 file",
+            vec![
+                ("staff", SemanticClass::Variable),
+                ("42", SemanticClass::Number),
+            ],
+        ),
+        (
+            "ls -log",
+            "-rw-r--r-- 1 42 Sep 4 12:30 file",
+            vec![("42", SemanticClass::Number)],
+        ),
+        (
+            "ls -l",
+            "crw-rw---- 1 root tty 4, 64 Sep 4 12:30 ttyS0",
+            vec![
+                ("4, 64", SemanticClass::Number),
+                ("tty", SemanticClass::Variable),
+            ],
+        ),
+        (
+            "ls -l /dev/null",
+            "crw-rw-rw- 1 root wheel 0x3000002 Sep 5 11:19 /dev/null",
+            vec![
+                ("0x3000002", SemanticClass::Number),
+                ("wheel", SemanticClass::Variable),
+            ],
+        ),
+        (
+            "df -hT",
+            "/dev/sda1 ext4 100G 90G 10G 90% /media/my disk",
+            vec![
+                ("ext4", SemanticClass::Keyword),
+                ("90%", SemanticClass::Error),
+                ("/media/my disk", SemanticClass::Path),
+            ],
+        ),
+        (
+            "stat /bin/ls",
+            "16777232 100 -rwxr-xr-x 1 root wheel 0 154208 \"Sep 4 12:30:00 2026\" 4096 80 /bin/ls",
+            vec![
+                ("root", SemanticClass::Variable),
+                ("wheel", SemanticClass::Variable),
+                ("154208", SemanticClass::Number),
+            ],
+        ),
+        (
+            "df -h",
+            "/dev/disk1s1 100Gi 10Gi 90Gi 10% 459k 4.3G 1% /Volumes/My Disk",
+            vec![
+                ("100Gi", SemanticClass::Number),
+                ("/Volumes/My Disk", SemanticClass::Path),
+            ],
+        ),
+        (
+            "free -h",
+            "Mem: 15Gi 8.1Gi 2.0Gi 100Mi 4.9Gi 6.9Gi",
+            vec![
+                ("15Gi", SemanticClass::Number),
+                ("100Mi", SemanticClass::Number),
+            ],
+        ),
+        (
+            "getfacl file",
+            "default:user:deploy:rwx #effective:r-x",
+            vec![
+                ("deploy", SemanticClass::Variable),
+                ("default", SemanticClass::Keyword),
+            ],
+        ),
+    ] {
+        let matches = classify_line_with_compiled_scheme(
+            text,
+            semantic_output_role_for_command(command),
+            compiled_builtin_scheme(SemanticScheme::Balanced),
+        )
+        .into_iter()
+        .map(|span| (&text[span.range], span.class))
+        .collect::<Vec<_>>();
+        for expected in expected {
+            assert!(
+                matches.contains(&expected),
+                "{command}: missing {expected:?} in {matches:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn acl_and_network_fields_reject_misleading_values() {
+    for text in [
+        "garbage:deploy:rwx",
+        "mask:deploy:rwx",
+        "user:deploy:xwr",
+        "user:deploy:rws",
+    ] {
+        assert!(
+            classify_line(text, SemanticLineRole::FileAclOutput)
+                .iter()
+                .all(|span| !matches!(
+                    span.class,
+                    SemanticClass::PermissionRead
+                        | SemanticClass::PermissionWrite
+                        | SemanticClass::PermissionExecute
+                        | SemanticClass::PermissionSpecial
+                )),
+            "{text}"
+        );
+    }
+    let acl = "user:deploy:rwx #effective:r--";
+    let spans = classify_line(acl, SemanticLineRole::FileAclOutput);
+    let effective_start = acl.find("#effective:").unwrap() + "#effective:".len();
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.range == (effective_start..effective_start + 1)
+                && span.class == SemanticClass::PermissionRead)
+    );
+    for percent in ["0.5", "50.5", "100.0"] {
+        let text = format!("1000 packets transmitted, {percent}% packet loss");
+        let expected = if percent == "0.5" {
+            SemanticClass::Warning
+        } else {
+            SemanticClass::Error
+        };
+        assert!(
+            classify_line(&text, SemanticLineRole::PingOutput)
+                .iter()
+                .any(|span| span.class == expected
+                    && &text[span.range.clone()] == format!("{percent}%"))
+        );
+    }
+    for text in ["default dev UP", "2: UP: mtu 1500 state DOWN"] {
+        assert!(
+            classify_line(text, SemanticLineRole::IpOutput)
+                .iter()
+                .all(|span| !(span.class == SemanticClass::Success
+                    && &text[span.range.clone()] == "UP"))
+        );
+    }
+    let socket = "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*";
+    assert!(
+        classify_line(socket, SemanticLineRole::SocketOutput)
+            .iter()
+            .any(
+                |span| span.class == SemanticClass::Info && &socket[span.range.clone()] == "LISTEN"
+            )
+    );
+}
+
+#[test]
+fn unix_permission_fields_use_distinct_semantic_classes() {
+    let text = "-rwsr-xr--+ 1 alice developers 16384 app";
+    let permission_matches = classify_line_with_compiled_scheme(
+        text,
+        SemanticLineRole::Output,
+        compiled_builtin_scheme(SemanticScheme::Balanced),
+    )
+    .into_iter()
+    .filter(|span| {
+        matches!(
+            span.class,
+            SemanticClass::PermissionRead
+                | SemanticClass::PermissionWrite
+                | SemanticClass::PermissionExecute
+                | SemanticClass::PermissionSpecial
+        )
+    })
+    .map(|span| (&text[span.range], span.class))
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        permission_matches,
+        vec![
+            ("r", SemanticClass::PermissionRead),
+            ("w", SemanticClass::PermissionWrite),
+            ("s", SemanticClass::PermissionSpecial),
+            ("r", SemanticClass::PermissionRead),
+            ("x", SemanticClass::PermissionExecute),
+            ("r", SemanticClass::PermissionRead),
+        ]
+    );
+
+    for (candidate, role) in [
+        ("-rwxr-xr-x ./script", SemanticLineRole::Command),
+        ("rwxrwxrwx is ordinary text", SemanticLineRole::Output),
+        ("-rwxr-xr-x-not-a-field", SemanticLineRole::Output),
+    ] {
+        assert!(
+            classify_line(candidate, role).iter().all(|span| !matches!(
+                span.class,
+                SemanticClass::PermissionRead
+                    | SemanticClass::PermissionWrite
+                    | SemanticClass::PermissionExecute
+                    | SemanticClass::PermissionSpecial
+            )),
+            "permission-like text was classified in {candidate:?}"
+        );
+    }
+}
+
+#[test]
+fn file_metadata_commands_classify_structured_fields() {
+    for (command, role) in [
+        ("ls -lah /var/log", SemanticLineRole::FileListingOutput),
+        ("stat /var/log/app", SemanticLineRole::FileStatOutput),
+        ("getfacl /srv/app", SemanticLineRole::FileAclOutput),
+    ] {
+        assert_eq!(semantic_output_role_for_command(command), role);
+    }
+
+    let listing = "lrwxr-xr-x@ 1 alice staff 11K Sep 4 12:30 current -> /opt/app";
+    let listing_matches = classify_line(listing, SemanticLineRole::FileListingOutput)
+        .into_iter()
+        .map(|span| (&listing[span.range], span.class))
+        .collect::<Vec<_>>();
+    for expected in [
+        ("l", SemanticClass::Keyword),
+        ("alice", SemanticClass::Variable),
+        ("staff", SemanticClass::Variable),
+        ("11K", SemanticClass::Number),
+        ("->", SemanticClass::Operator),
+    ] {
+        assert!(
+            listing_matches.contains(&expected),
+            "missing {expected:?} in {listing_matches:?}"
+        );
+    }
+
+    let stat = "Access: (4755/-rwsr-xr-x) Uid: ( 1000/ alice) Gid: ( 100/ staff)";
+    let stat_matches = classify_line(stat, SemanticLineRole::FileStatOutput)
+        .into_iter()
+        .map(|span| (&stat[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(stat_matches.contains(&("Access", SemanticClass::Keyword)));
+    assert!(stat_matches.contains(&("s", SemanticClass::PermissionSpecial)));
+
+    let acl = "user:deploy:rwx";
+    let acl_matches = classify_line(acl, SemanticLineRole::FileAclOutput)
+        .into_iter()
+        .map(|span| (&acl[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(acl_matches.contains(&("user", SemanticClass::Keyword)));
+    assert!(acl_matches.contains(&("deploy", SemanticClass::Variable)));
+    assert!(acl_matches.contains(&("x", SemanticClass::PermissionExecute)));
+}
+
+#[test]
+fn resource_commands_classify_usage_columns_and_capacity() {
+    for (command, role) in [
+        ("df -h", SemanticLineRole::DiskUsageOutput),
+        ("free -h", SemanticLineRole::MemoryUsageOutput),
+    ] {
+        assert_eq!(semantic_output_role_for_command(command), role);
+    }
+
+    let disk = "/dev/nvme0n1p2 100G 91G 9G 91% /";
+    let disk_matches = classify_line(disk, SemanticLineRole::DiskUsageOutput)
+        .into_iter()
+        .map(|span| (&disk[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(disk_matches.contains(&("/dev/nvme0n1p2", SemanticClass::Path)));
+    assert!(disk_matches.contains(&("100G", SemanticClass::Number)));
+    assert!(disk_matches.contains(&("91%", SemanticClass::Error)));
+    assert!(disk_matches.contains(&("/", SemanticClass::Path)));
+
+    let memory = "Mem: 15GiB 8GiB 2GiB 1GiB 5GiB 6GiB";
+    let memory_matches = classify_line(memory, SemanticLineRole::MemoryUsageOutput)
+        .into_iter()
+        .map(|span| (&memory[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(memory_matches.contains(&("Mem", SemanticClass::Keyword)));
+    assert!(memory_matches.contains(&("15GiB", SemanticClass::Number)));
+}
+
+#[test]
+fn network_commands_classify_interfaces_states_addresses_and_loss() {
+    for (command, role) in [
+        ("ip address show", SemanticLineRole::IpOutput),
+        ("ss -lnt", SemanticLineRole::SocketOutput),
+        ("ping 1.1.1.1", SemanticLineRole::PingOutput),
+    ] {
+        assert_eq!(semantic_output_role_for_command(command), role);
+    }
+
+    let interface = "2: eth0: <BROADCAST,MULTICAST,UP> mtu 1500 state UP qlen 1000";
+    let interface_matches = classify_line(interface, SemanticLineRole::IpOutput)
+        .into_iter()
+        .map(|span| (&interface[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(interface_matches.contains(&("eth0", SemanticClass::Variable)));
+    assert!(interface_matches.contains(&("mtu", SemanticClass::Keyword)));
+    assert!(interface_matches.contains(&("UP", SemanticClass::Success)));
+
+    let route = "default via 192.168.1.1 dev eth0 src 192.168.1.20 metric 100";
+    let route_matches = classify_line(route, SemanticLineRole::IpOutput)
+        .into_iter()
+        .map(|span| (&route[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(route_matches.contains(&("192.168.1.1", SemanticClass::Address)));
+    assert!(route_matches.contains(&("eth0", SemanticClass::Variable)));
+
+    let socket = "LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*";
+    let socket_matches = classify_line(socket, SemanticLineRole::SocketOutput)
+        .into_iter()
+        .map(|span| (&socket[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(socket_matches.contains(&("LISTEN", SemanticClass::Info)));
+    assert!(socket_matches.contains(&("0.0.0.0:22", SemanticClass::Address)));
+
+    let ping = "64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=12.4 ms";
+    let ping_matches = classify_line(ping, SemanticLineRole::PingOutput)
+        .into_iter()
+        .map(|span| (&ping[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(ping_matches.contains(&("1.1.1.1", SemanticClass::Address)));
+    assert!(ping_matches.contains(&("icmp_seq", SemanticClass::Variable)));
+    assert!(ping_matches.contains(&("12.4", SemanticClass::Number)));
+
+    let loss = "4 packets transmitted, 3 received, 25% packet loss";
+    let loss_matches = classify_line(loss, SemanticLineRole::PingOutput)
+        .into_iter()
+        .map(|span| (&loss[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(loss_matches.contains(&("25%", SemanticClass::Warning)));
+    assert!(
+        classify_line("UP is ordinary output", SemanticLineRole::Output)
+            .iter()
+            .all(|span| span.class != SemanticClass::Success)
+    );
 }
 
 #[test]
@@ -80,6 +431,24 @@ fn process_table_time_formats_are_classified_as_complete_timestamps() {
         assert!(
             matches.contains(&(timestamp, SemanticClass::Timestamp)),
             "missing timestamp {timestamp:?} in {matches:?}"
+        );
+    }
+}
+
+#[test]
+fn weekday_and_month_names_use_distinct_classes_in_ordinary_text() {
+    let text = "Last login: Fri Sep 4; maintenance runs Friday through September";
+    let matches = matched_texts(text);
+
+    for expected in [
+        ("Fri", SemanticClass::Weekday),
+        ("Sep", SemanticClass::Month),
+        ("Friday", SemanticClass::Weekday),
+        ("September", SemanticClass::Month),
+    ] {
+        assert!(
+            matches.contains(&expected),
+            "missing {expected:?} in {matches:?}"
         );
     }
 }
@@ -164,6 +533,200 @@ fn ps_output_roles_classify_structured_columns_without_global_sentinels() {
             .iter()
             .all(|span| { !matches!(span.class, SemanticClass::Number | SemanticClass::Info) })
     );
+}
+
+#[test]
+fn compiler_output_roles_classify_diagnostics_and_source_locations() {
+    for (command, expected) in [
+        ("cargo check", SemanticLineRole::RustToolOutput),
+        (
+            "env RUSTFLAGS=-Dwarnings rustc src/main.rs",
+            SemanticLineRole::RustToolOutput,
+        ),
+        (
+            "RUSTFLAGS=-Dwarnings cargo check",
+            SemanticLineRole::RustToolOutput,
+        ),
+        ("clang++ src/main.cc", SemanticLineRole::CCompilerOutput),
+        (
+            "aarch64-linux-gnu-gcc src/main.c",
+            SemanticLineRole::CCompilerOutput,
+        ),
+    ] {
+        assert_eq!(
+            semantic_output_role_for_command(command),
+            expected,
+            "incorrect output role for {command:?}"
+        );
+    }
+
+    let rust_location = "  --> crates/app/src/main.rs:42:17";
+    let rust_matches = classify_line(rust_location, SemanticLineRole::RustToolOutput)
+        .into_iter()
+        .map(|span| (&rust_location[span.range], span.class))
+        .collect::<Vec<_>>();
+    for expected in [
+        ("-->", SemanticClass::Operator),
+        ("crates/app/src/main.rs", SemanticClass::Path),
+        ("42", SemanticClass::Number),
+        ("17", SemanticClass::Number),
+    ] {
+        assert!(
+            rust_matches.contains(&expected),
+            "missing {expected:?} in {rust_matches:?}"
+        );
+    }
+
+    let c_diagnostic = "/tmp/main.c:12:7: error: use of undeclared identifier 'value'";
+    let c_matches = classify_line(c_diagnostic, SemanticLineRole::CCompilerOutput)
+        .into_iter()
+        .map(|span| (&c_diagnostic[span.range], span.class))
+        .collect::<Vec<_>>();
+    for expected in [
+        ("/tmp/main.c", SemanticClass::Path),
+        ("12", SemanticClass::Number),
+        ("7", SemanticClass::Number),
+        ("error", SemanticClass::Error),
+    ] {
+        assert!(
+            c_matches.contains(&expected),
+            "missing {expected:?} in {c_matches:?}"
+        );
+    }
+    assert_eq!(
+        semantic_line_emphasis(c_diagnostic, SemanticLineRole::CCompilerOutput),
+        Some(SemanticClass::Error)
+    );
+
+    let cargo_phase = "   Finished `dev` profile in 0.42s";
+    assert!(
+        classify_line(cargo_phase, SemanticLineRole::RustToolOutput)
+            .iter()
+            .any(|span| {
+                &cargo_phase[span.range.clone()] == "Finished"
+                    && span.class == SemanticClass::Success
+            })
+    );
+}
+
+#[test]
+fn git_output_roles_keep_status_and_diff_meaning_local_to_git() {
+    assert_eq!(
+        semantic_output_role_for_command("git -C workspace status --short"),
+        SemanticLineRole::GitStatusOutput
+    );
+    assert_eq!(
+        semantic_output_role_for_command("git diff --cached"),
+        SemanticLineRole::GitDiffOutput
+    );
+
+    let status = " M src/main.rs";
+    let status_matches = classify_line(status, SemanticLineRole::GitStatusOutput)
+        .into_iter()
+        .map(|span| (&status[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(status_matches.contains(&(" M", SemanticClass::Warning)));
+    assert!(status_matches.contains(&("src/main.rs", SemanticClass::Path)));
+
+    let addition = "+let connected = true;";
+    let addition_matches = classify_line(addition, SemanticLineRole::GitDiffOutput)
+        .into_iter()
+        .map(|span| (&addition[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert_eq!(addition_matches, vec![(addition, SemanticClass::Success)]);
+}
+
+#[test]
+fn systemd_output_roles_classify_service_state_and_journal_time() {
+    assert_eq!(
+        semantic_output_role_for_command("sudo systemctl status sshd"),
+        SemanticLineRole::SystemdOutput
+    );
+    assert_eq!(
+        semantic_output_role_for_command("journalctl -u sshd"),
+        SemanticLineRole::SystemdOutput
+    );
+
+    let state = "     Active: failed (Result: exit-code)";
+    let state_matches = classify_line(state, SemanticLineRole::SystemdOutput)
+        .into_iter()
+        .map(|span| (&state[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(state_matches.contains(&("Active", SemanticClass::Keyword)));
+    assert!(state_matches.contains(&("failed", SemanticClass::Error)));
+
+    let journal = "Sep  4 10:30:00 host sshd[42]: connection closed";
+    assert!(
+        classify_line(journal, SemanticLineRole::SystemdOutput)
+            .iter()
+            .any(|span| {
+                &journal[span.range.clone()] == "Sep  4 10:30:00"
+                    && span.class == SemanticClass::Timestamp
+            })
+    );
+}
+
+#[test]
+fn test_runner_output_roles_classify_common_result_markers() {
+    assert_eq!(
+        semantic_output_role_for_command("cargo test"),
+        SemanticLineRole::RustToolOutput
+    );
+    for command in ["pytest -q", "go test ./...", "npm test"] {
+        assert_eq!(
+            semantic_output_role_for_command(command),
+            SemanticLineRole::TestOutput,
+            "incorrect output role for {command:?}"
+        );
+    }
+
+    for (line, label, expected) in [
+        (
+            "test parser::accepts_input ... ok",
+            "ok",
+            SemanticClass::Success,
+        ),
+        (
+            "tests/test_api.py::test_login FAILED",
+            "FAILED",
+            SemanticClass::Error,
+        ),
+        (
+            "--- SKIP: TestNetwork (0.00s)",
+            "--- SKIP",
+            SemanticClass::Warning,
+        ),
+    ] {
+        assert!(
+            classify_line(line, SemanticLineRole::TestOutput)
+                .iter()
+                .any(|span| &line[span.range.clone()] == label && span.class == expected),
+            "missing {expected:?} marker in {line:?}"
+        );
+    }
+}
+
+#[test]
+fn container_output_roles_classify_health_and_readiness_states() {
+    for command in ["docker ps", "podman container ls", "kubectl get pods"] {
+        assert_eq!(
+            semantic_output_role_for_command(command),
+            SemanticLineRole::ContainerOutput,
+            "incorrect output role for {command:?}"
+        );
+    }
+    assert_eq!(
+        semantic_output_role_for_command("docker logs api"),
+        SemanticLineRole::Output
+    );
+
+    let line = "api-7df4 0/1 CrashLoopBackOff 5 2m";
+    let matches = classify_line(line, SemanticLineRole::ContainerOutput)
+        .into_iter()
+        .map(|span| (&line[span.range], span.class))
+        .collect::<Vec<_>>();
+    assert!(matches.contains(&("0/1", SemanticClass::Warning)));
+    assert!(matches.contains(&("CrashLoopBackOff", SemanticClass::Error)));
 }
 
 #[cfg(feature = "shell-syntax")]
@@ -314,6 +877,61 @@ fn warning_terms_use_the_warning_class() {
             ("Warning", SemanticClass::Warning),
             ("skipped", SemanticClass::Warning),
         ]
+    );
+}
+
+#[test]
+fn explicit_log_severity_controls_line_emphasis() {
+    for (text, expected) in [
+        ("ERROR connection refused", SemanticClass::Error),
+        ("[worker] [FATAL] service stopped", SemanticClass::Error),
+        (
+            "2026-09-04 10:30:00 warning: disk space is low",
+            SemanticClass::Warning,
+        ),
+        ("error[E0308]: mismatched types", SemanticClass::Error),
+        ("错误：连接已拒绝", SemanticClass::Error),
+        ("[警告] 磁盘空间不足", SemanticClass::Warning),
+        ("ÉCHEC: connexion refusée", SemanticClass::Error),
+        ("Cảnh báo: dung lượng thấp", SemanticClass::Warning),
+        ("level=error connection refused", SemanticClass::Error),
+        (
+            "severity: 'warning' disk space is low",
+            SemanticClass::Warning,
+        ),
+        (
+            r#"{"timestamp":"2026-09-04T10:30:00Z","level":"error","message":"offline"}"#,
+            SemanticClass::Error,
+        ),
+    ] {
+        assert_eq!(
+            semantic_line_emphasis(text, SemanticLineRole::Output),
+            Some(expected),
+            "incorrect emphasis for {text:?}"
+        );
+    }
+
+    assert_eq!(
+        semantic_line_emphasis(
+            "the command reports an error when offline",
+            SemanticLineRole::Output
+        ),
+        None
+    );
+    assert_eq!(
+        semantic_line_emphasis("ERROR is still being typed", SemanticLineRole::Command),
+        None
+    );
+    assert_eq!(
+        semantic_line_emphasis(
+            r#"{"message":"the text mentions \"level\": \"error\""}"#,
+            SemanticLineRole::Output
+        ),
+        None
+    );
+    assert_eq!(
+        semantic_line_emphasis("level=info connected", SemanticLineRole::Output),
+        None
     );
 }
 
