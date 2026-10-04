@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, AnyView, App, AppContext, Context, ParentElement, Render, Styled, Window, div,
-    prelude::*, px, rgb, rgba,
+    AnyElement, AnyView, App, AppContext, Context, Div, ParentElement, Render, Styled, Window, div,
+    prelude::*, px, rgb,
 };
 use oxideterm_theme::ThemeTokens;
 
@@ -39,11 +39,26 @@ pub fn tooltip_content(
 ) -> AnyElement {
     let label = label.into();
     let animation_id = gpui::ElementId::Name(format!("tooltip-enter-{label}").into());
-    let tooltip = div()
+    let tooltip = tooltip_surface(tokens, label, shortcut);
+    crate::motion::fade_in(
+        tokens,
+        animation_id,
+        tooltip,
+        crate::motion::MotionDuration::Micro,
+    )
+}
+
+/// Unanimated surface for owners that retain tooltips through an exit transition.
+pub fn tooltip_surface(
+    tokens: &ThemeTokens,
+    label: impl Into<String>,
+    shortcut: Option<String>,
+) -> Div {
+    let label = label.into();
+    crate::surface::material_surface(tokens, div(), crate::surface::MaterialRole::Popover)
         .rounded(px(tokens.radii.xs))
         .border_1()
         .border_color(rgb(tokens.ui.border))
-        .bg(rgba((tokens.ui.bg_elevated << 8) | 0xf2))
         .px(px(tokens.metrics.ui_tooltip_padding_x))
         .py(px(tokens.metrics.ui_tooltip_padding_y))
         .text_size(px(tokens.metrics.ui_text_xs))
@@ -70,11 +85,5 @@ pub fn tooltip_content(
                             .child(shortcut),
                     )
                 }),
-        );
-    crate::motion::fade_in(
-        tokens,
-        animation_id,
-        tooltip,
-        crate::motion::MotionDuration::Micro,
-    )
+        )
 }

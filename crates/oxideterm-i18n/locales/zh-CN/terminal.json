@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "展开操作栏",
+      "hide_controls": "收起操作栏"
+    },
+    "autosuggest": {
+      "matches": "{{count}} 条匹配",
+      "navigation_hint": "{{select}} 选择 · {{run}} 执行 · 单击填充",
+      "dismiss_hint": "{{dismiss}} 关闭 · {{remove}} 移除"
+    },
     "processing_failed": "终端处理已停止，请重新连接此会话。",
     "local_terminal": "本地终端",
     "tmux": {
@@ -68,6 +77,7 @@
       "source_quick_command": "快捷命令"
     },
     "sender": {
+      "group_hint": "保存的连接组会选中所有匹配的终端窗格；交互同步中的临时隔离不改变此处指定的发送目标。",
       "task": "发送器",
       "placeholder": "输入命令或十六进制字节……",
       "show": "显示命令发送器",
@@ -104,10 +114,18 @@
       "error_busy": "目标正在被另一个发送任务使用"
     },
     "broadcast": {
-      "groups": "广播组",
+      "members_hint": "选择具体终端后启用同步，新开终端不会自动加入。移动终端前，请先将其移出原组。",
+      "isolate_member": "临时隔离",
+      "resume_member": "恢复同步",
+      "pause_group": "暂停同步",
+      "start_group": "启用同步",
+      "sync_isolated": "已隔离",
+      "sync_disabled": "已暂停",
+      "sync_enabled": "同步中",
+      "groups": "同步组",
       "create_group": "新建组",
       "no_groups": "暂无命名组",
-      "temporary_group": "临时选择",
+      "temporary_group": "临时同步组",
       "group_name_placeholder": "组名称",
       "group_members": "组成员",
       "unsaved_target": "未保存",
@@ -121,6 +139,11 @@
     "typeLocal": "本地",
     "typeSsh": "SSH",
     "paste": {
+      "edit": "编辑",
+      "edit_title": "粘贴前编辑",
+      "strip_fence": "移除代码块标记",
+      "undo": "撤销",
+      "redo": "重做",
       "title": "检测到多行内容 ({{count}} 行)",
       "more_lines": "... 还有 {{count}} 行",
       "confirm": "确认",
@@ -154,6 +177,12 @@
       "clear_screen": "清屏"
     },
     "modem": {
+      "timeout": "等待对端响应超时。请启动对端的传输程序后重试。",
+      "protocol_error": "对端发送了无效或非预期的传输数据。",
+      "file_error": "无法读写传输文件，请检查访问权限和可用空间。",
+      "file_too_large": "文件超出此协议支持的大小限制。",
+      "buffer_overflow": "对端发送的数据超出了传输缓冲区容量。",
+      "worker_stopped": "传输任务意外停止，请重试。",
       "binary_transfer": "二进制传输",
       "xmodem_upload": "XMODEM 上传",
       "xmodem_receive": "XMODEM 接收",
@@ -312,7 +341,8 @@
       "add_group": "新增组",
       "edit_group": "编辑组",
       "delete_group": "删除组",
-      "delete_group_description": "删除前，“{{name}}”中的快捷命令将移至默认分组。",
+      "delete_group_description": "删除此分组前，“{{name}}”中的快捷命令将移至“{{destination}}”。",
+      "reorder_groups": "拖动手柄调整分组顺序",
       "save_group": "保存组",
       "group_name_placeholder": "组名称",
       "icon_terminal": "终端",

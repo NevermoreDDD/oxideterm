@@ -5,6 +5,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RagError {
+    #[error("Invalid RAG request: {0}")]
+    InvalidInput(String),
+
     #[error("Database error: {0}")]
     Database(#[from] redb::DatabaseError),
 
@@ -12,7 +15,7 @@ pub enum RagError {
     Table(#[from] redb::TableError),
 
     #[error("Transaction error: {0}")]
-    Transaction(#[from] redb::TransactionError),
+    Transaction(#[source] Box<redb::TransactionError>),
 
     #[error("Commit error: {0}")]
     Commit(#[from] redb::CommitError),
@@ -49,6 +52,12 @@ pub enum RagError {
 
     #[error("Duplicate document: content hash {0} already exists in this collection")]
     DuplicateDocument(String),
+}
+
+impl From<redb::TransactionError> for RagError {
+    fn from(error: redb::TransactionError) -> Self {
+        Self::Transaction(Box::new(error))
+    }
 }
 
 impl From<rmp_serde::encode::Error> for RagError {

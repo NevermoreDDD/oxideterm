@@ -23,6 +23,7 @@ impl NodeRuntimeStore {
             }
             Entry::Vacant(entry) => {
                 entry.insert(NodeRuntimeEntry {
+                    audit_session_id: uuid::Uuid::new_v4().to_string(),
                     config,
                     parent_id: None,
                     children_ids: Vec::new(),
@@ -45,6 +46,16 @@ impl NodeRuntimeStore {
                 root_ids.push(node_id);
             }
         }
+    }
+
+    fn audit_context(&self, node_id: &NodeId, mut context: oxideterm_audit::AuditContext) -> Option<oxideterm_audit::AuditContext> {
+        let node = self.nodes.get(node_id)?;
+        context.session_id = Some(node.audit_session_id.clone());
+        context.node_id = Some(oxideterm_audit::redact(&node_id.0));
+        context.protocol = Some("ssh".into());
+        context.remote_account = Some(oxideterm_audit::redact(&node.config.username));
+        context.target = Some(oxideterm_audit::redact(&format!("{}@{}:{}", node.config.username, node.config.host, node.config.port)));
+        Some(context)
     }
 
     pub fn snapshot(&self, node_id: &NodeId) -> Option<NodeRuntimeSnapshot> {
@@ -113,13 +124,14 @@ impl NodeRuntimeStore {
                 let route = entry.get_mut();
                 // Existing child nodes receive the new config by value so secrets are not copied.
                 route.config = config;
-                route.parent_id = Some(parent_id.clone());
+                route.parent_id = Some(parent_id);
                 route.depth = parent_depth + 1;
                 route.origin = origin;
                 route.generation += 1;
             }
             Entry::Vacant(entry) => {
                 entry.insert(NodeRuntimeEntry {
+                    audit_session_id: uuid::Uuid::new_v4().to_string(),
                     config,
                     parent_id: Some(parent_id),
                     children_ids: Vec::new(),
@@ -632,6 +644,7 @@ impl NodeRuntimeStore {
         }
         let ordered_root_ids =
             ordered_snapshot_ids(&snapshot.root_ids, &root_ids_from_nodes(&snapshot.nodes));
+        let audit_sessions = self.nodes.iter().map(|entry| (entry.key().clone(), entry.audit_session_id.clone())).collect::<HashMap<_, _>>();
         self.nodes.clear();
         self.connection_nodes.clear();
         {
@@ -652,6 +665,7 @@ impl NodeRuntimeStore {
             self.nodes.insert(
                 node_id.clone(),
                 NodeRuntimeEntry {
+                    audit_session_id: audit_sessions.get(&node_id).cloned().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     config: node.config,
                     parent_id: node.parent_id.clone(),
                     children_ids: children_by_parent.remove(&node_id).unwrap_or_default(),

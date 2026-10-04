@@ -15,6 +15,7 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CloudSyncConfirm {
+    ChangePassword,
     ImportPreview,
     ForceUpload,
     ClearSecret { key: String, label: String },
@@ -67,6 +68,7 @@ pub fn cloud_sync_progress_stage_label_key(stage: CloudSyncProgressStage) -> &'s
 
 pub fn cloud_sync_history_action_label_key(action: &str) -> Option<&'static str> {
     match action {
+        "sync" => Some("plugin.cloud_sync.causal.sync"),
         "upload" => Some("plugin.cloud_sync.history.action_upload"),
         "pull" => Some("plugin.cloud_sync.history.action_pull"),
         "restore" => Some("plugin.cloud_sync.history.action_restore"),
@@ -118,6 +120,21 @@ pub fn cloud_sync_error_message_spec(error: &str) -> CloudSyncErrorMessageSpec {
         return CloudSyncErrorMessageSpec::Raw(error.to_string());
     };
     match code {
+        "password_change_pending" => {
+            CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.causal.password_change_pending")
+        }
+        "password_change_separate_settings" => CloudSyncErrorMessageSpec::Key(
+            "plugin.cloud_sync.causal.password_change_separate_settings",
+        ),
+        "password_too_short" => {
+            CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.causal.password_too_short")
+        }
+        "sync_cleanup_pending" => {
+            CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.causal.cleanup_pending")
+        }
+        "sync_protocol_upgrade_required" => {
+            CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.causal.protocol_upgrade_required")
+        }
         "missing_endpoint" => {
             CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.errors.missing_endpoint")
         }
@@ -148,6 +165,9 @@ pub fn cloud_sync_error_message_spec(error: &str) -> CloudSyncErrorMessageSpec {
         "network_request_failed" => {
             CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.errors.network_request_failed")
         }
+        "local_forward_requires_connection" => CloudSyncErrorMessageSpec::Key(
+            "plugin.cloud_sync.errors.local_forward_requires_connection",
+        ),
         "missing_git_repository" => {
             CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.errors.missing_git_repository")
         }
@@ -407,6 +427,7 @@ pub fn cloud_sync_select_label_key(label: CloudSyncSelectLabelKey) -> &'static s
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CloudSyncConfirmDescription {
+    ChangePassword,
     None,
     ForceUpload,
     ClearSecret { label: String },
@@ -450,6 +471,12 @@ pub fn cloud_sync_legacy_apply_success_copy_spec(
 
 pub fn cloud_sync_confirm_copy_spec(confirm: &CloudSyncConfirm) -> CloudSyncConfirmCopySpec {
     match confirm {
+        CloudSyncConfirm::ChangePassword => CloudSyncConfirmCopySpec {
+            variant: ConfirmDialogVariant::Default,
+            title_key: "plugin.cloud_sync.causal.change_password",
+            description: CloudSyncConfirmDescription::ChangePassword,
+            confirm_label_key: "plugin.cloud_sync.causal.change_password",
+        },
         CloudSyncConfirm::ImportPreview => CloudSyncConfirmCopySpec {
             variant: ConfirmDialogVariant::Default,
             title_key: "plugin.cloud_sync.confirm.import_title",
@@ -523,20 +550,27 @@ mod tests {
     }
 
     #[test]
-    fn maps_snapshot_limit_error_to_copy_spec() {
-        let spec = cloud_sync_error_message_spec("snapshot_too_large: max 2097152 bytes");
-
-        assert_eq!(
-            spec,
-            CloudSyncErrorMessageSpec::SnapshotTooLarge {
-                limit: Some("2.0 MB".to_string())
-            }
-        );
-    }
-
-    #[test]
-    fn maps_provider_errors_to_copy_specs() {
+    fn maps_errors_to_copy_specs() {
         for (error, expected) in [
+            (
+                "snapshot_too_large: max 2097152 bytes",
+                CloudSyncErrorMessageSpec::SnapshotTooLarge {
+                    limit: Some("2.0 MB".to_string()),
+                },
+            ),
+            (
+                "onedrive_bad_request: Invalid request [operation=onedrive_metadata_upload, status=400, graph_code=badRequest, request_id=request-123]",
+                CloudSyncErrorMessageSpec::KeyWithDetail {
+                    key: "plugin.cloud_sync.errors.onedrive_bad_request",
+                    detail: "Invalid request [operation=onedrive_metadata_upload, status=400, graph_code=badRequest, request_id=request-123]".to_string(),
+                },
+            ),
+            (
+                "sync_protocol_upgrade_required: HTTP JSON server must support v3 object enumeration",
+                CloudSyncErrorMessageSpec::Key(
+                    "plugin.cloud_sync.causal.protocol_upgrade_required",
+                ),
+            ),
             (
                 "onedrive_access_denied: tenant policy blocked access",
                 CloudSyncErrorMessageSpec::KeyWithDetail {
@@ -567,20 +601,7 @@ mod tests {
                 CloudSyncErrorMessageSpec::Key("plugin.cloud_sync.errors.google_oauth_bad_client"),
             ),
         ] {
-            assert_eq!(cloud_sync_error_message_spec(error), expected);
+            assert_eq!(cloud_sync_error_message_spec(error), expected, "{error}");
         }
-    }
-
-    #[test]
-    fn keeps_onedrive_graph_diagnostics_beside_localized_copy() {
-        assert_eq!(
-            cloud_sync_error_message_spec(
-                "onedrive_bad_request: Invalid request [operation=onedrive_metadata_upload, status=400, graph_code=badRequest, request_id=request-123]"
-            ),
-            CloudSyncErrorMessageSpec::KeyWithDetail {
-                key: "plugin.cloud_sync.errors.onedrive_bad_request",
-                detail: "Invalid request [operation=onedrive_metadata_upload, status=400, graph_code=badRequest, request_id=request-123]".to_string(),
-            }
-        );
     }
 }

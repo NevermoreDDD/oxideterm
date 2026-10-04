@@ -34,6 +34,24 @@ pub enum NativeConnectionLaunch {
     RemoteDesktop(TemporaryRemoteDesktopLaunch),
 }
 
+/// Owner-only CLI handoff metadata; external URI launches never supply an audit parent.
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeConnectionHandoff {
+    pub launch: NativeConnectionLaunch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_parent_id: Option<String>,
+}
+
+impl From<NativeConnectionLaunch> for NativeConnectionHandoff {
+    fn from(launch: NativeConnectionLaunch) -> Self {
+        Self {
+            launch,
+            audit_parent_id: None,
+        }
+    }
+}
+
 /// Selects a saved SSH profile without copying its connection properties or secrets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnectionLaunch {
@@ -587,62 +605,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_explicit_and_default_user_targets() {
-        // Explicit and inherited usernames must resolve to the same launch target.
-        let cases = [("alice@example.com", None), ("example.com", Some("alice"))];
-
-        for (target, default_username) in cases {
-            let (username, host) = parse_user_host_target(target, default_username).unwrap();
-            assert_eq!(username, "alice");
-            assert_eq!(host, "example.com");
+    fn user_host_targets_resolve_usernames_and_reject_uris() {
+        for (target, default_username, expected) in [
+            (
+                "alice@example.com",
+                None,
+                Ok(("alice".into(), "example.com".into())),
+            ),
+            (
+                "example.com",
+                Some("alice"),
+                Ok(("alice".into(), "example.com".into())),
+            ),
+            (
+                "ssh://alice@example.com",
+                None,
+                Err(ParseSshTargetError::UnsupportedUri),
+            ),
+        ] {
+            assert_eq!(
+                parse_user_host_target(target, default_username),
+                expected,
+                "{target}"
+            );
         }
     }
 
     #[test]
-    fn rejects_uri_targets() {
+    fn explicit_targets_preserve_authority_and_reject_unsafe_forms() {
+        for (target, expected) in [
+            ("root@example.com", Some(("root", "example.com", 22))),
+            ("root@example.com:2200", Some(("root", "example.com", 2200))),
+            ("root@[::1]:2200", Some(("root", "::1", 2200))),
+            ("example.com", None),
+            ("root@", None),
+            ("@example.com", None),
+            ("root@example.com:0", None),
+            ("root@example.com:invalid", None),
+            ("root@example .com", None),
+            ("root@example.com/path", None),
+            ("ssh://root@example.com", None),
+        ] {
+            assert_eq!(
+                parse_explicit_user_host_port_target(target),
+                expected.map(|(user, host, port)| (user.into(), host.into(), port)),
+                "{target}"
+            );
+        }
         assert_eq!(
-            parse_user_host_target("ssh://alice@example.com", None).unwrap_err(),
-            ParseSshTargetError::UnsupportedUri
-        );
-    }
-
-    #[test]
-    fn parses_explicit_user_host_and_optional_port() {
-        assert_eq!(
-            parse_explicit_user_host_port_target("root@example.com"),
-            Some(("root".to_string(), "example.com".to_string(), 22))
-        );
-        assert_eq!(
-            parse_explicit_user_host_port_target("root@example.com:2200"),
-            Some(("root".to_string(), "example.com".to_string(), 2200))
-        );
-    }
-
-    #[test]
-    fn parses_and_formats_ipv6_targets() {
-        let parsed = parse_explicit_user_host_port_target("root@[::1]:2200").unwrap();
-
-        assert_eq!(parsed, ("root".to_string(), "::1".to_string(), 2200));
-        assert_eq!(
-            format_user_host_port_target(&parsed.0, &parsed.1, parsed.2),
+            format_user_host_port_target("root", "::1", 2200),
             "root@[::1]:2200"
         );
-    }
-
-    #[test]
-    fn rejects_unsafe_or_invalid_explicit_targets() {
-        for target in [
-            "example.com",
-            "root@",
-            "@example.com",
-            "root@example.com:0",
-            "root@example.com:invalid",
-            "root@example .com",
-            "root@example.com/path",
-            "ssh://root@example.com",
-        ] {
-            assert!(parse_explicit_user_host_port_target(target).is_none());
-        }
     }
 
     #[test]
@@ -727,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn native_launch_wire_redacts_credentials_and_round_trips() {
+    fn native_launch_wire_preserves_identity_and_redacts_credential_debug() {
         let temporary: NativeConnectionLaunch = serde_json::from_value(serde_json::json!({
             "kind": "ssh",
             "username": "alice",
@@ -737,7 +750,15 @@ mod tests {
         }))
         .unwrap();
         assert!(!format!("{temporary:?}").contains("wire-secret"));
-        assert!(matches!(temporary, NativeConnectionLaunch::Ssh(_)));
+        assert!(matches!(
+            temporary,
+            NativeConnectionLaunch::Ssh(TemporarySshLaunch {
+                username,
+                host,
+                port: 22,
+                password: Some(password),
+            }) if username == "alice" && host == "example.com" && password.as_str() == "wire-secret"
+        ));
 
         let remote_desktop: NativeConnectionLaunch = serde_json::from_value(serde_json::json!({
             "kind": "remote_desktop",
@@ -750,6 +771,20 @@ mod tests {
         }))
         .unwrap();
         assert!(!format!("{remote_desktop:?}").contains("remote-secret"));
+        assert!(matches!(
+            remote_desktop,
+            NativeConnectionLaunch::RemoteDesktop(TemporaryRemoteDesktopLaunch {
+                protocol: RemoteDesktopLaunchProtocol::Rdp,
+                host,
+                port: 3389,
+                username: Some(username),
+                domain: Some(domain),
+                password: Some(password),
+            }) if host == "desktop.example.com"
+                && username == "alice"
+                && domain == "CORP"
+                && password.as_str() == "remote-secret"
+        ));
 
         let saved: NativeConnectionLaunch = serde_json::from_value(serde_json::json!({
             "kind": "saved_connection",

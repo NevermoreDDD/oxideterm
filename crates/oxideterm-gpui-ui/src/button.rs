@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, BoxShadow, CursorStyle, Div, IntoColor, ParentElement, Rgba, Styled, div, point,
-    prelude::*, px, rgb, rgba,
+    AnyElement, BoxShadow, CursorStyle, Div, ParentElement, Rgba, Styled, div, point, prelude::*,
+    px, rgb, rgba,
 };
 use oxideterm_theme::ThemeTokens;
 
@@ -20,7 +20,7 @@ pub fn tauri_focus_visible_ring(tokens: &ThemeTokens) -> Vec<BoxShadow> {
     // select triggers, and dialog footer actions. GPUI callers pass the owner
     // state explicitly, but the visual ring must stay centralized.
     vec![BoxShadow {
-        color: rgba((tokens.ui.accent << 8) | BUTTON_FOCUS_RING_ALPHA).into_color(),
+        color: rgba((tokens.ui.accent << 8) | BUTTON_FOCUS_RING_ALPHA).into(),
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
         spread_radius: px(BUTTON_FOCUS_RING_WIDTH),
@@ -725,6 +725,12 @@ pub fn icon_button(tokens: &ThemeTokens, icon: AnyElement, options: IconButtonOp
         .opacity(opacity)
         // Icon buttons appear all over toolbars; disabled/loading must be
         // visible at the primitive level even when the caller owns the action.
+        .when(tokens.motion.enabled && !disabled, |button| {
+            button.hover_background_transition(
+                crate::motion::duration(tokens, crate::motion::MotionDuration::Micro)
+                    .min(std::time::Duration::from_millis(100)),
+            )
+        })
         .cursor(if disabled {
             CursorStyle::OperationNotAllowed
         } else {
@@ -879,6 +885,12 @@ fn button_base(tokens: &ThemeTokens, options: ButtonOptions, has_background: boo
         // Tauri/shadcn disabled buttons use opacity plus disabled pointer
         // semantics. Keep the shared primitive from advertising clickability
         // when feature code intentionally omits the mouse handler.
+        .when(tokens.motion.enabled && !options.disabled, |button| {
+            button.hover_background_transition(
+                crate::motion::duration(tokens, crate::motion::MotionDuration::Micro)
+                    .min(std::time::Duration::from_millis(100)),
+            )
+        })
         .cursor(if options.disabled {
             CursorStyle::OperationNotAllowed
         } else {

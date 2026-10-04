@@ -37,7 +37,8 @@ impl WorkspaceApp {
             .state()
             .settings
             .clone();
-        if backend_uses_auth_mode(&settings.backend_type)
+        if !settings.local_file_mode
+            && backend_uses_auth_mode(&settings.backend_type)
             && !settings.endpoint.trim().is_empty()
             && matches!(settings.auth_mode, AuthMode::None)
         {
@@ -77,19 +78,8 @@ impl WorkspaceApp {
             .update(cx, |cloud_sync, cx| cloud_sync.queue_dirty_refresh(cx));
     }
 
-    pub(super) fn start_cloud_sync_check(&mut self, cx: &mut Context<Self>) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
-            self.mark_cloud_sync_operation_in_progress(cx);
-            return;
-        }
-        if !self.persist_cloud_sync_configuration(false, cx) {
-            return;
-        }
-        self.start_cloud_sync_check_with_options(false, cx);
-    }
-
     pub(super) fn start_cloud_sync_github_oauth(&mut self, cx: &mut Context<Self>) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).operation_in_flight() {
             self.mark_cloud_sync_operation_in_progress(cx);
             return;
         }
@@ -134,7 +124,7 @@ impl WorkspaceApp {
     }
 
     pub(super) fn start_cloud_sync_microsoft_oauth(&mut self, cx: &mut Context<Self>) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).operation_in_flight() {
             self.mark_cloud_sync_operation_in_progress(cx);
             return;
         }
@@ -179,7 +169,7 @@ impl WorkspaceApp {
     }
 
     pub(super) fn start_cloud_sync_google_oauth(&mut self, cx: &mut Context<Self>) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).operation_in_flight() {
             self.mark_cloud_sync_operation_in_progress(cx);
             return;
         }
@@ -228,252 +218,45 @@ impl WorkspaceApp {
         skip_if_busy: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).operation_in_flight() {
             if !skip_if_busy {
                 self.mark_cloud_sync_operation_in_progress(cx);
             }
             return;
         }
-        self.cloud_sync.update(cx, |cloud_sync, _cx| {
-            cloud_sync.controller.store.state_mut().status = CloudSyncStatus::Checking;
-            cloud_sync.controller.store.state_mut().last_error = None;
-        });
-        self.save_cloud_sync_state(cx);
-        let settings = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .settings
-            .clone();
-        let hints = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .secret_hints
-            .clone();
-        let service = self.cloud_sync.read(cx).controller.service.clone();
-        let tx = self
-            .cloud_sync
-            .update(cx, |cloud_sync, cx| cloud_sync.begin_delivery("check", cx));
-        self.forwarding_runtime.spawn(deliver_cloud_sync_check(
-            tx,
-            service,
-            settings,
-            hints,
-            skip_if_busy,
-        ));
+        self.start_causal_sync(false, cx);
     }
 
     pub(in crate::workspace) fn start_cloud_sync_upload_with_options(
         &mut self,
-        force: bool,
+        _force: bool,
         automatic: bool,
         skip_if_busy: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).view.local_file_mode {
+            if !automatic {
+                self.start_cloud_sync_local_file(true, false, cx);
+            }
+            return;
+        }
+        if self.cloud_sync.read(cx).operation_in_flight() {
             if !skip_if_busy {
                 self.mark_cloud_sync_operation_in_progress(cx);
             }
             return;
         }
-        let (device_id, revision_sequence) = self.cloud_sync.update(cx, |cloud_sync, _cx| {
-            let state = cloud_sync.controller.store.state_mut();
-            let device_id = state.ensure_device_id(cloud_sync_platform_label());
-            let revision_sequence = state.revision_seq + 1;
-            state.last_error = None;
-            (device_id, revision_sequence)
-        });
-        self.cloud_sync.update(cx, |cloud_sync, _cx| {
-            cloud_sync.view.upload_preview = None;
-            cloud_sync.view.upload_selection = None;
-        });
-        self.save_cloud_sync_state(cx);
-        let settings = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .settings
-            .clone();
-        let hints = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .secret_hints
-            .clone();
-        let previous_remote_sections = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .last_synced_remote_sections
-            .clone();
-        let previous_remote_revision = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .last_known_remote_revision
-            .clone();
-        let last_synced_structured_state = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .last_synced_structured_state
-            .clone();
-        let upload_selection = (!automatic)
-            .then(|| self.cloud_sync.read(cx).view.upload_selection.clone())
-            .flatten();
-        let raw_sync_scope = upload_selection
-            .as_ref()
-            .map(|selection| {
-                selection.raw_scope(&self.cloud_sync.read(cx).controller.store.state().sync_scope)
-            })
-            .unwrap_or_else(|| {
-                self.cloud_sync
-                    .read(cx)
-                    .controller
-                    .store
-                    .state()
-                    .sync_scope
-                    .clone()
-            });
-        let item_filter = upload_selection
-            .as_ref()
-            .map(CloudSyncUploadSelection::item_filter)
-            .unwrap_or_default();
-        let portable_secrets =
-            match self.collect_cloud_sync_sensitive_portable_secrets(&raw_sync_scope, cx) {
-                Ok(secrets) => secrets,
-                Err(error) => {
-                    self.finish_cloud_sync_error("upload", error, cx);
-                    return;
-                }
-            };
-        let connection_store = self.connection_store.clone();
-        let forwarding_registry = self.forwarding_service.registry().clone();
-        let settings_store = self.settings_store.clone();
-        let service = self.cloud_sync.read(cx).controller.service.clone();
-        let tx = self.cloud_sync.update(cx, |cloud_sync, cx| {
-            cloud_sync.view.upload_selection = None;
-            cloud_sync.begin_delivery("upload", cx)
-        });
-        self.forwarding_runtime.spawn(deliver_cloud_sync_upload(
-            tx,
-            service,
-            connection_store,
-            forwarding_registry,
-            settings_store,
-            settings,
-            hints,
-            UploadOptions {
-                force,
-                device_id,
-                revision_sequence,
-                previous_remote_revision,
-                previous_remote_sections,
-                last_synced_structured_state,
-                raw_sync_scope: Some(raw_sync_scope),
-                item_filter,
-                portable_secrets,
-                automatic,
-                skip_if_busy,
-                ..UploadOptions::default()
-            },
-            automatic,
-        ));
+        self.start_causal_sync(automatic, cx);
     }
 
     pub(in crate::workspace) fn start_cloud_sync_upload_preview(&mut self, cx: &mut Context<Self>) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
-            self.mark_cloud_sync_operation_in_progress(cx);
+        if self.cloud_sync.read(cx).view.local_file_mode {
+            self.start_cloud_sync_local_file(true, false, cx);
             return;
         }
-        if !self.persist_cloud_sync_configuration(false, cx) {
-            return;
+        if self.persist_cloud_sync_configuration(false, cx) {
+            self.start_causal_sync(false, cx);
         }
-        if matches!(
-            self.cloud_sync
-                .read(cx)
-                .controller
-                .store
-                .state()
-                .settings
-                .backend_type,
-            BackendType::GithubGist
-        ) && self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .settings
-            .git_repository
-            .trim()
-            .is_empty()
-        {
-            self.start_cloud_sync_upload_with_options(false, false, false, cx);
-            return;
-        }
-        self.cloud_sync.update(cx, |cloud_sync, _cx| {
-            cloud_sync.controller.store.state_mut().status = CloudSyncStatus::Checking;
-            cloud_sync.controller.store.state_mut().last_error = None;
-            cloud_sync.view.upload_preview = None;
-            cloud_sync.view.upload_selection = None;
-            cloud_sync.view.pending_preview = None;
-            cloud_sync.view.preview_selection = None;
-        });
-        self.save_cloud_sync_state(cx);
-        let settings = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .settings
-            .clone();
-        let hints = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .secret_hints
-            .clone();
-        let previous_remote_sections = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .last_synced_remote_sections
-            .clone();
-        let connection_store = self.connection_store.clone();
-        let service = self.cloud_sync.read(cx).controller.service.clone();
-        let tx = self.cloud_sync.update(cx, |cloud_sync, cx| {
-            cloud_sync.begin_delivery("upload_preview", cx)
-        });
-        self.forwarding_runtime
-            .spawn(deliver_cloud_sync_upload_preview(
-                tx,
-                service,
-                connection_store,
-                settings,
-                hints,
-                previous_remote_sections,
-            ));
     }
 
     pub(in crate::workspace) fn collect_cloud_sync_sensitive_portable_secrets(
@@ -516,6 +299,10 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn start_cloud_sync_pull_preview(&mut self, cx: &mut Context<Self>) {
+        if self.cloud_sync.read(cx).view.local_file_mode {
+            self.start_cloud_sync_local_file(false, false, cx);
+            return;
+        }
         self.start_cloud_sync_pull_preview_with_options(true, cx);
     }
 
@@ -525,60 +312,9 @@ impl WorkspaceApp {
         persist_configuration: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
-            self.mark_cloud_sync_operation_in_progress(cx);
-            return;
+        if !persist_configuration || self.persist_cloud_sync_configuration(false, cx) {
+            self.start_causal_sync(false, cx);
         }
-        if persist_configuration && !self.persist_cloud_sync_configuration(false, cx) {
-            return;
-        }
-        self.cloud_sync.update(cx, |cloud_sync, _cx| {
-            cloud_sync.controller.store.state_mut().status = CloudSyncStatus::Checking;
-            cloud_sync.controller.store.state_mut().last_error = None;
-            cloud_sync.view.upload_preview = None;
-            cloud_sync.view.upload_selection = None;
-            cloud_sync.view.pending_preview = None;
-            cloud_sync.view.preview_selection = None;
-        });
-        self.save_cloud_sync_state(cx);
-        let settings = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .settings
-            .clone();
-        let hints = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .secret_hints
-            .clone();
-        let previous_remote_sections = self
-            .cloud_sync
-            .read(cx)
-            .controller
-            .store
-            .state()
-            .last_synced_remote_sections
-            .clone();
-        let connection_store = self.connection_store.clone();
-        let service = self.cloud_sync.read(cx).controller.service.clone();
-        let tx = self
-            .cloud_sync
-            .update(cx, |cloud_sync, cx| cloud_sync.begin_delivery("pull", cx));
-        self.forwarding_runtime
-            .spawn(deliver_cloud_sync_pull_preview(
-                tx,
-                service,
-                connection_store,
-                settings,
-                hints,
-                previous_remote_sections,
-            ));
     }
 
     pub(super) fn start_cloud_sync_restore_backup(
@@ -586,7 +322,7 @@ impl WorkspaceApp {
         backup_id: String,
         cx: &mut Context<Self>,
     ) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).operation_in_flight() {
             self.mark_cloud_sync_operation_in_progress(cx);
             return;
         }
@@ -650,7 +386,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn start_cloud_sync_apply_preview(&mut self, cx: &mut Context<Self>) {
-        if self.cloud_sync.read(cx).controller.delivery_rx.is_some() {
+        if self.cloud_sync.read(cx).operation_in_flight() {
             self.mark_cloud_sync_operation_in_progress(cx);
             return;
         }
@@ -720,19 +456,24 @@ impl WorkspaceApp {
         let tx = self
             .cloud_sync
             .update(cx, |cloud_sync, cx| cloud_sync.begin_delivery("apply", cx));
+        let audit_context = oxideterm_audit::AuditContext::current_request()
+            .or_else(oxideterm_audit::AuditContext::current);
         self.forwarding_runtime
-            .spawn(deliver_cloud_sync_apply_preview(
-                tx,
-                service,
-                connection_store,
-                forwarding_registry,
-                settings_store,
-                settings,
-                hints,
-                source_revision,
-                preview,
-                selection,
-                create_rollback_backup,
+            .spawn(oxideterm_audit::AuditContext::scope_optional(
+                audit_context,
+                deliver_cloud_sync_apply_preview(
+                    tx,
+                    service,
+                    connection_store,
+                    forwarding_registry,
+                    settings_store,
+                    settings,
+                    hints,
+                    source_revision,
+                    preview,
+                    selection,
+                    create_rollback_backup,
+                ),
             ));
     }
 
@@ -798,6 +539,15 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match intent {
+            CloudSyncUiIntent::ApplyCausal => self.apply_causal_sync(cx),
+            CloudSyncUiIntent::CancelCausal => self.cancel_causal_sync(cx),
+            CloudSyncUiIntent::ChooseCausal {
+                conflict,
+                candidate,
+            } => self.cloud_sync.update(cx, |cloud_sync, cx| {
+                cloud_sync.view.causal_choices.insert(*conflict, *candidate);
+                cx.notify();
+            }),
             CloudSyncUiIntent::SelectTab { tab } => {
                 let tab = *tab;
                 if self.cloud_sync.read(cx).view.active_tab == CloudSyncTab::Configure
@@ -826,12 +576,7 @@ impl WorkspaceApp {
             CloudSyncUiIntent::StartGithubOauth => self.start_cloud_sync_github_oauth(cx),
             CloudSyncUiIntent::StartMicrosoftOauth => self.start_cloud_sync_microsoft_oauth(cx),
             CloudSyncUiIntent::StartGoogleOauth => self.start_cloud_sync_google_oauth(cx),
-            // Local .oxide transfers reuse the workspace-owned encrypted file flow and
-            // remain available without configuring a cloud backend.
-            CloudSyncUiIntent::ImportLocalBackup => self.open_oxide_import_dialog(cx),
-            CloudSyncUiIntent::ExportLocalBackup => self.open_oxide_export_dialog(cx),
             CloudSyncUiIntent::StartUploadPreview => self.start_cloud_sync_upload_preview(cx),
-            CloudSyncUiIntent::CheckRemote => self.start_cloud_sync_check(cx),
             CloudSyncUiIntent::PullPreview => self.start_cloud_sync_pull_preview(cx),
             CloudSyncUiIntent::RestoreLatestBackup => {
                 self.open_cloud_sync_restore_confirm(None, cx);
@@ -840,7 +585,9 @@ impl WorkspaceApp {
             CloudSyncUiIntent::ApplyPreview => self.open_cloud_sync_import_confirm(cx),
             CloudSyncUiIntent::StartUpload => {
                 self.cloud_sync.update(cx, |cloud_sync, cx| {
-                    cloud_sync.view.upload_preview = None;
+                    if !cloud_sync.view.local_file_mode {
+                        cloud_sync.view.upload_preview = None;
+                    }
                     cloud_sync.clear_select_focus();
                     cx.notify();
                 });
@@ -965,6 +712,29 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match delivery {
+            CloudSyncDelivery::CausalPrepared { action, automatic } => {
+                self.cloud_sync.update(cx, |cloud_sync, _| {
+                    cloud_sync.controller.store.state_mut().secret_hints = action.secret_hints
+                });
+                match action.result {
+                    Ok(plan) => self.receive_causal_plan(plan, automatic, cx),
+                    Err(error) => self.finish_cloud_sync_error("sync", error, cx),
+                }
+            }
+            CloudSyncDelivery::CausalFinished(action) => {
+                self.cloud_sync.update(cx, |cloud_sync, _| {
+                    cloud_sync
+                        .controller
+                        .store
+                        .state_mut()
+                        .secret_hints
+                        .extend(action.secret_hints)
+                });
+                match action.result {
+                    Ok(outcome) => self.finish_causal_sync(&outcome, cx),
+                    Err(error) => self.finish_cloud_sync_error("sync", error, cx),
+                }
+            }
             CloudSyncDelivery::Progress(progress) => {
                 if self.cloud_sync.read(cx).controller.active_action == Some("upload")
                     && self.cloud_sync.read(cx).controller.store.state().status
@@ -981,21 +751,37 @@ impl WorkspaceApp {
                 });
             }
             CloudSyncDelivery::RollbackBackupCreated(backup) => {
-                self.cloud_sync.update(cx, |cloud_sync, _cx| {
+                let mut audit = oxideterm_audit::AuditOperation::begin(
+                    oxideterm_audit::AuditCategory::Configuration,
+                    "backup_create",
+                    None,
+                    Some("cloud_sync_rollback"),
+                );
+                audit.summary(&format!("size_bytes={}", backup.size_bytes));
+                self.invalidate_cloud_sync_snapshot_caches(cx);
+                let result = self.cloud_sync.update(cx, |cloud_sync, _cx| {
                     cloud_sync
                         .controller
                         .store
                         .state_mut()
                         .append_rollback_backup(backup);
+                    let result = cloud_sync.controller.store.save();
+                    if let Err(error) = &result {
+                        cloud_sync.controller.store.state_mut().last_error =
+                            Some(error.to_string());
+                    }
+                    result
                 });
-                self.save_cloud_sync_state(cx);
-                self.push_cloud_sync_toast(
-                    self.i18n
-                        .t("plugin.cloud_sync.toast.rollback_backup_available"),
-                    None,
-                    TerminalNoticeVariant::Success,
-                    cx,
-                );
+                audit.result(&result);
+                if result.is_ok() {
+                    self.push_cloud_sync_toast(
+                        self.i18n
+                            .t("plugin.cloud_sync.toast.rollback_backup_available"),
+                        None,
+                        TerminalNoticeVariant::Success,
+                        cx,
+                    );
+                }
             }
             CloudSyncDelivery::CheckFinished(action) => {
                 self.cloud_sync.update(cx, |cloud_sync, _cx| {
@@ -1321,6 +1107,7 @@ impl WorkspaceApp {
         let display_error = self.format_cloud_sync_error(&error);
         let history_summary = self.cloud_sync_upload_failure_summary();
         self.cloud_sync.update(cx, |cloud_sync, _cx| {
+            cloud_sync.controller.password_change = None;
             finish_cloud_sync_error_state(
                 cloud_sync.controller.store.state_mut(),
                 "upload",
@@ -1386,9 +1173,10 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn finish_cloud_sync_apply_preview(
         &mut self,
-        ui_outcome: CloudSyncApplyUiOutcome,
+        mut ui_outcome: CloudSyncApplyUiOutcome,
         cx: &mut Context<Self>,
     ) {
+        let mut legacy_import_audit = ui_outcome.legacy_import_audit.take();
         let previous_network = self.settings_store.settings().network.clone();
         self.connection_store = ui_outcome.connection_store;
         self.settings_store = ui_outcome.settings_store;
@@ -1400,14 +1188,29 @@ impl WorkspaceApp {
         }
         match ui_outcome.outcome {
             CloudSyncApplyOutcome::Structured(outcome) => {
-                self.finish_structured_cloud_sync_apply(outcome, cx)
+                self.finish_structured_cloud_sync_apply(outcome, cx);
             }
             CloudSyncApplyOutcome::Legacy {
                 preview,
                 source,
                 selection,
                 outcome,
-            } => self.finish_legacy_cloud_sync_apply(preview, source, selection, outcome, cx),
+            } => {
+                let (applied, errors) =
+                    self.finish_legacy_cloud_sync_apply(preview, source, selection, outcome, cx);
+                if let Some(audit) = legacy_import_audit.take() {
+                    audit.finish(
+                        &format!("mode=legacy_apply,applied={applied},errors={errors}"),
+                        if errors > 0 {
+                            oxideterm_audit::AuditOutcome::Partial
+                        } else if applied == 0 {
+                            oxideterm_audit::AuditOutcome::Unchanged
+                        } else {
+                            oxideterm_audit::AuditOutcome::Succeeded
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -1488,7 +1291,7 @@ impl WorkspaceApp {
         selection: CloudSyncPreviewSelection,
         mut outcome: ApplyLegacyPreviewOutcome,
         cx: &mut Context<Self>,
-    ) {
+    ) -> (usize, usize) {
         let plan = cloud_sync_legacy_apply_plan(&preview, &source, &selection);
         let cloud_options = plan.import_options;
         let imported_forwards = if cloud_options.oxide_options.import_forwards {
@@ -1497,19 +1300,23 @@ impl WorkspaceApp {
             0
         };
         outcome.envelope.imported_forwards = imported_forwards;
-        let (_imported_quick_commands, _skipped_quick_commands, _quick_command_errors) = self
+        let (imported_quick_commands, _skipped_quick_commands, quick_command_errors) = self
             .apply_oxide_import_quick_commands(
                 outcome.envelope.quick_commands_json.as_deref(),
                 selection.import_quick_commands,
                 QuickCommandImportStrategy::Merge,
                 cx,
             );
-        self.apply_oxide_import_plugin_settings(
-            &outcome.envelope.plugin_settings,
-            cloud_options.import_plugin_settings,
-            cloud_options.selected_plugin_ids.as_ref(),
-        );
-        self.apply_oxide_import_app_settings(
+        let (imported_plugin_settings, plugin_settings_failed) = match self
+            .try_apply_oxide_import_plugin_settings(
+                &outcome.envelope.plugin_settings,
+                cloud_options.import_plugin_settings,
+                cloud_options.selected_plugin_ids.as_ref(),
+            ) {
+            Ok(count) => (count, false),
+            Err(_) => (0, true),
+        };
+        let (imported_app_settings, skipped_app_settings) = self.apply_oxide_import_app_settings(
             outcome.envelope.app_settings_json.as_deref(),
             cloud_options.import_app_settings,
             cloud_options.selected_app_settings_sections.as_ref(),
@@ -1565,6 +1372,25 @@ impl WorkspaceApp {
             TerminalNoticeVariant::Success,
             cx,
         );
+        let applied = outcome.envelope.imported
+            + outcome.envelope.merged
+            + outcome.envelope.replaced
+            + outcome.envelope.renamed
+            + outcome.envelope.imported_forwards
+            + outcome.envelope.imported_serial_profiles
+            + outcome.envelope.imported_telnet_profiles
+            + outcome.envelope.imported_mosh_profiles
+            + outcome.envelope.imported_standalone_sftp_profiles
+            + outcome.envelope.imported_remote_desktop_profiles
+            + imported_quick_commands
+            + imported_plugin_settings
+            + usize::from(imported_app_settings)
+            + outcome.envelope.imported_portable_secrets;
+        let errors = outcome.envelope.errors.len()
+            + quick_command_errors.len()
+            + usize::from(plugin_settings_failed)
+            + usize::from(cloud_options.import_app_settings && skipped_app_settings);
+        (applied, errors)
     }
 
     pub(super) fn cloud_sync_sensitive_restore_description(
@@ -1639,6 +1465,7 @@ impl WorkspaceApp {
         let upload_history_summary =
             (action == "upload").then(|| self.cloud_sync_upload_failure_summary());
         self.cloud_sync.update(cx, |cloud_sync, _cx| {
+            cloud_sync.controller.password_change = None;
             finish_cloud_sync_error_state(
                 cloud_sync.controller.store.state_mut(),
                 action,

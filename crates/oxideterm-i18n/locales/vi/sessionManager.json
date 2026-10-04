@@ -110,11 +110,13 @@
       "auth_key": "Khóa SSH",
       "auth_agent": "Agent",
       "saved_password": "Mật khẩu đã lưu",
-      "password_placeholder": "Đã lưu trong keychain hệ thống",
+      "password_placeholder": "Nhấp để xem mật khẩu đã lưu",
       "password_required": "Nhập mật khẩu để kết nối.",
       "show_password": "Hiển thị mật khẩu đã lưu",
       "hide_password": "Ẩn mật khẩu đã lưu",
-      "password_load_failed": "Không thể đọc mật khẩu đã lưu. Kiểm tra quyền truy cập kho thông tin xác thực rồi thử lại.",
+      "password_load_failed": "Không thể đọc kho thông tin xác thực. Hãy thử lại hoặc nhập lại mật khẩu và lưu.",
+      "password_not_found": "Mật khẩu được kết nối này tham chiếu không có trong kho thông tin xác thực. Hãy nhập lại mật khẩu và lưu.",
+      "password_store_locked": "Kho bảo mật di động đang bị khóa. Khởi động lại OxideTerm, mở khóa bằng mật khẩu chế độ di động rồi thử lại.",
       "password_hint": "Nút hình mắt hiển thị mật khẩu đã lưu mà không thay đổi mật khẩu. Chỉnh sửa để thay thế, hoặc để trống để giữ mật khẩu cũ.",
       "key_path": "Đường dẫn tệp khóa",
       "browse": "Duyệt",
@@ -125,6 +127,9 @@
       "choose_icon": "Đổi biểu tượng",
       "hide_icons": "Ẩn biểu tượng",
       "default_icon": "Biểu tượng mặc định",
+      "auto_icon": "Tự động nhận diện",
+      "custom_icon": "Chọn biểu tượng",
+      "auto_icon_hint": "Sau khi kết nối, các phiên đang hoạt động hiển thị biểu tượng của hệ thống được phát hiện. Nếu không có biểu tượng phù hợp, biểu tượng máy chủ chung sẽ được dùng.",
       "color": "Màu",
       "icon_color": "Màu biểu tượng",
       "icon_background_color": "Màu nền biểu tượng",
@@ -132,7 +137,8 @@
       "cancel": "Hủy",
       "save": "Lưu",
       "saving": "Đang lưu...",
-      "passphrase_hint": "Để trống để giữ passphrase đã lưu khi đường dẫn key không đổi."
+      "passphrase_hint": "Để trống để giữ passphrase đã lưu khi đường dẫn key không đổi.",
+      "brand_icon_hint": "Biểu trưng bản phân phối giữ nguyên màu sắc và tỷ lệ gốc."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "Phiên đã lưu",
       "expand_all": "Mở rộng tất cả",
       "collapse_all": "Thu gọn tất cả"
+    },
+    "local_terminal_profiles": {
+      "delete": "Xóa phiên cục bộ",
+      "delete_failed": "Không thể xóa phiên cục bộ",
+      "confirm_delete": "Xóa phiên cục bộ “{{name}}”? Các terminal đang chạy vẫn được giữ mở."
     }
   }
 }

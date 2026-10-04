@@ -770,11 +770,11 @@ impl WorkspaceApp {
         };
 
         self.dismiss_terminal_recording_menu();
-        self.close_terminal_quick_commands_popover(cx);
         self.dismiss_terminal_broadcast_menu(cx);
         self.dismiss_terminal_highlight_popover();
         self.close_terminal_cwd_picker(cx);
         self.close_terminal_project_panel(cx);
+        self.blur_terminal_quick_commands_input(cx);
         self.ime_marked_text = None;
         self.clear_ime_selection();
 
@@ -1147,17 +1147,16 @@ impl WorkspaceApp {
         }
 
         let tab = self.active_tab(cx)?;
-        let tab_kind = tab.kind.clone();
         let pane_id = tab.active_pane_id?;
-        let scope = match tab_kind {
-            TabKind::LocalTerminal => GitProbeScope::Local,
-            TabKind::SshTerminal => {
+        let scope = match self.terminal_kind_for_pane(pane_id, cx)? {
+            oxideterm_terminal::TerminalSessionKind::LocalPty => GitProbeScope::Local,
+            oxideterm_terminal::TerminalSessionKind::SshPty => {
                 let session_id = self.active_terminal_session_id(cx)?;
                 let node_id = self
                     .workspace_runtime
                     .read(cx)
                     .ssh_terminal_node_id(session_id)?;
-                GitProbeScope::ssh_node(node_id.0.clone())
+                GitProbeScope::ssh_node(node_id.0)
             }
             _ => return None,
         };
@@ -1557,8 +1556,7 @@ fn terminal_git_clean_ai_commit_subject(text: &str) -> Option<String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with("```"))
-        .next()?;
+        .find(|line| !line.starts_with("```"))?;
 
     if let Some(rest) = subject.strip_prefix("- ") {
         subject = rest.trim();

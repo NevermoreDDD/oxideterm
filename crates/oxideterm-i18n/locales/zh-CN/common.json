@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} 仍在运行（可能位于系统托盘），或其文件正被其他程序占用。请先保存工作。点击“确定”关闭占用程序并继续安装，点击“取消”停止安装。安装目录：{{path}}",
+    "application_close_failed": "无法释放或确认 {{path}} 中的文件占用情况。请从系统托盘退出 {{app}}，并关闭正在使用此目录的其他程序，然后点击“重试”。点击“取消”停止安装，不替换文件。"
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Shell 启动器"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "不支持的 Mermaid 图",
-    "mermaid_expand": "放大"
+    "mermaid_expand": "放大",
+    "mermaid_loading": "正在渲染图表…",
+    "html_details": "详细内容"
   },
   "layout": {
     "empty": {
@@ -196,8 +202,29 @@
     "compatibility_title": "兼容性说明",
     "manager_compatibility_notice": "原生插件可以使用插件清单、WASM 或独立进程。Tauri 版本的旧版 JavaScript 插件仍可查看或卸载，但无法在原生版本中运行。",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "请将同步服务器升级到支持新版云同步协议的版本，然后重新同步。",
+        "password_change_pending": "上次密码变更尚未完成，请使用上次的新密码重试。",
+        "change_password": "更改同步密码",
+        "change_password_description": "使用新密码创建同步空间，上传并校验成功后切换。原来的同步空间会保留。",
+        "password_change_separate_settings": "请先保存其他设置，再更改同步密码。",
+        "password_too_short": "密码至少需要 6 个字符。",
+        "sync": "同步",
+        "cleanup_pending": "清理尚未完成，请再次同步。",
+        "keep": "保留",
+        "preview": "同步预览",
+        "changes": "变更字段",
+        "upgrade": "将升级现有云端数据，原文件会保留。",
+        "candidate": "版本",
+        "apply": "应用并同步",
+        "configuration": "配置",
+        "protected": "受保护的内容",
+        "current": "当前设备",
+        "conflict_hint": "请选择冲突字段的版本。未选择的冲突会保留当前设备的值。"
+      },
       "panel_title": "Oxide 云同步",
       "backend": {
+        "local_file": "本地文件",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -270,6 +297,7 @@
         "sync_scope": "同步范围",
         "conflict_recovery": "冲突恢复",
         "import_preview": "导入预览",
+        "export_preview": "导出预览",
         "upload_preview": "上传预览",
         "rollback_preview": "回滚预览",
         "rollback_backups": "回滚备份",
@@ -328,6 +356,7 @@
         "google_drive_permission_warning": "如果 Google 报 access_denied、admin_policy_enforced、invalid_client 或 Drive API 未启用，请检查同意屏幕、桌面客户端类型、API 状态、管理员策略和测试用户。"
       },
       "settings": {
+        "sync_method": "同步方式",
         "backend_type": "后端类型",
         "auth_mode": "鉴权方式",
         "endpoint": "Endpoint",
@@ -430,6 +459,7 @@
         "summary_line": "{{connections}} 个连接，{{forwards}} 个转发，{{quickCommands}} 条快捷命令，{{serialProfiles}} 个串口配置，{{telnetProfiles}} 个 Telnet 配置，{{pluginSettingsCount}} 项插件设置，{{sensitiveCredentials}} 个敏感凭据"
       },
       "errors": {
+        "local_forward_requires_connection": "导出本地文件时，请同时选中所选转发规则所属的连接。",
         "operation_in_progress": "另一个云同步操作正在运行，请稍后再试。",
         "missing_endpoint": "请先配置后端 Endpoint，再执行同步。",
         "missing_namespace": "请先配置命名空间或路径前缀，再执行同步。",
@@ -560,6 +590,7 @@
         "downloading": "下载对象"
       },
       "preview": {
+        "standalone_sftp_profiles": "文件传输连接（{{count}}）",
         "summary_header": "远端预览摘要",
         "apply_plan_title": "本次应用计划",
         "upload_scope_title": "上传范围",
@@ -1171,6 +1202,12 @@
     "hint_other": "Zen 模式 — 按 Ctrl+Shift+Z 退出"
   },
   "tabbar": {
+    "drag_to_dock": "拖拽停靠",
+    "workspace": "工作区",
+    "merge_into_horizontal": "并入“{{title}}”（左右分屏）",
+    "merge_into_vertical": "并入“{{title}}”（上下分屏）",
+    "move_pane_to_tab": "移至新标签",
+    "move_pane_to_window": "移至新窗口",
     "offline": "离线",
     "cancel_reconnect": "取消重连",
     "reconnect": "重新连接",
@@ -1287,5 +1324,13 @@
     "setup_pending": "正在创建便携密钥库...",
     "unlock_submit": "解锁并继续",
     "unlock_pending": "正在解锁便携数据..."
+  },
+  "local_session": {
+    "directory": "启动目录",
+    "inherit_directory": "留空使用设置中的默认目录",
+    "inherit_shell": "使用设置中的默认 Shell",
+    "shell_unavailable": "本机没有此会话保存的 Shell，请编辑会话并选择已安装的 Shell。",
+    "directory_unavailable": "启动目录不存在，请编辑会话并选择有效目录。",
+    "name_required": "请输入名称以保存本地会话。"
   }
 }

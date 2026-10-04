@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, BoxShadow, IntoColor, MouseButton, MouseDownEvent, ParentElement, Styled,
-    Window, div, point, prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, BoxShadow, MouseButton, MouseDownEvent, ParentElement, Styled, Window, div,
+    point, prelude::*, px, rgb, rgba, svg,
 };
 use oxideterm_theme::ThemeTokens;
 use std::rc::Rc;
@@ -106,15 +106,14 @@ pub fn confirm_dialog_with_focus_motion(
             cx.stop_propagation();
         })
         .child(
-            div()
+            crate::surface::material_surface(tokens, div(), crate::surface::MaterialRole::Dialog)
                 .w(px(CONFIRM_DIALOG_WIDTH))
                 .rounded(px(tokens.radii.lg))
                 .overflow_hidden()
                 .border_1()
                 .border_color(rgba((theme.border << 8) | CONFIRM_BORDER_ALPHA))
-                .bg(rgb(theme.bg_elevated))
                 .shadow(vec![BoxShadow {
-                    color: rgba((TW_BLACK << 8) | CONFIRM_SHADOW_ALPHA).into_color(),
+                    color: rgba((TW_BLACK << 8) | CONFIRM_SHADOW_ALPHA).into(),
                     offset: point(px(0.0), px(16.0)),
                     blur_radius: px(32.0),
                     spread_radius: px(0.0),

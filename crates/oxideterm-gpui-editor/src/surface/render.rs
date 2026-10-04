@@ -30,6 +30,7 @@ use super::{
 const CM_ACTIVE_LINE_ACCENT_ALPHA: u32 = 0x12;
 const CM_ACTIVE_GUTTER_ACCENT_ALPHA: u32 = 0xcc;
 const CM_SELECTION_ACCENT_ALPHA: u32 = 0x40;
+const CM_SELECTED_LINE_ACCENT_ALPHA: u32 = 0x0c;
 const CM_SEARCH_MATCH_ACCENT_ALPHA: u32 = 0x40;
 const CM_SEARCH_MATCH_OUTLINE_ALPHA: u32 = 0x80;
 const CM_INDENT_GUIDE_ALPHA: u32 = 0x26;
@@ -86,6 +87,7 @@ struct EditorHorizontalScrollbarDragState {
 
 struct RenderRowContext {
     selections: Vec<Selection>,
+    multiline_selected_lines: Vec<Range<usize>>,
     matching_bracket_pair: Option<BracketPair>,
     indentation_columns_by_line: BTreeMap<usize, Vec<usize>>,
     primary_caret_display_index: Option<usize>,
@@ -99,6 +101,7 @@ impl Render for TextEditorView {
         // Content edits, wrapping, and resizing can all shorten the widest row.
         self.viewport
             .clamp_horizontal(self.max_horizontal_scroll_px());
+        self.reveal_changed_caret_horizontally(window);
         let display_rows = self.display_rows();
         let visible = self
             .viewport
@@ -194,14 +197,17 @@ impl Render for TextEditorView {
             .line_height(px(self.metrics.line_height))
             .text_color(rgb(self.appearance.text_hex))
             .bg(if self.presentation == EditorPresentation::Inline {
-                rgba((self.appearance.background_hex << 8) | 0x00)
+                rgba(self.appearance.background_hex << 8)
             } else {
                 self.editor_background(self.appearance.background_hex)
             })
-            .when(self.presentation == EditorPresentation::Document, |root| {
-                root.border_1()
-                    .border_color(rgb(self.appearance.border_hex))
-            })
+            .when(
+                self.presentation == EditorPresentation::Document && self.border_visible,
+                |root| {
+                    root.border_1()
+                        .border_color(rgb(self.appearance.border_hex))
+                },
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
@@ -234,6 +240,33 @@ impl Render for TextEditorView {
 }
 
 impl TextEditorView {
+    fn reveal_changed_caret_horizontally(&mut self, window: &mut Window) {
+        let Some(bounds) = self.content_bounds else {
+            return;
+        };
+        let caret_state = (self.buffer.version(), self.cursor.selection().head);
+        if self.last_revealed_caret == Some(caret_state) {
+            return;
+        }
+        self.last_revealed_caret = Some(caret_state);
+        // Only edits and caret movement reveal text. Repaints after manual scrolling
+        // must not pull the viewport back to an unchanged selection.
+        let caret = self.bounds_for_byte_offset(caret_state.1, bounds, window);
+        let left =
+            bounds.left() + px(self.visible_gutter_width() + self.visible_content_padding_x());
+        let right = bounds.right() - px(CM_SCROLLBAR_TRACK_WIDTH + CM_CURSOR_WIDTH);
+        if right <= left {
+            return;
+        }
+        if caret.left() < left {
+            self.viewport.scroll_x_px += f32::from(caret.left() - left);
+        } else if caret.left() > right {
+            self.viewport.scroll_x_px += f32::from(caret.left() - right);
+        }
+        self.viewport
+            .clamp_horizontal(self.max_horizontal_scroll_px());
+    }
+
     fn render_vertical_scrollbar(
         &self,
         editor: Entity<Self>,
@@ -284,7 +317,7 @@ impl TextEditorView {
                         ))
                         .cursor(CursorStyle::OpenHand)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_drag(drag_state.clone(), |drag, position, _window, cx| {
+                        .on_drag(drag_state, |drag, position, _window, cx| {
                             drag.grab_offset_y.set(f32::from(position.y));
                             cx.new(|_| EmptyView)
                         })
@@ -321,6 +354,7 @@ impl TextEditorView {
         let thumb_top = f32::from(pointer_y - bounds.origin.y) - grab_offset_y;
         let scroll_y = editor_scroll_y_for_thumb_top(thumb_top, geometry);
         if (self.viewport.scroll_y_px - scroll_y).abs() > f32::EPSILON {
+            self.scroll_origin = super::EditorScrollOrigin::User;
             self.viewport.scroll_y_px = scroll_y;
             cx.notify();
         }
@@ -375,7 +409,7 @@ impl TextEditorView {
                         ))
                         .cursor(CursorStyle::OpenHand)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_drag(drag_state.clone(), |drag, position, _window, cx| {
+                        .on_drag(drag_state, |drag, position, _window, cx| {
                             drag.grab_offset_x.set(f32::from(position.x));
                             cx.new(|_| EmptyView)
                         })
@@ -471,7 +505,12 @@ impl TextEditorView {
             .offset_to_line_col(self.cursor.selection().head)
             .ok()
             .filter(|position| position.line == line);
-        let is_current_line = cursor_position.is_some();
+        let is_current_line =
+            cursor_position.is_some() && row_context.multiline_selected_lines.is_empty();
+        let is_selected_line = row_context
+            .multiline_selected_lines
+            .iter()
+            .any(|range| range.contains(&line));
         let cursor_visual_column = cursor_position
             .map(|position| visual_column_for_byte_column(&line_text, position.column))
             .unwrap_or(0);
@@ -516,8 +555,8 @@ impl TextEditorView {
             || !indent_guides.is_empty();
         // Shape once and use the same glyph positions for every visible
         // overlay. Fixed cell widths diverge under font fallback.
-        let coordinate_line =
-            needs_shaped_coordinates.then(|| self.shape_coordinate_line(segment_text, window));
+        let coordinate_line = needs_shaped_coordinates
+            .then(|| self.shape_coordinate_line(segment_text, window.text_system()));
         let cursor_x = cursor_byte_column.map(|byte_column| {
             f32::from(
                 coordinate_line
@@ -564,14 +603,20 @@ impl TextEditorView {
         let row = div()
             .relative()
             .h(px(line_height))
+            .flex_shrink_0()
             .w_full()
             .flex()
             .items_center()
             .bg(
-                if is_current_line && self.presentation == EditorPresentation::Document {
+                if is_selected_line && self.presentation == EditorPresentation::Document {
+                    rgba((self.appearance.accent_hex << 8) | CM_SELECTED_LINE_ACCENT_ALPHA)
+                } else if is_current_line
+                    && self.settings.highlight_current_line
+                    && self.presentation == EditorPresentation::Document
+                {
                     rgba((self.appearance.accent_hex << 8) | CM_ACTIVE_LINE_ACCENT_ALPHA)
                 } else {
-                    rgba((self.appearance.background_hex << 8) | 0x00)
+                    rgba(self.appearance.background_hex << 8)
                 },
             )
             .on_mouse_down(
@@ -732,7 +777,8 @@ impl TextEditorView {
                     display_row,
                     line_height,
                     gutter_width,
-                    is_current_line,
+                    cursor_position.is_some(),
+                    is_selected_line,
                     foldable,
                     folded,
                     cx,
@@ -746,16 +792,20 @@ impl TextEditorView {
         line_height: f32,
         gutter_width: f32,
         is_current_line: bool,
+        is_selected_line: bool,
         foldable: Option<super::FoldRange>,
         folded: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let line = display_row.line;
-        let text_hex = if is_current_line && display_row.is_first {
-            self.appearance.background_hex
-        } else {
-            self.appearance.muted_text_hex
-        };
+        let text_hex =
+            if is_current_line && display_row.is_first && self.settings.highlight_current_line {
+                self.appearance.background_hex
+            } else if is_selected_line {
+                self.appearance.text_hex
+            } else {
+                self.appearance.muted_text_hex
+            };
         let mut fold_icon = div()
             .w(px(CM_FOLD_ICON_WIDTH))
             .h(px(line_height))
@@ -790,11 +840,18 @@ impl TextEditorView {
             .items_center()
             .justify_end()
             .pr(px(self.metrics.gutter_padding_x))
-            .bg(if is_current_line && display_row.is_first {
-                rgba((self.appearance.accent_hex << 8) | CM_ACTIVE_GUTTER_ACCENT_ALPHA)
-            } else {
-                self.editor_panel_background(self.appearance.gutter_background_hex)
-            })
+            .bg(
+                if is_current_line && display_row.is_first && self.settings.highlight_current_line {
+                    rgba((self.appearance.accent_hex << 8) | CM_ACTIVE_GUTTER_ACCENT_ALPHA)
+                } else if is_selected_line {
+                    gpui::ColorExt::blend(
+                        &self.editor_panel_background(self.appearance.gutter_background_hex),
+                        &rgba((self.appearance.accent_hex << 8) | CM_SELECTED_LINE_ACCENT_ALPHA),
+                    )
+                } else {
+                    self.editor_panel_background(self.appearance.gutter_background_hex)
+                },
+            )
             .text_color(rgb(text_hex))
             .child(fold_icon)
             .child(if display_row.is_first {
@@ -1082,10 +1139,23 @@ impl TextEditorView {
                     })
             })
             .flatten();
+        let selections = self.active_selections();
+        let multiline_selected_lines = selections
+            .iter()
+            .filter_map(|selection| {
+                let range = selection.range();
+                let start = self.buffer.offset_to_line_col(range.start).ok()?;
+                let end = self.buffer.offset_to_line_col(range.end).ok()?;
+                // A selection ending at column zero does not include that final line.
+                (start.line < end.line)
+                    .then_some(start.line..end.line + usize::from(end.column > 0))
+            })
+            .collect();
         RenderRowContext {
+            multiline_selected_lines,
             // Selection ordering and bracket matching depend on editor state,
             // not on the row, so compute them once for the current frame.
-            selections: self.active_selections(),
+            selections,
             matching_bracket_pair: self.matching_bracket_pair(),
             indentation_columns_by_line: visible_indentation_columns(
                 &self.structure_cache,
@@ -1218,7 +1288,7 @@ impl TextEditorView {
 
     fn editor_background(&self, color: u32) -> gpui::Rgba {
         if self.transparent_background {
-            rgba((color << 8) | 0x00)
+            rgba(color << 8)
         } else {
             rgb(color)
         }

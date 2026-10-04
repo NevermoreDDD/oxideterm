@@ -222,9 +222,8 @@ impl PlatformTextSystem for MacTextSystem {
         if !font_smoothing_allowed_by_user() {
             return 0;
         }
-        use palette::IntoColor;
-        let rgba: Rgba = color.into_color();
-        let luminance = 0.2126 * rgba.red + 0.7152 * rgba.green + 0.0722 * rgba.blue;
+        let rgba: Rgba = color.into();
+        let luminance = 0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b;
         let level = ((4.0 * luminance) + 0.5).floor() as i32;
         level.clamp(0, 4) as u8
     }
@@ -363,7 +362,7 @@ impl MacTextSystemState {
             // `font_ids_by_postscript_name` would skip every already-registered
             // font and leave the second call's `font_ids` empty.
             if !postscript_names_seen.insert(postscript_name.clone()) {
-                log::warn!(
+                log::debug!(
                     "skipping duplicate font {:?} with PostScript name {:?} \
                      in family {:?}",
                     font.full_name(),

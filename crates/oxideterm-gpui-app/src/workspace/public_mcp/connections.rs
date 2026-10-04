@@ -299,6 +299,8 @@ fn save_profile(
                             && existing_hop.username == hop.username.trim()
                     });
                     Ok(SavedProxyHop {
+                        totp_credential_id: matching_hop
+                            .and_then(|hop| hop.totp_credential_id.clone()),
                         host: hop.host.clone(),
                         port: hop.port,
                         username: hop.username.clone(),
@@ -314,6 +316,13 @@ fn save_profile(
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let request = SaveConnectionRequest {
+                totp_credential_id: existing
+                    .filter(|connection| {
+                        connection.host == profile.host.trim()
+                            && connection.port == profile.port
+                            && connection.username == profile.username.trim()
+                    })
+                    .and_then(|connection| connection.options.totp_credential_id.clone()),
                 id: existing_id.map(ToOwned::to_owned),
                 name: profile.name.clone(),
                 group: profile.group.clone(),
@@ -408,6 +417,7 @@ fn save_profile(
                 typed_existing_id(existing_key, CONNECTION_KEY_TELNET_PREFIX, "telnet")?;
             let saved = store
                 .upsert_telnet_profile(SaveTelnetProfileRequest {
+                    upstream_proxy: None,
                     id: existing_id.map(ToOwned::to_owned),
                     name: profile.name.clone(),
                     group: profile.group.clone(),
@@ -439,6 +449,8 @@ fn save_profile(
                                 && existing_hop.username == hop.username.trim()
                         });
                     Ok(SavedProxyHop {
+                        totp_credential_id: matching_hop
+                            .and_then(|hop| hop.totp_credential_id.clone()),
                         host: hop.host.clone(),
                         port: hop.port,
                         username: hop.username.clone(),
@@ -572,6 +584,7 @@ fn saved_auth(
 ) -> Result<SavedAuth, String> {
     match input {
         PublicConnectionAuth::Password => Ok(SavedAuth::Password {
+            empty_password: false,
             keychain_id: match existing {
                 Some(SavedAuth::Password { keychain_id, .. }) => keychain_id.clone(),
                 _ => None,

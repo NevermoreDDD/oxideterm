@@ -33,6 +33,7 @@ pub enum ConnectionAuthDraftKind {
 pub struct ConnectionAuthDraft {
     pub kind: ConnectionAuthDraftKind,
     pub password: SecretString,
+    pub empty_password: bool,
     pub password_keychain_id: Option<String>,
     pub password_loaded: bool,
     pub save_password: bool,
@@ -76,6 +77,7 @@ impl Default for ConnectionAuthDraft {
         Self {
             kind: ConnectionAuthDraftKind::Password,
             password: SecretString::default(),
+            empty_password: false,
             password_keychain_id: None,
             password_loaded: true,
             save_password: false,
@@ -92,6 +94,7 @@ impl Default for ConnectionAuthDraft {
 
 #[derive(Clone, Debug)]
 pub struct ProxyHopDraft {
+    pub totp_credential_id: Option<String>,
     pub host: String,
     pub port: String,
     pub username: String,
@@ -105,6 +108,7 @@ pub struct ProxyHopDraft {
 
 #[derive(Clone, Debug)]
 pub struct ConnectionDraft {
+    pub totp_credential_id: Option<String>,
     pub name: String,
     pub host: String,
     pub port: String,
@@ -150,6 +154,7 @@ pub fn saved_connection_from_ssh_host(host: SshConfigHost) -> Result<SavedConnec
         .proxy_chain
         .into_iter()
         .map(|hop| SavedProxyHop {
+            totp_credential_id: None,
             host: hop.host,
             port: hop.port.unwrap_or(22),
             username: hop.user.unwrap_or_else(current_username),
@@ -257,6 +262,7 @@ pub fn save_request_from_draft(
 ) -> Result<SaveConnectionRequest> {
     let port = draft.port.trim().parse::<u16>().unwrap_or(22);
     Ok(SaveConnectionRequest {
+        totp_credential_id: draft.totp_credential_id,
         id,
         name: draft.name.trim().to_string(),
         group: Some(draft.group.trim().to_string()),
@@ -299,8 +305,12 @@ pub fn saved_auth_from_draft(draft: ConnectionAuthDraft) -> SavedAuth {
     let kerberos_delegate_credentials = draft.gssapi_delegate_credentials;
     let fallback = match draft.kind {
         ConnectionAuthDraftKind::Password => SavedAuth::Password {
+            empty_password: draft.empty_password,
             keychain_id: None,
-            plaintext_password: draft.save_password.then_some(draft.password),
+            plaintext_password: (draft.save_password
+                && !draft.empty_password
+                && !draft.password.is_empty())
+            .then_some(draft.password),
         },
         ConnectionAuthDraftKind::DefaultKey => SavedAuth::Key {
             key_path: String::new(),
@@ -363,14 +373,19 @@ fn saved_auth_from_draft_for_update(
     draft: ConnectionAuthDraft,
     existing_auth: Option<&SavedAuth>,
 ) -> Result<SavedAuth> {
+    if draft.kind == ConnectionAuthDraftKind::Password && draft.empty_password {
+        return Ok(saved_auth_from_draft(draft));
+    }
     if draft.kind == ConnectionAuthDraftKind::Password {
         let kerberos_enabled = draft.gssapi_authentication;
         let kerberos_server_identity = (!draft.gssapi_server_identity.trim().is_empty())
             .then(|| draft.gssapi_server_identity.trim().to_string());
         let fallback = if draft.password_loaded {
             SavedAuth::Password {
+                empty_password: false,
+
                 keychain_id: draft.password_keychain_id,
-                plaintext_password: Some(draft.password),
+                plaintext_password: (!draft.password.is_empty()).then_some(draft.password),
             }
         } else {
             existing_auth
@@ -379,7 +394,10 @@ fn saved_auth_from_draft_for_update(
                     SavedAuth::Password {
                         keychain_id,
                         plaintext_password,
+                        ..
                     } => Some(SavedAuth::Password {
+                        empty_password: auth.uses_empty_password(),
+
                         keychain_id: keychain_id.clone(),
                         plaintext_password: plaintext_password.clone(),
                     }),
@@ -388,6 +406,8 @@ fn saved_auth_from_draft_for_update(
                 .unwrap_or(SavedAuth::Password {
                     keychain_id: None,
                     plaintext_password: None,
+
+                    empty_password: false,
                 })
         };
         return Ok(apply_kerberos_preference(
@@ -406,6 +426,7 @@ fn saved_proxy_chain_from_drafts(hops: Vec<ProxyHopDraft>) -> Result<Vec<SavedPr
         .map(|hop| {
             let auth = saved_proxy_hop_auth_from_draft(hop.auth)?;
             Ok(SavedProxyHop {
+                totp_credential_id: hop.totp_credential_id,
                 host: hop.host.trim().to_string(),
                 port: hop.port.trim().parse::<u16>().unwrap_or(22),
                 username: hop.username.trim().to_string(),
@@ -590,7 +611,8 @@ mod tests {
             saved_auth_from_draft(draft),
             SavedAuth::Password {
                 keychain_id: None,
-                plaintext_password: None
+                plaintext_password: None,
+                ..
             }
         ));
     }
@@ -598,6 +620,8 @@ mod tests {
     #[test]
     fn edit_password_unloaded_preserves_existing_auth() {
         let existing = SavedAuth::Password {
+            empty_password: false,
+
             keychain_id: Some("password-key".to_string()),
             plaintext_password: None,
         };
@@ -605,17 +629,21 @@ mod tests {
         draft.password_loaded = false;
         let auth = saved_auth_from_draft_for_update(draft, Some(&existing)).unwrap();
         assert!(matches!(
-            auth,
-            SavedAuth::Password {
-                keychain_id: Some(ref keychain_id),
-                plaintext_password: None
-            } if keychain_id == "password-key"
-        ));
+                    auth,
+                    SavedAuth::Password {
+                        keychain_id: Some(ref keychain_id),
+                        plaintext_password: None
+                    ,
+                    ..
+        } if keychain_id == "password-key"
+                ));
     }
 
     #[test]
     fn edit_password_loaded_saves_explicit_value() {
         let existing = SavedAuth::Password {
+            empty_password: false,
+
             keychain_id: Some("password-key".to_string()),
             plaintext_password: None,
         };
@@ -623,17 +651,21 @@ mod tests {
         draft.password_keychain_id = Some("password-key".to_string());
         let auth = saved_auth_from_draft_for_update(draft, Some(&existing)).unwrap();
         assert!(matches!(
-            auth,
-            SavedAuth::Password {
-                keychain_id: Some(ref keychain_id),
-                plaintext_password: Some(ref password)
-            } if keychain_id == "password-key" && password == "secret"
-        ));
+                    auth,
+                    SavedAuth::Password {
+                        keychain_id: Some(ref keychain_id),
+                        plaintext_password: Some(ref password)
+                    ,
+                    ..
+        } if keychain_id == "password-key" && password == "secret"
+                ));
     }
 
     #[test]
     fn kerberos_preference_preserves_the_conventional_fallback() {
         let existing = SavedAuth::Password {
+            empty_password: false,
+
             keychain_id: Some("password-key".to_string()),
             plaintext_password: None,
         };
@@ -646,22 +678,25 @@ mod tests {
         let auth = saved_auth_from_draft_for_update(draft, Some(&existing)).unwrap();
 
         assert!(matches!(
-            auth,
-            SavedAuth::KerberosPreferred {
-                server_identity: Some(ref identity),
-                delegate_credentials: true,
-                fallback,
-            } if identity == "host/server.example.com"
-                && matches!(*fallback, SavedAuth::Password {
-                    keychain_id: Some(ref keychain_id),
-                    plaintext_password: None,
-                } if keychain_id == "password-key")
-        ));
+                    auth,
+                    SavedAuth::KerberosPreferred {
+                        server_identity: Some(ref identity),
+                        delegate_credentials: true,
+                        fallback,
+                    } if identity == "host/server.example.com"
+                        && matches!(*fallback, SavedAuth::Password {
+                            keychain_id: Some(ref keychain_id),
+                            plaintext_password: None,
+
+                    ..
+        } if keychain_id == "password-key")
+                ));
     }
 
     #[test]
     fn proxy_hop_two_factor_is_saved_as_keyboard_interactive() {
         let draft = ConnectionDraft {
+            totp_credential_id: None,
             name: "Home".to_string(),
             host: "target.example.com".to_string(),
             port: "22".to_string(),
@@ -677,6 +712,7 @@ mod tests {
             icon: String::new(),
             tags: Vec::new(),
             proxy_hops: vec![ProxyHopDraft {
+                totp_credential_id: None,
                 host: "jump.example.com".to_string(),
                 port: "22".to_string(),
                 username: "ops".to_string(),

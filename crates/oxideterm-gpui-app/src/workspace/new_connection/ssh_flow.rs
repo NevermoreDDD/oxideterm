@@ -2,6 +2,7 @@ use std::{
     collections::HashMap, future::Future, pin::Pin, result::Result as StdResult, sync::Arc,
     time::Duration,
 };
+use zeroize::Zeroize;
 
 use gpui::{App, Context, Window};
 use oxideterm_connections::{
@@ -47,7 +48,8 @@ use crate::workspace::{
     session_manager::{
         RuntimeSecretHandoff, duplicate_connection_template_name, form_from_saved_connection,
         restore_legacy_jump_host_in_form, save_request_from_form_with_existing_auth,
-        save_request_from_form_with_proxy_hop_prefix, upstream_proxy_config_from_form,
+        save_request_from_form_with_proxy_hop_prefix, saved_upstream_proxy_policy_from_form,
+        upstream_proxy_config_from_form,
     },
 };
 use oxideterm_session_adapter::{
@@ -63,6 +65,8 @@ use oxideterm_terminal::{MoshTerminalConfig, SerialSessionConfig, TelnetSessionC
 mod connect;
 mod conversion;
 mod save;
+
+pub(super) use conversion::form_from_runtime_config;
 
 use conversion::*;
 pub(in crate::workspace) use save::mosh_options_from_profile;
@@ -114,7 +118,7 @@ struct SavedConnectionRuntimeHandoff {
     auth_override: Option<AuthMethod>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub(in crate::workspace) struct SshTerminalConnectionOptions {
     pub(in crate::workspace) terminal: ConnectionTerminalOptions,
     pub(in crate::workspace) dedicated_new_terminal_connection: bool,
@@ -132,22 +136,16 @@ impl SshTerminalConnectionOptions {
     }
 }
 
-impl Default for SshTerminalConnectionOptions {
-    fn default() -> Self {
-        Self {
-            terminal: ConnectionTerminalOptions::default(),
-            dedicated_new_terminal_connection: false,
-            ssh_channel_strategy: SshChannelStrategy::default(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum SshConnectionIntent {
     Test,
     TestStandaloneSftp,
     Connect(SshTerminalConnectionOptions),
-    ConnectSaved(String),
+    ConnectTemporary,
+    ConnectSaved {
+        id: String,
+        auth_save_target: Option<super::password_prompt::SavedAuthSaveTarget>,
+    },
     DrillDown {
         parent_id: NodeId,
         saved_connection_id: Option<String>,
@@ -254,11 +252,27 @@ pub(in crate::workspace) enum SshConnectionWorkerResult {
         request: KeyboardInteractivePromptRequest,
         response_tx: oneshot::Sender<Result<KeyboardInteractiveResponses, SshPromptError>>,
     },
+    PasswordPrompt {
+        node_id: Option<NodeId>,
+        prompt: oxideterm_ssh::SshPasswordPrompt,
+        response_tx: oneshot::Sender<Result<oxideterm_ssh::SshPasswordResponse, SshPromptError>>,
+    },
+    PasswordAuthenticated {
+        target: super::password_prompt::SavedPasswordTarget,
+        password: zeroize::Zeroizing<String>,
+    },
+    AuthenticationCompleted {
+        node_id: NodeId,
+        connection_id: String,
+        configured_credentials_confirmed: bool,
+    },
 }
 
 #[derive(Clone)]
 pub(in crate::workspace) struct NativeSshPromptHandler {
     tx: ActiveDeliverySender<SshConnectionWorkerResult>,
+    node_id: Option<NodeId>,
+    connection_id: Option<String>,
 }
 
 fn sync_saved_connection_node_title_for_nodes(
@@ -284,11 +298,64 @@ fn sync_saved_connection_node_title_for_nodes(
 
 impl NativeSshPromptHandler {
     pub(in crate::workspace) fn new(tx: ActiveDeliverySender<SshConnectionWorkerResult>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            node_id: None,
+            connection_id: None,
+        }
+    }
+
+    pub(in crate::workspace) fn for_node(mut self, node_id: NodeId) -> Self {
+        self.node_id = Some(node_id);
+        self
+    }
+
+    pub(in crate::workspace) fn for_connection(mut self, connection_id: String) -> Self {
+        self.connection_id = Some(connection_id);
+        self
     }
 }
 
 impl SshPromptHandler for NativeSshPromptHandler {
+    fn authentication_completed(&self, configured_credentials_confirmed: bool) {
+        if let (Some(node_id), Some(connection_id)) = (&self.node_id, &self.connection_id) {
+            let _ = self
+                .tx
+                .send(SshConnectionWorkerResult::AuthenticationCompleted {
+                    node_id: node_id.clone(),
+                    connection_id: connection_id.clone(),
+                    configured_credentials_confirmed,
+                });
+        }
+    }
+
+    fn password(
+        &self,
+        prompt: oxideterm_ssh::SshPasswordPrompt,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<oxideterm_ssh::SshPasswordResponse, SshPromptError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let (response_tx, response_rx) = oneshot::channel();
+            self.tx
+                .send(SshConnectionWorkerResult::PasswordPrompt {
+                    node_id: self.node_id.clone(),
+                    prompt,
+                    response_tx,
+                })
+                .map_err(|_| {
+                    SshPromptError::Failed("native SSH prompt UI is unavailable".into())
+                })?;
+            response_rx
+                .await
+                .map_err(|_| SshPromptError::Failed("native SSH prompt UI was closed".into()))?
+        })
+    }
+
     fn keyboard_interactive(
         &self,
         request: KeyboardInteractivePromptRequest,
@@ -296,6 +363,10 @@ impl SshPromptHandler for NativeSshPromptHandler {
         Box<dyn Future<Output = Result<KeyboardInteractiveResponses, SshPromptError>> + Send + '_>,
     > {
         Box::pin(async move {
+            // The application has one protected SSH prompt surface. Keep other
+            // authentication attempts waiting instead of cancelling their challenges.
+            static MANUAL_PROMPT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+            let _prompt_guard = MANUAL_PROMPT.lock().await;
             let (response_tx, response_rx) = oneshot::channel();
             self.tx
                 .send(SshConnectionWorkerResult::KeyboardInteractivePrompt {
@@ -459,6 +530,7 @@ impl WorkspaceApp {
         self.update_connection_form_state(cx, |state| {
             if let Some(form) = state.form.as_mut() {
                 form.transport = NewConnectionTransport::Telnet;
+                form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Direct;
                 form.port = super::form_state::TELNET_DEFAULT_PORT_TEXT.to_string();
                 form.focused_field = super::form_state::NewConnectionField::Host;
                 form.field_focused = false;

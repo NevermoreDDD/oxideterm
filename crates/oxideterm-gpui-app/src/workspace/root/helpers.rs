@@ -3,6 +3,7 @@ use oxideterm_atomic_file::durable_write_with_before_replace;
 
 pub(in crate::workspace) fn tab_background_key(kind: &TabKind) -> &'static str {
     match kind {
+        TabKind::Workspace => "terminal",
         TabKind::LocalTerminal => "local_terminal",
         TabKind::SshTerminal => "terminal",
         TabKind::MoshTerminal => "terminal",
@@ -19,6 +20,7 @@ pub(in crate::workspace) fn tab_background_key(kind: &TabKind) -> &'static str {
         TabKind::PluginManager => "plugin_manager",
         TabKind::Plugin { .. } => "plugin",
         TabKind::CloudSync => "cloud_sync",
+        TabKind::Knowledge => "knowledge",
         TabKind::RemoteDesktop => "remote_desktop",
         TabKind::Settings => "settings",
     }
@@ -92,8 +94,7 @@ pub(in crate::workspace) fn settings_language_from_locale(locale: Locale) -> Lan
 }
 
 pub(crate) fn tokens_from_settings(settings: &PersistedSettings) -> ThemeTokens {
-    let mut tokens = oxideterm_settings_model::custom_theme_tokens_from_settings(settings)
-        .unwrap_or_else(|| ThemeTokens::from_builtin(theme_by_id(&settings.terminal.theme)));
+    let mut tokens = oxideterm_settings_model::theme_tokens_from_settings(settings);
     let radius = settings.appearance.border_radius as f32;
     tokens.radii = UiRadii {
         xs: (radius - 4.0).max(0.0),
@@ -242,6 +243,21 @@ pub(in crate::workspace) enum WorkspaceContextMenuDismissal {
 }
 
 impl WorkspaceApp {
+    pub(in crate::workspace) fn sidebar_search_row(&self, background: Rgba) -> gpui::Div {
+        div()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .h(px(36.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap(px(self.tokens.spacing.one))
+            .border_b_1()
+            .border_color(self.workspace_chrome_divider())
+            .bg(background)
+    }
+
     pub(in crate::workspace) fn workspace_tooltip_icon_button(
         &self,
         icon: LucideIcon,
@@ -573,6 +589,7 @@ impl WorkspaceApp {
         detail: Option<String>,
         source: &'static str,
     ) {
+        let title = title.into();
         self.notification_center.event_log.push(
             severity,
             category,
@@ -582,25 +599,6 @@ impl WorkspaceApp {
             detail,
             source,
         );
-    }
-
-    pub(in crate::workspace) fn clear_event_log(&mut self) {
-        self.notification_center.event_log.clear();
-    }
-
-    pub(in crate::workspace) fn cycle_event_log_severity_filter(&mut self) {
-        self.notification_center.event_log.cycle_severity_filter();
-    }
-
-    pub(in crate::workspace) fn cycle_event_log_category_filter(&mut self) {
-        self.notification_center.event_log.cycle_category_filter();
-    }
-
-    pub(in crate::workspace) fn event_log_entry_matches_filter(
-        &self,
-        entry: &WorkspaceEventLogEntry,
-    ) -> bool {
-        self.notification_center.event_log.matches_filter(entry)
     }
 
     pub(in crate::workspace) fn push_notification_entry(
@@ -916,6 +914,8 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) {
+        self.session_sort_menu_open = false;
+        self.audit.open_filter = None;
         // Tauri dialogs are Radix modal roots: opening one dismisses background
         // popovers and input focus before the overlay starts trapping events.
         self.release_active_remote_desktop_inputs(cx);
@@ -945,7 +945,7 @@ impl WorkspaceApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = self.audit.open_filter.take().is_some();
 
         // Match browser/Radix outside-click behavior for non-modal UI only.
         // Auth prompts, confirm dialogs, QuickLook, and SFTP editor shells keep
@@ -998,10 +998,6 @@ impl WorkspaceApp {
             self.detached_local_terminals_popover_open = false;
             changed = true;
         }
-        if self.terminal.read(cx).quick_commands.has_open_or_pending() {
-            self.close_terminal_quick_commands_popover(cx);
-            changed = true;
-        }
         if self.has_ai_sidebar_floating_overlay(cx) {
             self.close_ai_sidebar_popovers(cx);
             changed = true;
@@ -1048,7 +1044,7 @@ impl WorkspaceApp {
             changed = true;
         }
         if self
-            .sftp_view
+            .sftp_view()
             .update(cx, |sftp, cx| sftp.dismiss_context_menu(cx))
         {
             changed = true;

@@ -18,7 +18,11 @@
       "port": "Port",
       "username": "Ziel-Benutzername *",
       "password": "Passwort",
+      "use_empty_password": "Leeres Passwort verwenden",
       "save_password": "Passwort im Schlüsselbund speichern",
+      "save_credentials_after_login": "Anmeldedaten nach erfolgreicher Anmeldung speichern",
+      "credentials_saved": "Anmeldedaten gespeichert",
+      "save_credentials_failed": "Anmeldedaten konnten nicht gespeichert werden",
       "group": "Gruppe",
       "notes": "Notizen",
       "notes_placeholder": "Optionale Hinweise zu dieser Verbindung",
@@ -145,6 +149,9 @@
       "ssh_algorithms_hint": "Aushandlungsreihenfolge prüfen und einzelne Algorithmuskategorien überschreiben.",
       "ssh_algorithms_categories": "Algorithmuskategorien",
       "ssh_algorithms_default": "Standard",
+      "ssh_algorithms_follow_preset": "Vorgabe übernehmen",
+      "ssh_algorithms_disabled": "Deaktivierte Algorithmen",
+      "ssh_algorithms_edit_hint": "Obere Einträge haben Vorrang. Ziehen oder Alt+↑/↓ zum Verschieben, Leertaste zum Umschalten. Mindestens ein Algorithmus muss aktiv bleiben.",
       "ssh_algorithms_custom": "Benutzerdefiniert",
       "ssh_algorithms_custom_count": "{{count}} angepasst",
       "ssh_algorithms_category_kex": "Schlüsselaustausch (KEX)",
@@ -203,6 +210,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Passwort nach erfolgreicher Anmeldung speichern",
+      "password_saved": "SSH-Passwort gespeichert",
+      "save_password_failed": "Das SSH-Passwort konnte nicht gespeichert werden. Die Verbindung bleibt geöffnet.",
       "title": "Keyboard-Interactive-Authentifizierung",
       "continue": "Fortfahren",
       "cancelled": "Keyboard-Interactive-Authentifizierung wurde abgebrochen."

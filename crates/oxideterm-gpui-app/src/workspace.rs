@@ -5,6 +5,7 @@ mod ai_lazy;
 mod ai_runtime_context;
 mod ai_state;
 mod app_lock;
+mod audit;
 mod breadcrumb_scroll;
 mod browser_behavior;
 mod cloud_sync;
@@ -20,6 +21,8 @@ mod history_quit;
 pub(crate) use history_quit::request_app_quit;
 mod ide;
 mod ime;
+mod knowledge;
+mod local_sessions;
 mod local_shell_launcher;
 mod local_terminal_background;
 mod new_connection;
@@ -48,6 +51,7 @@ mod root {
     pub(super) mod tests;
     pub(super) mod window_state;
 }
+mod disclosure_motion;
 mod selectable_text;
 mod selection_motion;
 mod session_icons;
@@ -65,6 +69,7 @@ mod terminal_cwd;
 mod terminal_entity;
 mod terminal_git;
 mod terminal_project;
+mod terminal_sync_groups;
 mod terminal_triggers_runtime;
 mod version_migration;
 mod virtual_list;
@@ -90,6 +95,7 @@ use std::{
 use self::{
     ai_lazy::LazyAiRagStore,
     breadcrumb_scroll::scroll_breadcrumb_by_wheel,
+    knowledge::KnowledgeWorkspaceLayout,
     path_completion::{
         PathCompletionCandidate, PathCompletionOwner, PathCompletionState,
         local_path_completion_request, remote_path_completion_request,
@@ -101,10 +107,10 @@ use anyhow::Result;
 use gpui::{
     AnchoredPositionMode, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, Bounds,
     ClipboardEntry, ClipboardItem, Context, Corner, CursorStyle, Entity, FocusHandle, Focusable,
-    FollowMode, Image, ImageFormat, IntoColor, IntoElement, KeyDownEvent, KeyUpEvent,
-    ListAlignment, ListState, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, ParentElement, PathPromptOptions, Pixels, Point, Render, RenderImage,
-    Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, StyledImage, Subscription, Task,
+    FollowMode, Image, ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment,
+    ListState, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, ParentElement, PathPromptOptions, Pixels, Point, Render, RenderImage, Rgba,
+    ScrollHandle, ScrollWheelEvent, SharedString, Styled, StyledImage, Subscription, Task,
     TextLayout, Timer, UniformListScrollHandle, Window, anchored, canvas, deferred, div,
     prelude::*, px, relative, rgb, rgba, svg,
 };
@@ -115,21 +121,20 @@ use oxideterm_connection_monitor::{
     GpuSnapshot, GpuSnapshotStatus, GpuUpdate, LogCommandCapability, LogPreset, MetricsSource,
     MonitorMetricKind, MonitorSectionKind, MonitorValueLevel, PackageCommandCapability,
     PackageFilter, PortCommandCapability, PortFilter, ProcessActionKind, ProcessCommandCapability,
-    ProcessFilter, ProcessSort, ProfilerRegistry, ProfilerUpdate, ResourceDockerContainer,
-    ResourceDockerStatus, ResourceFilesystemEntry, ResourceFilesystemSnapshot,
-    ResourceFilesystemStatus, ResourceLogEntry, ResourceLogSnapshot, ResourceLogStatus,
-    ResourceMetrics, ResourcePackageEntry, ResourcePackageSnapshot, ResourcePackageStatus,
-    ResourcePortEntry, ResourcePortSnapshot, ResourcePortStatus, ResourceScheduledTask,
-    ResourceScheduledTaskSnapshot, ResourceScheduledTaskStatus, ResourceService,
-    ResourceServiceStatus, ResourceTmuxPane, ResourceTmuxSession, ResourceTmuxSnapshot,
-    ResourceTmuxStatus, ResourceTmuxWindow, ResourceTopProcess, ScheduledTaskActionKind,
-    ScheduledTaskCapability, ScheduledTaskFilter, ServiceActionKind, ServiceCommandCapability,
-    TmuxActionKind, TmuxCommandCapability, build_docker_action_command,
-    build_docker_exec_shell_command, build_docker_follow_logs_command, build_docker_logs_command,
-    build_filesystem_diagnostic_command, build_filesystem_snapshot_command,
-    build_log_follow_command, build_log_snapshot_command, build_package_inspect_command,
-    build_package_snapshot_command, build_port_diagnostic_command, build_port_snapshot_command,
-    build_process_action_command, build_scheduled_task_action_command,
+    ProcessFilter, ProcessSort, ProfilerRegistry, ResourceDockerContainer, ResourceDockerStatus,
+    ResourceFilesystemEntry, ResourceFilesystemSnapshot, ResourceFilesystemStatus,
+    ResourceLogEntry, ResourceLogSnapshot, ResourceLogStatus, ResourceMetrics,
+    ResourcePackageEntry, ResourcePackageSnapshot, ResourcePackageStatus, ResourcePortEntry,
+    ResourcePortSnapshot, ResourcePortStatus, ResourceScheduledTask, ResourceScheduledTaskSnapshot,
+    ResourceScheduledTaskStatus, ResourceService, ResourceServiceStatus, ResourceTmuxPane,
+    ResourceTmuxSession, ResourceTmuxSnapshot, ResourceTmuxStatus, ResourceTmuxWindow,
+    ResourceTopProcess, ScheduledTaskActionKind, ScheduledTaskCapability, ScheduledTaskFilter,
+    ServiceActionKind, ServiceCommandCapability, TmuxActionKind, TmuxCommandCapability,
+    build_docker_action_command, build_docker_exec_shell_command, build_docker_follow_logs_command,
+    build_docker_logs_command, build_filesystem_diagnostic_command,
+    build_filesystem_snapshot_command, build_log_follow_command, build_log_snapshot_command,
+    build_package_inspect_command, build_package_snapshot_command, build_port_diagnostic_command,
+    build_port_snapshot_command, build_process_action_command, build_scheduled_task_action_command,
     build_scheduled_task_diagnostic_command, build_scheduled_task_logs_command,
     build_scheduled_task_snapshot_command, build_service_action_command,
     build_service_follow_logs_command, build_service_logs_command, build_tmux_action_command,
@@ -186,21 +191,20 @@ use oxideterm_gpui_terminal::{
 };
 use oxideterm_gpui_ui::scroll::ScrollableElement;
 use oxideterm_gpui_ui::{
-    ConfirmDialogAction, ConfirmDialogVariant, ConfirmDialogView, checkbox,
+    ConfirmDialogAction, ConfirmDialogVariant, ConfirmDialogView, MaterialRole, checkbox,
+    material_surface,
     modal::{popover_backdrop, set_tauri_backdrop_blur_allowed},
     text_input::{TextInputView, text_input},
     toast::{ToastVariant, ToastView, toast_action, toast_close},
     toaster::toaster,
-    tooltip::tooltip_content,
+    tooltip::tooltip_surface,
 };
 use oxideterm_i18n::{I18n, Locale};
 use oxideterm_ide_fs::NodeAgentIdeFileSystem;
 use oxideterm_notification_center::{
     ActivityView as WorkspaceActivityView, EventCategory as WorkspaceEventCategory,
-    EventCategoryFilter as WorkspaceEventCategoryFilter, EventLogEntry as WorkspaceEventLogEntry,
-    EventSeverity as WorkspaceEventSeverity, EventSeverityFilter as WorkspaceEventSeverityFilter,
-    NotificationCenterState, NotificationEntry as WorkspaceNotificationEntry,
-    NotificationKind as WorkspaceNotificationKind,
+    EventSeverity as WorkspaceEventSeverity, NotificationCenterState,
+    NotificationEntry as WorkspaceNotificationEntry, NotificationKind as WorkspaceNotificationKind,
     NotificationKindFilter as WorkspaceNotificationKindFilter,
     NotificationScope as WorkspaceNotificationScope,
     NotificationSeverity as WorkspaceNotificationSeverity,
@@ -268,7 +272,6 @@ use oxideterm_workspace::{
     adjusted_split_sizes,
 };
 
-use self::actions::SearchBarState;
 use self::connection_monitor::{
     ConnectionRuntimeSection, HostToolsEntity, HostToolsEvent, HostToolsMessages,
     HostToolsWindowIntent, HostToolsWindowRequest,
@@ -279,6 +282,10 @@ use self::ime::{
     HostToolsPlainTextImeFrame, TextInputAnchorStore, WorkspaceImeDragSelection,
     WorkspaceImeElement, WorkspaceImeSelection, WorkspaceImeTarget,
     active_ime_should_defer_input_key, workspace_ime_target_for_plain_host_tools_input,
+};
+use self::knowledge::{
+    KNOWLEDGE_WORKSPACE_SECTION_COUNT, KNOWLEDGE_WORKSPACE_SECTION_ESTIMATED_HEIGHT,
+    KNOWLEDGE_WORKSPACE_SECTION_OVERSCAN,
 };
 use self::new_connection::{
     ConnectionFlowEntity, ConnectionFlowEvent, NativeSshPromptHandler, NewConnectionField,
@@ -311,7 +318,7 @@ use crate::{
     GoToTab5, GoToTab6, GoToTab7, GoToTab8, GoToTab9, NewConnection, NewTerminal, NextTab,
     OpenSettings, PaletteAiSidebar, PaletteBroadcast, PaletteCancelReconnect, PaletteCleanupDead,
     PaletteDetachTerminal, PaletteDisconnectAll, PaletteEventLog, PaletteHealthCheck,
-    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, ShellLauncher, ShowShortcuts,
+    PaletteReconnectAll, PaletteResetPanes, Paste, PrevTab, Quit, ShellLauncher, ShowShortcuts,
     SplitHorizontal, SplitNavLeft, SplitNavRight, SplitVertical, SwitchLocaleChinese,
     SwitchLocaleEnglish, SwitchLocaleFrench, SwitchLocaleGerman, SwitchLocaleItalian,
     SwitchLocaleJapanese, SwitchLocaleKorean, SwitchLocalePortugueseBrazil, SwitchLocaleSpanish,
@@ -344,8 +351,8 @@ pub(super) use selectable_text::{
 };
 pub(super) use virtual_list::{
     TauriVirtualListSpec, TauriVirtualScrollAlign, scroll_tauri_virtual_list_to_index,
-    tauri_virtual_list, tauri_virtual_list_is_near_bottom, tauri_virtual_list_state,
-    tauri_virtual_uniform_list, uniform_list_edge_autoscroll,
+    tauri_virtual_list, tauri_virtual_list_state, tauri_virtual_uniform_list,
+    uniform_list_edge_autoscroll,
 };
 use virtual_list::{
     VirtualListSignatureCache, sync_tauri_variable_list_state_by_signatures,
@@ -585,9 +592,12 @@ pub(super) enum ConfirmKeyboardAction {
     Handled,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ShortcutsModalState {
     open: bool,
+    presence: oxideterm_gpui_ui::motion::ExitPresence,
+    motion_generation: usize,
+    exit_task: Option<Task<()>>,
     query: String,
     scroll_handle: UniformListScrollHandle,
 }
@@ -603,12 +613,14 @@ enum TabDragMode {
     Pending,
     Reorder,
     Detach,
+    Content,
 }
 
 #[derive(Clone, Debug)]
 struct TabDragState {
     tab_id: TabId,
     from_index: usize,
+    destination_tab: Option<TabId>,
     start_x: f32,
     start_y: f32,
     current_x: f32,
@@ -684,6 +696,8 @@ struct TabbarScrollbarDragState {
 #[derive(Clone, Copy, Debug)]
 struct DetachedTabReturnDrag {
     tab_id: TabId,
+    source_bounds: Bounds<Pixels>,
+    native_window_move: bool,
     start_screen_x: f32,
     start_screen_y: f32,
     current_screen_x: f32,
@@ -727,6 +741,7 @@ impl WorkspaceWindowTabState {
 
 #[derive(Clone)]
 pub(super) struct SelectableTextFragmentState {
+    pub join_previous: bool,
     pub group_id: u64,
     pub order: usize,
     pub generation: u64,
@@ -743,11 +758,13 @@ pub(crate) struct WorkspaceApp {
     detached_tab_return_handoff: Option<DetachedTabReturnHandoff>,
     next_tab_window_handoff_generation: u64,
     main_window_tabbar_drop_bounds: Option<Bounds<Pixels>>,
+    split_drop_regions: Rc<RefCell<Vec<tabs::split_drop::SplitDropRegion>>>,
+    split_drop_target: Option<tabs::split_drop::SplitDropTarget>,
     pending_auto_close_terminal_sessions: HashSet<TerminalSessionId>,
     auto_close_terminal_sessions_scheduled: bool,
     tab_host: Entity<tabs::WorkspaceTabHostEntity>,
     _tab_host_subscription: Subscription,
-    search: SearchBarState,
+    search: actions::TerminalSearchState,
     terminal_recording_menu_open: bool,
     terminal_highlight_popover_open: bool,
     // Settings keep the source pane stable while editing session-only trigger overrides.
@@ -792,15 +809,18 @@ pub(crate) struct WorkspaceApp {
     plugin_entity: Entity<plugin_entity::PluginWorkspaceEntity>,
     _plugin_entity_subscription: Subscription,
     split_drag: Option<SplitDrag>,
+    disclosure_motions: disclosure_motion::DisclosureMotions,
     sidebar_resizing: bool,
     embedded_sftp_sidebar_resizing: bool,
     sidebar_resize_hotzone_hovered: bool,
     sidebar_collapsed: bool,
     sidebar_rendered: bool,
     sidebar_motion_generation: u64,
+    sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion,
     sidebar_width: f32,
     context_sidebar_rendered: bool,
     context_sidebar_motion_generation: u64,
+    context_sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion,
     ai_entity: Entity<ai_state::AiWorkspaceEntity>,
     acp_entity: Entity<acp_workspace::AcpWorkspaceEntity>,
     skill_registry: std::sync::Arc<parking_lot::RwLock<oxideterm_skills::SkillRegistry>>,
@@ -816,16 +836,26 @@ pub(crate) struct WorkspaceApp {
     active_sidebar_section: SidebarSection,
     active_surface: ActiveSurface,
     active_session_sidebar_view_mode: ActiveSessionSidebarViewMode,
+    session_sort_menu_open: bool,
+    session_search_open: bool,
+    session_search_query: String,
     active_session_sidebar_focused_node_id: Option<NodeId>,
     active_session_sidebar_list_state: ListState,
     active_session_sidebar_list_cache: RefCell<VirtualListSignatureCache>,
+    knowledge_workspace_list_state: ListState,
     open_settings_select: Option<SettingsSelect>,
+    settings_theme_preview: Option<String>,
+    settings_theme_scroll: ScrollHandle,
+    // A root-mounted select portal must only use the trigger geometry from the
+    // native window that opened it.
+    open_settings_select_owner_window_id: Option<gpui::WindowId>,
     settings_select_focus_origin: Option<browser_behavior::BrowserFocusOrigin>,
     settings_section_list_state: ListState,
     settings_section_list_cache: RefCell<VirtualListSignatureCache>,
     standard_confirm_focused_action: Option<ConfirmDialogAction>,
     skip_future_ssh_close_confirmations: bool,
     select_anchors: HashMap<SelectAnchorId, OverlayAnchor>,
+    settings_select_anchors: HashMap<(gpui::WindowId, SelectAnchorId), OverlayAnchor>,
     text_input_anchors: TextInputAnchorStore,
     selectable_text_values: HashMap<u64, String>,
     selectable_text_layouts: HashMap<u64, TextLayout>,
@@ -876,10 +906,11 @@ pub(crate) struct WorkspaceApp {
     notification_center: NotificationCenterState,
     notification_sidebar_list_state: ListState,
     notification_sidebar_list_cache: RefCell<VirtualListSignatureCache>,
-    event_log_sidebar_scroll_handle: UniformListScrollHandle,
     ssh_nodes: HashMap<NodeId, WorkspaceSshNode>,
     saved_ssh_nodes: HashMap<String, NodeId>,
     expanded_ssh_nodes: HashSet<NodeId>,
+    expanded_standalone_connections: HashSet<String>,
+    local_session_group_expanded: bool,
     active_ssh_node_id: Option<NodeId>,
     next_ssh_node_id: u64,
     forwarding: Entity<forwards::ForwardingWorkspaceEntity>,
@@ -890,6 +921,7 @@ pub(crate) struct WorkspaceApp {
     sftp_tab_nodes: HashMap<TabId, NodeId>,
     standalone_sftp_tabs: HashMap<TabId, sftp::StandaloneSftpTabBinding>,
     standalone_sftp_sessions: HashMap<String, sftp::StandaloneSftpRuntime>,
+    ftp_sessions: HashMap<String, Arc<sftp::ftp::FtpRuntime>>,
     dedicated_sftp_connections:
         Arc<parking_lot::Mutex<HashMap<NodeId, sftp::DedicatedSftpConnectionSlot>>>,
     ssh_consumer_prompt_handler: Arc<dyn SshPromptHandler>,
@@ -901,7 +933,11 @@ pub(crate) struct WorkspaceApp {
     sftp_presentation_request: Option<sftp::SftpPresentationRequest>,
     ide_workspace: Entity<ide::IdeWorkspaceEntity>,
     _ide_workspace_subscription: Subscription,
+    knowledge_workspace: Entity<knowledge::KnowledgeWorkspaceEntity>,
     sftp_view: Entity<sftp::SftpWorkspaceEntity>,
+    sftp_pages: HashMap<TabId, sftp::views::SftpPage>,
+    sftp_dispatch_surface: Rc<Cell<Option<sftp::SftpSurfaceId>>>,
+    sftp_focused_surface: sftp::SftpSurfaceId,
     _sftp_observation: Subscription,
     _sftp_subscription: Subscription,
     graphics: Entity<GraphicsWorkspaceEntity>,
@@ -937,6 +973,8 @@ pub(crate) struct WorkspaceApp {
     _terminal_subscription: Subscription,
     overlay: Entity<WorkspaceOverlayEntity>,
     _overlay_observation: Subscription,
+    // Producers release before the writer, so their final cancellation records can drain.
+    audit: audit::AuditState,
 }
 
 impl Drop for WorkspaceApp {
@@ -952,12 +990,14 @@ impl Drop for WorkspaceApp {
 
 pub(crate) use window_shell::WorkspaceWindowShell;
 
-#[derive(Clone)]
 struct MermaidZoomState {
+    window_id: gpui::WindowId,
     source: String,
     image: Arc<Image>,
     width: f32,
     height: f32,
+    render_error: Option<String>,
+    _render_task: Option<Task<()>>,
 }
 
 impl WorkspaceApp {
@@ -965,36 +1005,55 @@ impl WorkspaceApp {
         let mut options = MarkdownOptions::from_theme(&self.tokens);
         options.mermaid_error_prefix = self.i18n.t("markdown.mermaid_unsupported");
         options.mermaid_expand_label = self.i18n.t("markdown.mermaid_expand");
+        options.mermaid_loading_label = self.i18n.t("markdown.mermaid_loading");
+        options.html_details_label = self.i18n.t("markdown.html_details");
         options
     }
 
     fn mermaid_zoom_handler(&self, cx: &mut Context<Self>) -> MarkdownMermaidZoomHandler {
-        let workspace = cx.entity();
+        Self::mermaid_zoom_handler_for_workspace(cx.entity())
+    }
+
+    fn mermaid_zoom_handler_for_workspace(workspace: Entity<Self>) -> MarkdownMermaidZoomHandler {
         Arc::new(move |source, image, width, height, window, cx| {
+            let window_id = window.window_handle().window_id();
             let workspace = workspace.clone();
             window.defer(cx, move |_window, cx| {
                 let _ = workspace.update(cx, |this, cx| {
-                    let rendered = oxideterm_gpui_markdown::mermaid::render_mermaid_svg_scaled(
+                    let request = oxideterm_gpui_markdown::mermaid::MermaidRenderRequest::new(
                         &source,
                         &this.tokens,
                         &this.localized_markdown_options(),
                         MERMAID_MODAL_RASTER_SCALE,
-                    )
-                    .ok();
+                    );
+                    let task = cx.spawn(async move |workspace, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { request.render() })
+                            .await;
+                        let _ = workspace.update(cx, |workspace, cx| {
+                            if let Some(state) = workspace.mermaid_zoom.as_mut() {
+                                match result {
+                                    Ok(rendered) => {
+                                        state.image = rendered.image;
+                                        state.width = rendered.display_width;
+                                        state.height = rendered.display_height;
+                                    }
+                                    Err(error) => state.render_error = Some(error),
+                                }
+                                state._render_task = None;
+                                cx.notify();
+                            }
+                        });
+                    });
                     this.mermaid_zoom = Some(MermaidZoomState {
+                        window_id,
                         source,
-                        image: rendered
-                            .as_ref()
-                            .map(|rendered| rendered.image.clone())
-                            .unwrap_or(image),
-                        width: rendered
-                            .as_ref()
-                            .map(|rendered| rendered.display_width)
-                            .unwrap_or(width),
-                        height: rendered
-                            .as_ref()
-                            .map(|rendered| rendered.display_height)
-                            .unwrap_or(height),
+                        image,
+                        width,
+                        height,
+                        render_error: None,
+                        _render_task: Some(task),
                     });
                     cx.notify();
                 });

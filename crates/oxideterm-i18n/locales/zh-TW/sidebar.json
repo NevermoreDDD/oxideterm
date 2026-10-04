@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "搜尋工作階段",
+      "placeholder": "搜尋工作階段…",
+      "empty": "沒有相符的工作階段"
+    },
+    "sort": {
+      "title": "工作階段排序",
+      "default": "預設順序",
+      "name_ascending": "名稱升冪",
+      "name_descending": "名稱降冪",
+      "connected_first": "已連線優先"
+    },
     "actions": {
       "expand": "展開側邊欄",
       "collapse": "收合側邊欄",
@@ -29,6 +41,7 @@
       "import_tooltip": "從 .oxide 檔案匯入",
       "export_tooltip": "匯出為 .oxide 檔案",
       "host_tools": "主機工具",
+      "knowledge": "知識庫",
       "host_monitor": "監控",
       "gpu": "GPU / NPU",
       "processes": "程序",
@@ -42,8 +55,8 @@
       "open_session_manager": "開啟工作階段管理器",
       "plugins": "外掛",
       "activity": "活動",
-      "event_log": "事件日誌",
-      "notifications": "通知中心",
+      "event_log": "稽核",
+      "notifications": "通知與稽核",
       "saved_connections": "已儲存的連線",
       "forwarding": "連接埠轉發",
       "ports": "連接埠",
@@ -62,6 +75,7 @@
       "collapse": "收起"
     },
     "active_sessions": "使用中的工作階段",
+    "active_session_count": "{{count}} 個作用中工作階段",
     "no_sessions": "無工作階段",
     "add_new_connection": "按 + 新增連線",
     "host_gpu": {
@@ -710,6 +724,7 @@
       "no_sessions": "無工作階段",
       "click_to_add": "按 + 新增連線",
       "actions": {
+        "open_session": "開啟工作階段",
         "new_terminal": "新終端機",
         "sftp": "SFTP",
         "disconnect": "斷開",

@@ -76,13 +76,29 @@ impl WorkspaceApp {
         self.open_settings(window, cx);
     }
 
+    pub(in crate::workspace) fn open_knowledge_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.set_active_tab(SettingsTab::Knowledge, cx);
+        });
+        self.close_settings_select();
+        self.focused_settings_input = None;
+        self.settings_slider_drag = None;
+        self.clear_ime_selection();
+        self.sync_settings_section_list_state(cx);
+        self.open_settings(window, cx);
+    }
+
     pub(in crate::workspace) fn close_settings(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let close_active_settings_tab = self
-            .active_tab(cx)
+            .active_content_tab(cx)
             .is_some_and(|tab| tab.kind == TabKind::Settings);
         self.active_surface = ActiveSurface::Terminal;
         self.terminal_trigger_settings_pane = None;
@@ -92,12 +108,16 @@ impl WorkspaceApp {
         self.close_settings_select();
         self.settings_workspace.update(cx, |settings, cx| {
             settings.close_navigation_editor(cx);
+            settings.totp_draft = None;
+            settings.totp_error = None;
             settings.close_settings_search(true, cx);
         });
         self.focused_settings_input = None;
         self.settings_slider_drag = None;
         if close_active_settings_tab {
-            self.close_active_tab(window, cx);
+            if let Some(tab_id) = self.active_content_tab_id(cx) {
+                self.close_tab_by_id(tab_id, window, cx);
+            }
             return;
         }
         self.focus_active_pane(window, cx);
@@ -129,10 +149,6 @@ impl WorkspaceApp {
                     .min_h(px(0.0))
                     .relative()
                     .child(self.render_settings_section_list_scroll(cx)),
-            )
-            .when_some(
-                self.render_settings_select_overlay(cx),
-                |surface, overlay| surface.child(overlay),
             )
             .into_any_element()
     }
@@ -537,6 +553,20 @@ impl WorkspaceApp {
                 }
             }
             SettingsTab::Privilege => {
+                self.connection_store
+                    .totp_credentials()
+                    .len()
+                    .hash(&mut hasher);
+                self.settings_workspace
+                    .read(cx)
+                    .totp_draft
+                    .is_some()
+                    .hash(&mut hasher);
+                self.settings_workspace
+                    .read(cx)
+                    .totp_error
+                    .is_some()
+                    .hash(&mut hasher);
                 self.connection_store.connections().len().hash(&mut hasher);
                 self.connection_store
                     .connections()
@@ -819,7 +849,7 @@ impl WorkspaceApp {
                 .flex_none()
                 .h(px(48.0))
                 .px(px(20.0))
-                .mb(px(12.0))
+                .when(!settings_search_open, |header| header.mb(px(12.0)))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -1228,6 +1258,9 @@ impl WorkspaceApp {
         }
         self.i18n
             .set_locale(locale_from_settings(settings.general.language));
+        if previous_settings.general.language != settings.general.language {
+            cx.set_menus(crate::platform::app_menus(settings));
+        }
         oxideterm_desktop_presence::set_keep_running_on_close(
             settings.general.minimize_to_tray_on_close,
         );
@@ -1254,23 +1287,22 @@ impl WorkspaceApp {
             // feature should not leave an orphaned popover around.
             self.close_terminal_cwd_picker(cx);
         }
-        if let Some(group_id) = self.terminal.read(cx).selected_broadcast_group_id() {
-            if settings
-                .terminal
-                .broadcast_groups
-                .iter()
-                .any(|group| group.id == group_id)
+        let saved_group_ids = settings
+            .terminal
+            .broadcast_groups
+            .iter()
+            .map(|group| group.id)
+            .collect();
+        self.terminal.update(cx, |terminal, _| {
+            // Settings refresh cannot recruit new windows into an already-running group.
+            terminal.sync_groups_mut().retain_groups(&saved_group_ids);
+            if terminal
+                .selected_broadcast_group_id()
+                .is_some_and(|id| !saved_group_ids.contains(&id))
             {
-                let targets = self.resolve_terminal_broadcast_group(group_id, cx);
-                self.terminal.update(cx, |terminal, _cx| {
-                    terminal.refresh_selected_broadcast_group(group_id, &targets);
-                });
-            } else {
-                self.terminal.update(cx, |terminal, _cx| {
-                    terminal.clear_selected_broadcast_group();
-                });
+                terminal.clear_selected_broadcast_group();
             }
-        }
+        });
         self.ssh_registry.set_idle_timeout(Some(Duration::from_secs(
             settings.connection_pool.idle_timeout_secs as u64,
         )));
@@ -1297,6 +1329,9 @@ impl WorkspaceApp {
         });
         // Monitoring settings own recurring remote shells and page-scoped GPU work.
         self.apply_host_tool_monitoring_settings(cx);
+        if !self.tokens.motion.enabled {
+            self.disclosure_motions.clear();
+        }
         self.sidebar_collapsed = settings.sidebar_ui.collapsed;
         self.sidebar_motion_generation = self.sidebar_motion_generation.wrapping_add(1);
         self.context_sidebar_motion_generation =
@@ -1332,6 +1367,17 @@ impl WorkspaceApp {
         self.ai_entity.update(cx, |ai, _cx| {
             ai.set_chat_sidebar_width(ai_sidebar_width);
         });
+        self.sidebar_motion.settle(if self.sidebar_rendered {
+            self.sidebar_panel_width()
+        } else {
+            0.0
+        });
+        self.context_sidebar_motion
+            .settle(if self.context_sidebar_rendered {
+                ai_sidebar_width
+            } else {
+                0.0
+            });
         let panes = self
             .tab_host
             .read(cx)
@@ -1430,12 +1476,12 @@ impl WorkspaceApp {
         settings: &PersistedSettings,
         cx: &mut Context<Self>,
     ) {
-        if previous_settings.terminal.theme != settings.terminal.theme {
+        if previous_settings.appearance.theme != settings.appearance.theme {
             self.emit_native_plugin_event_to_subscribers(
                 plugin_host::NATIVE_PLUGIN_APP_THEME_CHANGED_EVENT,
                 serde_json::json!({
                     "theme": crate::workspace::plugin_lifecycle::native_plugin_theme_snapshot(
-                        &settings.terminal.theme
+                        &settings.appearance.theme
                     ),
                 }),
                 cx,

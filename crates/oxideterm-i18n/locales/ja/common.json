@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} がまだ実行中（システムトレイに常駐している可能性があります）、または別のアプリがファイルを使用しています。作業を保存してください。「OK」で対象のアプリを終了してインストールを続行し、「キャンセル」で中止します。インストール先：{{path}}",
+    "application_close_failed": "{{path}} 内のファイルの使用状態を確認または解除できませんでした。システムトレイから {{app}} を終了し、このフォルダーを使用する他のアプリも閉じてから「再試行」を押してください。「キャンセル」ではファイルを置き換えずにインストールを中止します。"
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "シェルランチャー"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "サポートされていない Mermaid 図",
-    "mermaid_expand": "拡大"
+    "mermaid_expand": "拡大",
+    "mermaid_loading": "図を描画中…",
+    "html_details": "詳細"
   },
   "layout": {
     "empty": {
@@ -204,8 +210,29 @@
     "native_sidebar_empty_title": "プラグインシステムは利用できません",
     "native_sidebar_empty_description": "現在の native 状態はプラグインタブで確認できます。",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "同期サーバーを新しいクラウド同期プロトコルに対応したバージョンに更新してから、再度同期してください。",
+        "password_change_pending": "パスワードの変更が未完了です。前回入力した新しいパスワードで再試行してください。",
+        "change_password": "同期パスワードを変更",
+        "change_password_description": "新しいパスワードで同期領域を作成し、アップロードの検証後に切り替えます。以前の領域は保持されます。",
+        "password_change_separate_settings": "同期パスワードを変更する前に、ほかの設定を保存してください。",
+        "password_too_short": "パスワードは6文字以上にしてください。",
+        "sync": "同期",
+        "cleanup_pending": "クリーンアップが未完了です。もう一度同期してください。",
+        "keep": "保持",
+        "preview": "同期のプレビュー",
+        "changes": "変更された項目",
+        "upgrade": "既存のクラウドデータを更新します。元のファイルは保持されます。",
+        "candidate": "バージョン",
+        "apply": "適用して同期",
+        "configuration": "設定",
+        "protected": "保護された値",
+        "current": "このデバイス",
+        "conflict_hint": "競合する項目のバージョンを選んでください。未選択の項目はこのデバイスの現在の値を保持します。"
+      },
       "panel_title": "Oxide クラウド同期",
       "backend": {
+        "local_file": "ローカルファイル",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -278,6 +305,7 @@
         "sync_scope": "同期範囲",
         "conflict_recovery": "コンフリクト復旧",
         "import_preview": "インポートプレビュー",
+        "export_preview": "エクスポートのプレビュー",
         "upload_preview": "アップロードプレビュー",
         "rollback_preview": "ロールバックプレビュー",
         "rollback_backups": "ロールバックバックアップ",
@@ -336,6 +364,7 @@
         "google_drive_permission_warning": "Google が access_denied、admin_policy_enforced、invalid_client、または Drive API 未有効を返す場合は、同意画面、デスクトップ クライアント種別、API 状態、管理者ポリシー、テストユーザーを確認してください。"
       },
       "settings": {
+        "sync_method": "同期方法",
         "backend_type": "バックエンドタイプ",
         "auth_mode": "認証方式",
         "endpoint": "Endpoint",
@@ -438,6 +467,7 @@
         "summary_line": "{{connections}} 件の接続、{{forwards}} 件のフォワード、{{quickCommands}} 件のクイックコマンド、{{serialProfiles}} 件のシリアルプロファイル、{{telnetProfiles}} 件の Telnet プロファイル、{{pluginSettingsCount}} 件のプラグイン設定、{{sensitiveCredentials}} 件の機密資格情報"
       },
       "errors": {
+        "local_forward_requires_connection": "ローカルファイルにエクスポートするには、選択した転送ルールの接続も選択してください。",
         "operation_in_progress": "別のクラウド同期操作が実行中です。しばらくしてから再試行してください。",
         "missing_endpoint": "同期を実行する前に、バックエンドの Endpoint を設定してください。",
         "missing_namespace": "同期を実行する前に、Namespace またはパスプレフィックスを設定してください。",
@@ -568,6 +598,7 @@
         "downloading": "Downloading objects"
       },
       "preview": {
+        "standalone_sftp_profiles": "ファイル転送接続 ({{count}})",
         "summary_header": "リモートプレビュー概要",
         "apply_plan_title": "適用計画",
         "upload_scope_title": "アップロード範囲",
@@ -1171,6 +1202,12 @@
     "hint_other": "Zen モード — Ctrl+Shift+Z で終了"
   },
   "tabbar": {
+    "drag_to_dock": "ドラッグしてドッキング",
+    "workspace": "ワークスペース",
+    "merge_into_horizontal": "「{{title}}」に結合（左右分割）",
+    "merge_into_vertical": "「{{title}}」に結合（上下分割）",
+    "move_pane_to_tab": "新しいタブに移動",
+    "move_pane_to_window": "新しいウィンドウに移動",
     "offline": "オフライン",
     "cancel_reconnect": "再接続をキャンセル",
     "reconnect": "再接続",
@@ -1287,5 +1324,13 @@
     "setup_pending": "ポータブルキーストアを作成しています...",
     "unlock_submit": "解除して続行",
     "unlock_pending": "ポータブルデータを解除しています..."
+  },
+  "local_session": {
+    "directory": "開始ディレクトリ",
+    "inherit_directory": "空欄の場合は設定の既定ディレクトリを使用",
+    "inherit_shell": "設定の既定シェルを使用",
+    "shell_unavailable": "保存されたシェルはこのデバイスで利用できません。セッションを編集してインストール済みのシェルを選択してください。",
+    "directory_unavailable": "開始ディレクトリがありません。セッションを編集して既存のディレクトリを選択してください。",
+    "name_required": "ローカルセッションを保存する名前を入力してください。"
   }
 }

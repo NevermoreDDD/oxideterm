@@ -27,6 +27,8 @@ enum LaunchSnapshot {
     },
     Telnet {
         config: TelnetSessionConfig,
+        #[serde(default = "oxideterm_connections::default_telnet_upstream_proxy")]
+        upstream_proxy: SavedUpstreamProxyPolicy,
         terminal: ConnectionTerminalOptions,
     },
     Mosh {
@@ -143,9 +145,11 @@ impl LaunchSnapshot {
             },
             StandaloneConnectionLaunch::Telnet {
                 config,
+                upstream_proxy,
                 terminal_options,
             } => Self::Telnet {
                 config: config.clone(),
+                upstream_proxy: upstream_proxy.clone(),
                 terminal: terminal_options.clone(),
             },
             StandaloneConnectionLaunch::MoshPreflight { config, options } => {
@@ -162,6 +166,10 @@ impl LaunchSnapshot {
                     .iter()
                     .flatten()
                     .map(|hop| SavedProxyHop {
+                        totp_credential_id: hop
+                            .totp
+                            .as_ref()
+                            .map(|binding| binding.credential_id.clone()),
                         host: hop.host.clone(),
                         port: hop.port,
                         username: hop.username.clone(),
@@ -272,6 +280,7 @@ impl LaunchSnapshot {
                         .find(|profile| profile.id == profile_id)?;
                     StandaloneConnectionLaunch::SavedTelnet {
                         profile_id,
+                        upstream_proxy: profile.upstream_proxy.clone(),
                         config: TelnetSessionConfig {
                             host: profile.host.clone(),
                             port: profile.port,
@@ -294,12 +303,15 @@ impl LaunchSnapshot {
                     terminal_options: terminal,
                 }
             }
-            Self::Telnet { config, terminal } if kind == StandaloneConnectionKind::Telnet => {
-                StandaloneConnectionLaunch::Telnet {
-                    config,
-                    terminal_options: terminal,
-                }
-            }
+            Self::Telnet {
+                config,
+                upstream_proxy,
+                terminal,
+            } if kind == StandaloneConnectionKind::Telnet => StandaloneConnectionLaunch::Telnet {
+                config,
+                upstream_proxy,
+                terminal_options: terminal,
+            },
             Self::Mosh { profile } if kind == StandaloneConnectionKind::Mosh => {
                 StandaloneConnectionLaunch::RestoredMosh { profile }
             }
@@ -319,6 +331,8 @@ impl LaunchSnapshot {
 fn auth_metadata(auth: &AuthMethod) -> SavedAuth {
     match auth {
         AuthMethod::Password { .. } => SavedAuth::Password {
+            empty_password: false,
+
             keychain_id: None,
             plaintext_password: None,
         },

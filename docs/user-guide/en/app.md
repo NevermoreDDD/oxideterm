@@ -92,7 +92,7 @@ Use SFTP or the file manager for remote file operations:
 
 File Transfer settings default to **Auto**: SFTP remains the browsing and preferred transfer protocol, while legacy SCP is used only when the connected POSIX host cannot open its SFTP subsystem. You can force SFTP or SCP for compatibility testing. SCP can pause and resume while its current channel is alive, but a retry after disconnect starts from the beginning because legacy SCP has no offset-resume protocol.
 
-Terminal-native modem transfers are separate from SFTP. Use them when the remote program expects X/Y/ZMODEM protocol bytes through the current terminal channel.
+Terminal-native modem transfers are separate from SFTP. Run the remote transfer program (such as `rz` for upload or `sz <file>` for download), then choose the local file or directory when OxideTerm detects the transfer. For serial devices that require manual negotiation, use **Binary transfer** in the serial control bar after starting the device's transfer program.
 
 Before overwriting important remote files, confirm the path and keep a backup. Remote file writes are real writes on the target system.
 
@@ -137,6 +137,17 @@ Never paste secrets into AI prompts. Use the app's provider key and secret stora
 ### Agent Skills
 
 OxideSens can discover bounded `SKILL.md` workflows from the workspace, user data directories, and enabled native plugins. Open **Settings → OxideSens → Tools → Agent Skills** to review discovered skills, enable or disable them, and refresh the catalog. Loading a skill provides instructions only; it does not grant terminal, file, credential, or network permissions. Every resulting action still goes through the existing tool policy and approval mode. See the [Agent Skills reference](../../agent-skills.md) for discovery precedence and resource limits.
+
+## Knowledge
+
+Open Knowledge from the activity bar. OxideTerm opens or focuses one central Knowledge tab instead of placing the browser in the global companion sidebar.
+
+- The left navigator manages collections and the documents in the selected collection. Create a collection from the workspace header; create a document from the document-section header so it is bound to the visible collection. Collections can be global or scoped to a saved connection.
+- The right editor opens in Source mode with Markdown syntax highlighting. Read-only Preview renders the same draft. Switching modes preserves the editor buffer and undo history.
+- The formatting toolbar inserts standard Markdown for headings, emphasis, lists, quotes, code, links, images, tables, and horizontal rules. Fenced code blocks use three backticks.
+- Save state and conflicts are shown in the editor header. Leaving a dirty document, closing its tab, or quitting requires the draft to be saved or explicitly discarded.
+
+Use the Knowledge settings page for embedding and retrieval configuration. Document browsing and editing belong to the Knowledge workspace tab.
 
 ## External MCP Clients
 
@@ -200,7 +211,7 @@ Use Settings for interactive configuration:
 - Terminal renderer, shell, font, encoding, background images, transfer helpers, and local terminal behavior.
 - Privilege credentials and their prompt/scope settings.
 - SSH, reconnect, SFTP, and IDE behavior.
-- AI providers, model selection, memory, tool use, and knowledge settings.
+- AI providers, model selection, memory, tool use, and Knowledge embedding or retrieval settings.
 - Keybindings, help, and update information.
 
 Use the desktop UI when you are making exploratory or visual changes. Use the CLI only when the change must be scripted or repeated across environments.

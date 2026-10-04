@@ -6,6 +6,7 @@ use gpui::Task;
 
 const WORKSPACE_NOTICE_TTL: Duration = Duration::from_secs(4);
 const TOOLTIP_DELAY: Duration = Duration::from_millis(300);
+const TOOLTIP_EXIT_DURATION: Duration = Duration::from_millis(90);
 const CONNECTION_TRACE_UPDATE_COALESCE: Duration = Duration::from_millis(300);
 const CONNECTION_TRACE_SUCCESS_TTL: Duration = Duration::from_millis(900);
 const CONNECTION_TRACE_HISTORY_LIMIT: usize = 12;
@@ -57,6 +58,7 @@ pub(in crate::workspace) enum WorkspaceOverlayIntent {
 pub(in crate::workspace) enum WorkspaceOverlayConfirmKind {
     SettingsReset,
     LegalNotice,
+    ThirdPartyNotices,
     NativeUpdateReleaseNotes,
     NodeDisconnect {
         node_id: NodeId,
@@ -130,6 +132,10 @@ struct ActiveConnectionCard {
 
 #[derive(Clone, Debug)]
 struct WorkspaceTooltip {
+    generation: u64,
+    remove_at: Option<Instant>,
+    fade_from: f32,
+    opacity: std::rc::Rc<std::cell::Cell<f32>>,
     id: String,
     label: String,
     x: f32,
@@ -260,7 +266,7 @@ impl WorkspaceOverlayEntity {
             WorkspaceOverlayIntent::QueueTooltip { id, label, x, y } => {
                 self.queue_tooltip(id, label, x, y, Instant::now())
             }
-            WorkspaceOverlayIntent::ClearTooltip { id } => self.clear_tooltip(&id),
+            WorkspaceOverlayIntent::ClearTooltip { id } => self.clear_tooltip(&id, Instant::now()),
             WorkspaceOverlayIntent::ClearAllTooltips => self.clear_all_tooltips(),
             WorkspaceOverlayIntent::ShowZenHint { ttl } => {
                 self.zen_hint_expires_at = Some(Instant::now() + ttl);
@@ -292,6 +298,15 @@ impl WorkspaceOverlayEntity {
     ) {
         if self.control_exit_duration != duration {
             self.control_exit_duration = duration;
+            if duration.is_zero()
+                && self
+                    .tooltip
+                    .as_ref()
+                    .is_some_and(|tooltip| tooltip.remove_at.is_some())
+            {
+                self.tooltip = None;
+                cx.notify();
+            }
             self.schedule_next_deadline(cx);
         }
     }
@@ -331,7 +346,8 @@ impl WorkspaceOverlayEntity {
                     WorkspaceOverlayConfirmKind::SettingsReset => {
                         WorkspaceOverlayConfirmOwnerKind::SettingsReset
                     }
-                    WorkspaceOverlayConfirmKind::LegalNotice => {
+                    WorkspaceOverlayConfirmKind::LegalNotice
+                    | WorkspaceOverlayConfirmKind::ThirdPartyNotices => {
                         WorkspaceOverlayConfirmOwnerKind::LegalNotice
                     }
                     WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes => {
@@ -421,6 +437,7 @@ impl WorkspaceOverlayEntity {
                     })
                 }
                 WorkspaceOverlayConfirmKind::LegalNotice
+                | WorkspaceOverlayConfirmKind::ThirdPartyNotices
                 | WorkspaceOverlayConfirmKind::NativeUpdateReleaseNotes => None,
             }
         } else {
@@ -505,7 +522,13 @@ impl WorkspaceOverlayEntity {
         if let Some(tooltip) = self.tooltip.as_mut()
             && tooltip.id == id
         {
-            let changed = tooltip.label != label || tooltip.x != x || tooltip.y != y;
+            let resumed = tooltip.remove_at.take().is_some();
+            if resumed {
+                self.tooltip_generation = self.tooltip_generation.wrapping_add(1);
+                tooltip.generation = self.tooltip_generation;
+                tooltip.fade_from = tooltip.opacity.get();
+            }
+            let changed = resumed || tooltip.label != label || tooltip.x != x || tooltip.y != y;
             tooltip.label = label;
             tooltip.x = x;
             tooltip.y = y;
@@ -531,7 +554,7 @@ impl WorkspaceOverlayEntity {
         true
     }
 
-    fn clear_tooltip(&mut self, id: &str) -> bool {
+    fn clear_tooltip(&mut self, id: &str, now: Instant) -> bool {
         let mut changed = false;
         if self
             .tooltip_pending
@@ -542,19 +565,28 @@ impl WorkspaceOverlayEntity {
             self.tooltip_generation = self.tooltip_generation.wrapping_add(1);
             changed = true;
         }
-        if self
-            .tooltip
-            .as_ref()
-            .is_some_and(|tooltip| tooltip.id == id)
+        if let Some(tooltip) = self.tooltip.as_mut()
+            && tooltip.id == id
+            && tooltip.remove_at.is_none()
         {
-            self.tooltip = None;
+            if self.control_exit_duration.is_zero() {
+                self.tooltip = None;
+            } else {
+                self.tooltip_generation = self.tooltip_generation.wrapping_add(1);
+                tooltip.generation = self.tooltip_generation;
+                tooltip.fade_from = tooltip.opacity.get();
+                tooltip.remove_at =
+                    Some(now + self.control_exit_duration.min(TOOLTIP_EXIT_DURATION));
+            }
             changed = true;
         }
         changed
     }
 
     fn clear_all_tooltips(&mut self) -> bool {
-        let changed = self.tooltip.take().is_some() || self.tooltip_pending.take().is_some();
+        let visible = self.tooltip.take().is_some();
+        let pending = self.tooltip_pending.take().is_some();
+        let changed = visible || pending;
         if changed {
             self.tooltip_generation = self.tooltip_generation.wrapping_add(1);
         }
@@ -798,6 +830,14 @@ impl WorkspaceOverlayEntity {
     fn process_due_deadlines(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self
+            .tooltip
+            .as_ref()
+            .is_some_and(|tooltip| tooltip.remove_at.is_some_and(|deadline| deadline <= now))
+        {
+            self.tooltip = None;
+            changed = true;
+        }
+        if self
             .tooltip_pending
             .as_ref()
             .is_some_and(|pending| pending.show_at <= now)
@@ -805,6 +845,10 @@ impl WorkspaceOverlayEntity {
             && pending.generation == self.tooltip_generation
         {
             self.tooltip = Some(WorkspaceTooltip {
+                generation: pending.generation,
+                remove_at: None,
+                fade_from: 0.0,
+                opacity: std::rc::Rc::new(std::cell::Cell::new(0.0)),
                 id: pending.id,
                 label: pending.label,
                 x: pending.x,
@@ -909,6 +953,10 @@ impl WorkspaceOverlayEntity {
 
     fn next_deadline(&self) -> Option<Instant> {
         let mut next = self.tooltip_pending.as_ref().map(|pending| pending.show_at);
+        next = min_deadline(
+            next,
+            self.tooltip.as_ref().and_then(|tooltip| tooltip.remove_at),
+        );
         next = min_deadline(next, self.zen_hint_expires_at);
         next = min_deadline(next, self.terminal_font_size_hud.map(|hud| hud.expires_at));
         for toast in &self.standard_toasts {
@@ -950,7 +998,11 @@ impl WorkspaceOverlayEntity {
     ) -> Vec<AnyElement> {
         let mut layers = Vec::new();
         if let Some(tooltip) = self.tooltip.clone() {
-            layers.push(render_tooltip(tokens, tooltip));
+            layers.push(render_tooltip(
+                tokens,
+                tooltip,
+                self.control_exit_duration.min(TOOLTIP_EXIT_DURATION),
+            ));
         }
         if self
             .zen_hint_expires_at
@@ -1512,13 +1564,46 @@ pub(super) fn coalesce_connection_trace_running_events(
     coalesced
 }
 
-fn render_tooltip(tokens: &ThemeTokens, tooltip: WorkspaceTooltip) -> AnyElement {
+fn render_tooltip(
+    tokens: &ThemeTokens,
+    tooltip: WorkspaceTooltip,
+    exit_duration: Duration,
+) -> AnyElement {
+    let exiting = tooltip.remove_at.is_some();
+    let target = if exiting { 0.0 } else { 1.0 };
+    let surface = tooltip_surface(tokens, tooltip.label, None);
+    let surface = if !tokens.motion.enabled {
+        tooltip.opacity.set(target);
+        surface.opacity(target).into_any_element()
+    } else {
+        let duration = if exiting {
+            exit_duration
+        } else {
+            oxideterm_gpui_ui::motion::duration(
+                tokens,
+                oxideterm_gpui_ui::motion::MotionDuration::Micro,
+            )
+        };
+        let opacity = tooltip.opacity;
+        let from = tooltip.fade_from;
+        surface
+            .with_animation(
+                ("workspace-tooltip-fade", tooltip.generation as usize),
+                Animation::new(duration).with_easing(oxideterm_gpui_ui::motion::ease_out_cubic),
+                move |surface, progress| {
+                    let value = from + (target - from) * progress;
+                    opacity.set(value);
+                    surface.opacity(value)
+                },
+            )
+            .into_any_element()
+    };
     deferred(
         anchored()
             .anchor(Corner::TopLeft)
             .position(gpui::point(px(tooltip.x), px(tooltip.y)))
             .position_mode(AnchoredPositionMode::Window)
-            .child(tooltip_content(tokens, tooltip.label, None)),
+            .child(surface),
     )
     .with_priority(oxideterm_gpui_ui::modal::TAURI_TOOLTIP_LAYER_PRIORITY)
     .into_any_element()
@@ -1706,6 +1791,254 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
+
+    #[gpui::test]
+    fn saved_local_profile_palette_failure_is_visible_without_session_manager(
+        cx: &mut TestAppContext,
+    ) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_PALETTE_FAILURE_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // The real workspace uses process-wide storage discovery. A separate
+            // portable process isolates it without changing the user's home or stores.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            fs::hard_link(&executable, &child).unwrap();
+            fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "portable palette regression failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let fixture_dir = PathBuf::from(fixture_dir);
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(&fixture_dir));
+        let mut settings = SettingsStore::load_from_path(settings_path).unwrap();
+        settings.settings_mut().general.language = oxideterm_settings::Language::En;
+        settings.settings_mut().ssh_config.auto_load_hosts = false;
+        settings.save().unwrap();
+
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+            WorkspaceWindowShell::new(workspace, window, cx)
+        });
+        let workspace = shell.read_with(cx, |shell, _| shell.session_entity());
+        let directory = fixture_dir.join("saved-working-directory");
+        fs::create_dir(&directory).unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace
+                    .tokens
+                    .apply_motion(oxideterm_theme::UiMotionProfile::Off);
+                assert!(
+                    workspace
+                        .tabs(cx)
+                        .iter()
+                        .all(|tab| tab.kind != TabKind::SessionManager)
+                );
+                workspace
+                    .connection_store
+                    .upsert_local_terminal_profile(
+                        oxideterm_connections::SaveLocalTerminalProfileRequest {
+                            name: "Unavailable palette profile".into(),
+                            cwd: Some(directory.to_string_lossy().into_owned()),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                fs::remove_dir(&directory).unwrap();
+                workspace.open_command_palette(window, cx);
+                workspace.command_palette.update(cx, |palette, cx| {
+                    palette.push_query_text("Unavailable palette profile", cx);
+                });
+                workspace.handle_command_palette_key(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(!workspace.command_palette.read(cx).is_open());
+                assert!(
+                    workspace
+                        .tabs(cx)
+                        .iter()
+                        .all(|tab| tab.kind != TabKind::SessionManager)
+                );
+            });
+        });
+        cx.run_until_parked();
+        let overlay = workspace.read_with(cx, |workspace, _| workspace.overlay.clone());
+        overlay.read_with(cx, |overlay, _| {
+            assert_eq!(
+                overlay.standard_toasts.iter().map(|toast| (
+                    toast.notice.title.as_str(), toast.notice.variant
+                )).collect::<Vec<_>>(),
+                vec![(
+                    "The startup directory is unavailable. Edit the session to choose an existing directory.",
+                    TerminalNoticeVariant::Error,
+                )]
+            );
+        });
+        let error_background: gpui::Hsla = workspace.read_with(cx, |workspace, _| {
+            rgba((workspace.tokens.ui.error << 8) | 0x1a).into()
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| { quad.background.as_solid() == Some(error_background) }),
+                "the error toast must be painted in the current window"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn tooltip_delay_exit_reentry_and_replacement_cancel_stale_deadlines(cx: &mut TestAppContext) {
+        let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::from_millis(300), cx));
+        overlay.update(cx, |overlay, _| {
+            let start = Instant::now();
+            overlay.queue_tooltip("cloud".into(), "Cloud sync".into(), 10.0, 20.0, start);
+            overlay.process_due_deadlines(start + Duration::from_millis(299));
+            assert!(overlay.tooltip.is_none());
+            let shown = start + TOOLTIP_DELAY;
+            overlay.process_due_deadlines(shown);
+            assert_eq!(overlay.tooltip.as_ref().unwrap().label, "Cloud sync");
+            overlay.clear_tooltip("cloud", shown);
+            assert_eq!(overlay.next_deadline(), Some(shown + TOOLTIP_EXIT_DURATION));
+            overlay.queue_tooltip(
+                "cloud".into(),
+                "Cloud sync".into(),
+                15.0,
+                25.0,
+                shown + Duration::from_millis(30),
+            );
+            overlay.process_due_deadlines(shown + TOOLTIP_EXIT_DURATION);
+            let tooltip = overlay.tooltip.as_ref().unwrap();
+            assert_eq!(
+                (tooltip.label.as_str(), tooltip.x, tooltip.y),
+                ("Cloud sync", 15.0, 25.0)
+            );
+            let switch = shown + Duration::from_millis(100);
+            overlay.queue_tooltip("tools".into(), "Host tools".into(), 30.0, 40.0, switch);
+            assert!(overlay.tooltip.is_none());
+            overlay.clear_tooltip("cloud", switch);
+            overlay.process_due_deadlines(switch + TOOLTIP_DELAY);
+            assert_eq!(overlay.tooltip.as_ref().unwrap().label, "Host tools");
+            let exit = switch + TOOLTIP_DELAY;
+            overlay.clear_tooltip("tools", exit);
+            overlay.clear_tooltip("tools", exit + Duration::from_millis(30));
+            overlay.process_due_deadlines(exit + Duration::from_millis(89));
+            assert_eq!(overlay.tooltip.as_ref().unwrap().id, "tools");
+            overlay.process_due_deadlines(exit + TOOLTIP_EXIT_DURATION);
+            assert!(overlay.tooltip.is_none());
+            overlay.queue_tooltip("cancelled".into(), "Never shown".into(), 0.0, 0.0, exit);
+            overlay.clear_tooltip("cancelled", exit);
+            overlay.process_due_deadlines(exit + TOOLTIP_DELAY);
+            assert!(overlay.tooltip.is_none());
+        });
+    }
+
+    struct TooltipMotionTestRoot {
+        tooltip: WorkspaceTooltip,
+    }
+
+    impl Render for TooltipMotionTestRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(render_tooltip(
+                &oxideterm_theme::default_tokens(),
+                self.tooltip.clone(),
+                TOOLTIP_EXIT_DURATION,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn tooltip_exit_fades_from_rendered_opacity_and_can_reverse(cx: &mut TestAppContext) {
+        let opacity = std::rc::Rc::new(std::cell::Cell::new(0.0));
+        let (view, cx) = cx.add_window_view(|_, _| TooltipMotionTestRoot {
+            tooltip: WorkspaceTooltip {
+                generation: 1,
+                remove_at: None,
+                fade_from: 0.0,
+                opacity: opacity.clone(),
+                id: "cloud".into(),
+                label: "Cloud sync".into(),
+                x: 10.0,
+                y: 20.0,
+            },
+        });
+        cx.simulate_resize(gpui::size(px(640.0), px(480.0)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.executor().advance_clock(Duration::from_millis(60));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!((opacity.get() - 0.875).abs() < 0.0001);
+        view.update(cx, |view, cx| {
+            view.tooltip.generation += 1;
+            view.tooltip.fade_from = opacity.get();
+            view.tooltip.remove_at = Some(Instant::now() + TOOLTIP_EXIT_DURATION);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!((opacity.get() - 0.875).abs() < 0.0001);
+        cx.executor().advance_clock(Duration::from_millis(45));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!((opacity.get() - 0.109375).abs() < 0.0001);
+        view.update(cx, |view, cx| {
+            view.tooltip.generation += 1;
+            view.tooltip.fade_from = opacity.get();
+            view.tooltip.remove_at = None;
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!((opacity.get() - 0.109375).abs() < 0.0001);
+        cx.executor().advance_clock(Duration::from_millis(120));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(opacity.get(), 1.0);
+    }
+
+    #[gpui::test]
+    fn tooltip_animation_disabled_clears_visible_and_pending_prompts(cx: &mut TestAppContext) {
+        let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::ZERO, cx));
+        overlay.update(cx, |overlay, _| {
+            let now = Instant::now();
+            overlay.queue_tooltip("cloud".into(), "Cloud sync".into(), 0.0, 0.0, now);
+            overlay.process_due_deadlines(now + TOOLTIP_DELAY);
+            overlay.clear_tooltip("cloud", now + TOOLTIP_DELAY);
+            assert!(overlay.tooltip.is_none());
+            overlay.queue_tooltip("tools".into(), "Host tools".into(), 0.0, 0.0, now);
+            overlay.clear_all_tooltips();
+            overlay.process_due_deadlines(now + TOOLTIP_DELAY);
+            assert!(overlay.tooltip.is_none());
+        });
+    }
 
     struct ConnectionCardTestRoot {
         overlay: Entity<WorkspaceOverlayEntity>,
@@ -2074,25 +2407,5 @@ mod tests {
                 (false, None)
             );
         });
-    }
-
-    #[gpui::test]
-    fn entity_release_cancels_retained_confirm_exit(cx: &mut TestAppContext) {
-        let overlay = cx.new(|cx| WorkspaceOverlayEntity::new(Duration::ZERO, cx));
-        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
-        overlay.update(cx, |overlay, cx| {
-            // The task is retained by the confirmation owner, so releasing the
-            // Entity must drop the pending receiver.
-            overlay.confirm_exit_task = Some(cx.spawn(async move |_, _| {
-                let _ = release_receiver.await;
-            }));
-        });
-        cx.run_until_parked();
-
-        drop(overlay);
-        cx.update(|_| {});
-        cx.run_until_parked();
-
-        assert!(release_sender.send(()).is_err());
     }
 }

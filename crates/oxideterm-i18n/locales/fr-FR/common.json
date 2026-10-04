@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} est toujours en cours d’exécution (peut-être dans la zone de notification), ou ses fichiers sont utilisés par une autre application. Enregistrez votre travail. Cliquez sur OK pour fermer les applications concernées et poursuivre l’installation, ou sur Annuler pour l’arrêter. Dossier d’installation : {{path}}",
+    "application_close_failed": "Impossible de libérer les fichiers de {{path}} ou de vérifier leur utilisation. Quittez {{app}} depuis la zone de notification et fermez les autres applications utilisant ce dossier, puis cliquez sur Réessayer. Annuler arrête l’installation sans remplacer de fichiers."
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Lanceur de shell"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "Diagramme Mermaid non pris en charge",
-    "mermaid_expand": "Agrandir"
+    "mermaid_expand": "Agrandir",
+    "mermaid_loading": "Rendu du diagramme…",
+    "html_details": "Détails"
   },
   "layout": {
     "empty": {
@@ -204,8 +210,29 @@
     "native_sidebar_empty_title": "Système de plugins indisponible",
     "native_sidebar_empty_description": "Ouvrez l’onglet plugins pour voir l’état native actuel.",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "Mettez à jour votre serveur de synchronisation vers une version compatible avec le nouveau protocole de synchronisation cloud, puis relancez la synchronisation.",
+        "password_change_pending": "Un changement de mot de passe est en attente. Réessayez avec le même nouveau mot de passe.",
+        "change_password": "Changer le mot de passe de synchronisation",
+        "change_password_description": "Un nouvel espace sera créé avec le nouveau mot de passe. Le basculement aura lieu après vérification du transfert. L’ancien espace sera conservé.",
+        "password_change_separate_settings": "Enregistrez les autres réglages avant de changer le mot de passe de synchronisation.",
+        "password_too_short": "Le mot de passe doit contenir au moins 6 caractères.",
+        "sync": "Synchroniser",
+        "cleanup_pending": "Le nettoyage reste à terminer. Relancez la synchronisation.",
+        "keep": "Conserver",
+        "preview": "Aperçu de la synchronisation",
+        "changes": "Champs modifiés",
+        "upgrade": "Les données du cloud seront mises à niveau. Les fichiers d’origine seront conservés.",
+        "candidate": "Version",
+        "apply": "Appliquer et synchroniser",
+        "configuration": "Configuration",
+        "protected": "Valeur protégée",
+        "current": "Cet appareil",
+        "conflict_hint": "Choisissez une version pour les champs en conflit. Sans sélection, la valeur actuelle de cet appareil est conservée."
+      },
       "panel_title": "Synchronisation cloud Oxide",
       "backend": {
+        "local_file": "Fichier local",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -278,6 +305,7 @@
         "sync_scope": "Périmètre de synchronisation",
         "conflict_recovery": "Récupération après conflit",
         "import_preview": "Aperçu de l'import",
+        "export_preview": "Aperçu de l’exportation",
         "upload_preview": "Aperçu de l’envoi",
         "rollback_preview": "Aperçu de la restauration",
         "rollback_backups": "Sauvegardes de restauration",
@@ -336,6 +364,7 @@
         "google_drive_permission_warning": "Si Google indique access_denied, admin_policy_enforced, invalid_client ou Drive API non activée, vérifiez consentement, type de client bureau, état API, politique administrateur et utilisateurs de test."
       },
       "settings": {
+        "sync_method": "Méthode de synchronisation",
         "backend_type": "Type de backend",
         "auth_mode": "Authentification",
         "endpoint": "Endpoint",
@@ -438,6 +467,7 @@
         "summary_line": "{{connections}} connexions, {{forwards}} redirections, {{quickCommands}} commandes rapides, {{serialProfiles}} profils série, {{telnetProfiles}} profils Telnet, {{pluginSettingsCount}} paramètres de plugin, {{sensitiveCredentials}} identifiants sensibles"
       },
       "errors": {
+        "local_forward_requires_connection": "Pour exporter un fichier local, sélectionnez aussi les connexions des règles de transfert sélectionnées.",
         "operation_in_progress": "Une autre opération Cloud Sync est déjà en cours.",
         "missing_endpoint": "Configurez le Endpoint du backend avant de synchroniser.",
         "missing_namespace": "Configurez le Namespace ou le préfixe de chemin avant de synchroniser.",
@@ -568,6 +598,7 @@
         "downloading": "Downloading objects"
       },
       "preview": {
+        "standalone_sftp_profiles": "Connexions de transfert de fichiers ({{count}})",
         "summary_header": "Résumé de l'aperçu distant",
         "apply_plan_title": "Plan d'application",
         "upload_scope_title": "Périmètre d’envoi",
@@ -1171,6 +1202,12 @@
     "hint_other": "Mode Zen — Appuyez sur Ctrl+Shift+Z pour quitter"
   },
   "tabbar": {
+    "drag_to_dock": "Glisser pour ancrer",
+    "workspace": "Espace de travail",
+    "merge_into_horizontal": "Fusionner avec « {{title}} » (côte à côte)",
+    "merge_into_vertical": "Fusionner avec « {{title}} » (superposés)",
+    "move_pane_to_tab": "Déplacer vers un nouvel onglet",
+    "move_pane_to_window": "Déplacer vers une nouvelle fenêtre",
     "offline": "Hors ligne",
     "cancel_reconnect": "Annuler la reconnexion",
     "reconnect": "Reconnecter",
@@ -1287,5 +1324,13 @@
     "setup_pending": "Création du coffre portable...",
     "unlock_submit": "Déverrouiller et continuer",
     "unlock_pending": "Déverrouillage des données portables..."
+  },
+  "local_session": {
+    "directory": "Répertoire de démarrage",
+    "inherit_directory": "Utiliser le répertoire par défaut des paramètres",
+    "inherit_shell": "Utiliser le shell par défaut des paramètres",
+    "shell_unavailable": "Le shell enregistré est indisponible sur cet appareil. Modifiez la session pour choisir un shell installé.",
+    "directory_unavailable": "Le répertoire de démarrage est indisponible. Modifiez la session pour choisir un répertoire existant.",
+    "name_required": "Saisissez un nom pour enregistrer cette session locale."
   }
 }

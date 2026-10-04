@@ -43,43 +43,34 @@ pub enum SerialControlLine {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum SerialLineEnding {
     Lf,
     CrLf,
     Cr,
+    #[default]
     None,
 }
 
-impl Default for SerialLineEnding {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum SerialDisplayMode {
+    #[default]
     Text,
     Hex,
     Mixed,
 }
 
-impl Default for SerialDisplayMode {
-    fn default() -> Self {
-        Self::Text
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub enum SerialSendMode {
+    #[default]
     Text,
     Hex,
 }
 
-impl Default for SerialSendMode {
-    fn default() -> Self {
-        Self::Text
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SerialRuntimeOptions {
@@ -150,6 +141,8 @@ pub trait TerminalSessionBackend: Send {
     fn write_text(&mut self, text: &str) -> Result<()>;
     fn paste_text(&mut self, text: &str) -> Result<()>;
     fn set_encoding(&mut self, encoding: TerminalEncoding);
+    /// Replaces the colors used for ANSI/default cells and color-query replies.
+    fn set_palette(&mut self, palette: TerminalPalette);
     fn set_output_processor(&mut self, _processor: Option<TerminalOutputProcessor>) {}
     fn set_output_events_enabled(&mut self, _enabled: bool) {}
     fn set_trigger_rules(
@@ -221,7 +214,8 @@ pub trait TerminalSessionBackend: Send {
     fn tmux_state(&self) -> Option<crate::TmuxUiState> {
         None
     }
-    fn tmux_action(&mut self, _action: crate::TmuxAction) -> Result<bool> {
+    fn tmux_action(&mut self, _action: crate::TmuxAction, audit: oxideterm_audit::AuditOperation) -> Result<bool> {
+        audit.finish(oxideterm_audit::AuditOutcome::Unchanged, oxideterm_audit::AuditEvidence::Dispatch, None, None);
         Ok(false)
     }
     fn tmux_separator_at(&self, _col: usize, _row: usize) -> Option<crate::TmuxSeparator> {
@@ -289,6 +283,7 @@ pub trait TerminalSessionBackend: Send {
     fn terminate_active_task(&mut self) -> Result<()>;
     fn kill_active_task(&mut self) -> Result<()>;
     fn shutdown(&mut self);
+    fn audit_context(&self) -> Option<oxideterm_audit::AuditContext> { None }
     fn ssh_connection_handle(&self) -> Option<SshConnectionHandle> {
         None
     }

@@ -6,6 +6,7 @@ fn migrate_legacy_auth_credentials(
         SavedAuth::Password {
             keychain_id,
             plaintext_password,
+            ..
         } => {
             if let Some(password) = plaintext_password.take() {
                 let next_keychain_id = keychain_id.clone().unwrap_or_else(new_password_keychain_id);
@@ -208,7 +209,7 @@ fn has_supported_private_key_container(private_key: &str) -> bool {
 
 fn decode_ascii_hex_secret(secret: &str) -> Option<SecretString> {
     let encoded = secret.as_bytes();
-    if encoded.is_empty() || encoded.len() % 2 != 0 {
+    if encoded.is_empty() || !encoded.len().is_multiple_of(2) {
         return None;
     }
 
@@ -523,6 +524,8 @@ fn auth_with_protected_credential(auth: SavedAuth) -> Result<(SavedAuth, String)
             let reference = keychain_id.unwrap_or_else(new_password_keychain_id);
             Ok((
                 SavedAuth::Password {
+                    empty_password: false,
+
                     keychain_id: Some(reference.clone()),
                     plaintext_password: None,
                 },
@@ -600,9 +603,14 @@ fn auth_with_protected_credential(auth: SavedAuth) -> Result<(SavedAuth, String)
 }
 
 fn auth_without_protected_credential(auth: &SavedAuth) -> (SavedAuth, Option<String>) {
+    if auth.uses_empty_password() {
+        return (auth.clone(), None);
+    }
     match auth {
         SavedAuth::Password { keychain_id, .. } => (
             SavedAuth::Password {
+                empty_password: false,
+
                 keychain_id: None,
                 plaintext_password: None,
             },

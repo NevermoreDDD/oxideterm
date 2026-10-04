@@ -75,7 +75,7 @@ impl WorkspaceApp {
         let host_id = self
             .active_ssh_terminal_node_id(cx)
             .and_then(|node_id| self.node_router.resolve_connection_now(&node_id).ok())
-            .map(|connection| connection.connection_id.to_string());
+            .map(|connection| connection.connection_id);
         let mut entries = memory
             .entries
             .iter()
@@ -215,7 +215,7 @@ impl WorkspaceApp {
         let active_profile_id = self
             .active_ssh_terminal_node_id(cx)
             .and_then(|node_id| self.node_router.resolve_connection_now(&node_id).ok())
-            .map(|connection| connection.connection_id.to_string());
+            .map(|connection| connection.connection_id);
         if settings.ai.active_backend == AiActiveBackend::Acp {
             let acp_agent_id = settings
                 .ai
@@ -783,6 +783,10 @@ impl WorkspaceApp {
             prompt.push_str(&oxideterm_ai::sanitize_for_ai(task_system_prompt));
         }
         if let Some(skill_catalog_prompt) = self.ai_skill_catalog_prompt() {
+            if let Some(mut context) = oxideterm_audit::AuditContext::current_request().or_else(oxideterm_audit::AuditContext::current) {
+                context.source = oxideterm_audit::AuditSource::Ai;
+                context.observe(oxideterm_audit::AuditCategory::Automation, "ai_context_provided", Some(&format!("provider=skills model={} bytes={}", config.model, skill_catalog_prompt.len())), oxideterm_audit::AuditOutcome::Sent, oxideterm_audit::AuditEvidence::Dispatch, oxideterm_audit::AuditAuthorization::NotRequired);
+            }
             prompt.push_str("\n\n");
             prompt.push_str(&skill_catalog_prompt);
         }

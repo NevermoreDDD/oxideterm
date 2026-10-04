@@ -6,15 +6,16 @@
 //! This module converts OxideTerm-owned markdown model nodes into composed
 //! GPUI `Div` / `AnyElement` trees using only semantic theme tokens.
 
-use std::{ops::Range, path::PathBuf, sync::Arc};
+use std::{ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
     Image, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledText, TextAlign, TextRun,
-    UnderlineStyle, Window, div, image_cache, img, prelude::FluentBuilder, px, relative,
+    StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, TextAlign,
+    TextRun, UnderlineStyle, Window, div, image_cache, img, prelude::FluentBuilder, px, relative,
     retain_all,
 };
+use oxideterm_gpui_ui::{ScrollableElement, Scrollbar};
 use oxideterm_theme::ThemeTokens;
 
 use crate::MarkdownVirtualListScrollHandle;
@@ -23,14 +24,35 @@ use crate::layout::{MarkdownBlockLayout, MarkdownLayoutItem};
 use crate::math;
 use crate::mermaid;
 use crate::model::{
-    Block, BlockAlignment, CalloutKind, FootnoteDefinition, Inline, ListItem, MarkdownDocument,
-    TableAlignment,
+    Block, BlockAlignment, CalloutKind, FootnoteDefinition, ImageDimensions, ImageLength, Inline,
+    ListItem, MarkdownDocument, TableAlignment,
 };
 use crate::options::MarkdownOptions;
 use crate::style;
 
 const WINDOWED_MARKDOWN_MIN_ITEMS: usize = 24;
 const MARKDOWN_VIRTUAL_OVERDRAW_PX: f32 = 480.0;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct MarkdownTextFragmentId {
+    pub key: String,
+    pub join_previous: bool,
+}
+
+impl From<String> for MarkdownTextFragmentId {
+    fn from(key: String) -> Self {
+        Self {
+            key,
+            join_previous: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct MarkdownTextLink {
+    pub range: Range<usize>,
+    pub open: Rc<dyn Fn(&mut Window, &mut App)>,
+}
 
 pub type MarkdownCodeRunHandler = Arc<dyn Fn(String, &mut Window, &mut App) + 'static>;
 pub type MarkdownMermaidZoomHandler =
@@ -58,6 +80,7 @@ fn render_document_with_code_actions(
     code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
     let mut content = div()
+        .line_height(relative(style::BODY_LINE_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -116,6 +139,9 @@ fn render_document_windowed_with_code_actions(
     overdraw: f32,
     code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
+    let mut options = opts.clone();
+    options.disclosures = layout.disclosures.clone();
+    let opts = &options;
     let items = layout.items();
     if items.len() < WINDOWED_MARKDOWN_MIN_ITEMS || viewport_height <= 0.0 {
         return render_document_with_code_actions(document, tokens, opts, code_actions);
@@ -138,7 +164,7 @@ fn render_document_windowed_with_code_actions(
     };
     let mut rendered = Vec::new();
 
-    for (_index, item) in items
+    for (index, item) in items
         .iter()
         .enumerate()
         .skip(virtual_window.range.start)
@@ -146,15 +172,26 @@ fn render_document_windowed_with_code_actions(
     {
         match item {
             MarkdownLayoutItem::Block(block) => {
-                rendered.push(render_block_with_code_actions(
-                    block,
-                    tokens,
-                    opts,
-                    code_actions,
-                ));
+                rendered.push(
+                    layout.measure(
+                        index,
+                        div()
+                            .id(("markdown-block", index))
+                            .w_full()
+                            .min_w_0()
+                            .pt(px(style::block_top_padding(block, index, opts)))
+                            .child(render_block_with_code_actions(
+                                block,
+                                tokens,
+                                opts,
+                                code_actions,
+                            ))
+                            .into_any_element(),
+                    ),
+                );
             }
             MarkdownLayoutItem::Footnotes(footnotes) => {
-                rendered.push(render_footnotes(footnotes, tokens, opts));
+                rendered.push(layout.measure(index, render_footnotes(footnotes, tokens, opts)));
             }
         }
     }
@@ -171,6 +208,7 @@ fn render_document_windowed_with_code_actions(
     }
 
     let mut content = div()
+        .line_height(relative(style::BODY_LINE_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -205,7 +243,12 @@ pub fn render_document_selectable(
     document: &MarkdownDocument,
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     render_document_selectable_with_code_actions(document, tokens, opts, None, render_text)
 }
@@ -215,9 +258,15 @@ pub fn render_document_selectable_with_code_actions(
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     let mut content = div()
+        .line_height(relative(style::BODY_LINE_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -253,7 +302,12 @@ pub fn render_document_windowed_selectable(
     viewport_top: f32,
     viewport_height: f32,
     overdraw: f32,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     render_document_windowed_selectable_with_code_actions(
         document,
@@ -277,8 +331,16 @@ pub fn render_document_windowed_selectable_with_code_actions(
     viewport_height: f32,
     overdraw: f32,
     code_actions: Option<&MarkdownCodeBlockActions>,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
+    let mut options = opts.clone();
+    options.disclosures = layout.disclosures.clone();
+    let opts = &options;
     let items = layout.items();
     if items.len() < WINDOWED_MARKDOWN_MIN_ITEMS || viewport_height <= 0.0 {
         return render_document_selectable_with_code_actions(
@@ -327,17 +389,28 @@ pub fn render_document_windowed_selectable_with_code_actions(
     {
         match item {
             MarkdownLayoutItem::Block(block) => {
-                rendered.push(render_selectable_block(
-                    block,
-                    tokens,
-                    opts,
-                    code_actions,
-                    &format!("w:{index}"),
-                    render_text,
-                ));
+                rendered.push(
+                    layout.measure(
+                        index,
+                        div()
+                            .id(("markdown-block", index))
+                            .w_full()
+                            .min_w_0()
+                            .pt(px(style::block_top_padding(block, index, opts)))
+                            .child(render_selectable_block(
+                                block,
+                                tokens,
+                                opts,
+                                code_actions,
+                                &format!("w:{index}"),
+                                render_text,
+                            ))
+                            .into_any_element(),
+                    ),
+                );
             }
             MarkdownLayoutItem::Footnotes(footnotes) => {
-                rendered.push(render_footnotes(footnotes, tokens, opts));
+                rendered.push(layout.measure(index, render_footnotes(footnotes, tokens, opts)));
             }
         }
     }
@@ -354,6 +427,7 @@ pub fn render_document_windowed_selectable_with_code_actions(
     }
 
     let mut content = div()
+        .line_height(relative(style::BODY_LINE_HEIGHT))
         .w_full()
         .min_w_0()
         .flex()
@@ -403,8 +477,24 @@ pub fn render_document_virtual_with_code_actions(
     scroll_handle: &MarkdownVirtualListScrollHandle,
     code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
-    let layout = MarkdownBlockLayout::from_document(document, opts);
-    let viewport_top = markdown_scroll_top_from_gpui_offset(scroll_handle.offset().y);
+    let layout = scroll_handle.measurements.prepare(
+        MarkdownBlockLayout::from_document(document, opts),
+        f32::from(scroll_handle.bounds().size.width),
+        opts,
+    );
+    let mut options = opts.clone();
+    options.disclosures = layout.disclosures.clone();
+    options
+        .navigation
+        .get_or_insert_with(|| scroll_handle.navigation.clone());
+    let opts = &options;
+    let viewport_top = opts.scroll_sync.as_ref().map_or_else(
+        || markdown_scroll_top_from_gpui_offset(scroll_handle.offset().y),
+        |sync| sync.begin(&layout, opts.block_gap, scroll_handle),
+    );
+    if let Some(navigation) = &opts.navigation {
+        navigation.prepare(document, opts);
+    }
     let viewport_height = f32::from(scroll_handle.bounds().size.height);
     let content = render_document_windowed_with_code_actions(
         document,
@@ -421,10 +511,98 @@ pub fn render_document_virtual_with_code_actions(
     // in an external variable-height list for markdown previews.
     div()
         .id(id)
+        .relative()
         .size_full()
-        .overflow_y_scroll()
-        .track_scroll(scroll_handle)
-        .child(content)
+        .child(
+            div()
+                .id("markdown-viewport")
+                .size_full()
+                .overflow_y_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(scroll_handle)
+                .child(content),
+        )
+        .child(
+            Scrollbar::new(scroll_handle).when_some(opts.scroll_sync.as_ref(), |bar, sync| {
+                let sync = sync.clone();
+                bar.on_vertical_scroll(move || sync.user_input())
+            }),
+        )
+        .when_some(opts.scroll_sync.as_ref(), |root, sync| {
+            let input = sync.clone();
+            root.on_scroll_wheel(move |_, _, _| input.user_input())
+                .child(sync.finish_probe(scroll_handle))
+        })
+        .into_any_element()
+}
+
+pub fn render_document_virtual_selectable(
+    id: impl Into<ElementId>,
+    document: &MarkdownDocument,
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+    scroll_handle: &MarkdownVirtualListScrollHandle,
+    code_actions: Option<&MarkdownCodeBlockActions>,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
+) -> AnyElement {
+    let layout = scroll_handle.measurements.prepare(
+        MarkdownBlockLayout::from_document(document, opts),
+        f32::from(scroll_handle.bounds().size.width),
+        opts,
+    );
+    let mut options = opts.clone();
+    options.disclosures = layout.disclosures.clone();
+    options
+        .navigation
+        .get_or_insert_with(|| scroll_handle.navigation.clone());
+    let opts = &options;
+    let viewport_top = opts.scroll_sync.as_ref().map_or_else(
+        || markdown_scroll_top_from_gpui_offset(scroll_handle.offset().y),
+        |sync| sync.begin(&layout, opts.block_gap, scroll_handle),
+    );
+    if let Some(navigation) = &opts.navigation {
+        navigation.prepare(document, opts);
+    }
+    let content = render_document_windowed_selectable_with_code_actions(
+        document,
+        &layout,
+        tokens,
+        opts,
+        viewport_top,
+        f32::from(scroll_handle.bounds().size.height),
+        MARKDOWN_VIRTUAL_OVERDRAW_PX,
+        code_actions,
+        render_text,
+    );
+    div()
+        .id(id)
+        .relative()
+        .size_full()
+        .child(
+            div()
+                .id("markdown-viewport")
+                .size_full()
+                .overflow_y_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(scroll_handle)
+                .child(content),
+        )
+        .child(
+            Scrollbar::new(scroll_handle).when_some(opts.scroll_sync.as_ref(), |bar, sync| {
+                let sync = sync.clone();
+                bar.on_vertical_scroll(move || sync.user_input())
+            }),
+        )
+        .when_some(opts.scroll_sync.as_ref(), |root, sync| {
+            let input = sync.clone();
+            root.on_scroll_wheel(move |_, _, _| input.user_input())
+                .child(sync.finish_probe(scroll_handle))
+        })
         .into_any_element()
 }
 
@@ -502,11 +680,12 @@ fn markdown_virtual_window(
 
     let (first_item_top, _) = item_bounds[first_index];
     let (_, last_item_bottom) = item_bounds[last_index_exclusive - 1];
-    let scroll_overflow = (viewport_top - clamped_viewport_top).max(0.0);
 
     Some(MarkdownVirtualWindow {
         range: first_index..last_index_exclusive,
-        top_spacer: first_item_top + scroll_overflow,
+        // Keep content height independent of overscroll so the scroll container
+        // can clamp stale offsets after measurements or disclosure changes.
+        top_spacer: first_item_top,
         bottom_spacer: (total_height - last_item_bottom).max(0.0),
     })
 }
@@ -542,11 +721,19 @@ fn render_blocks_with_code_actions(
         .flex()
         .flex_col()
         .gap(px(opts.block_gap))
-        .children(
-            blocks
-                .iter()
-                .map(|block| render_block_with_code_actions(block, tokens, opts, code_actions)),
-        )
+        .children(blocks.iter().enumerate().map(|(index, block)| {
+            div()
+                .id(("markdown-block", index))
+                .w_full()
+                .min_w_0()
+                .pt(px(style::block_top_padding(block, index, opts)))
+                .child(render_block_with_code_actions(
+                    block,
+                    tokens,
+                    opts,
+                    code_actions,
+                ))
+        }))
         .into_any_element()
 }
 
@@ -556,7 +743,12 @@ fn render_selectable_blocks(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     div()
         .w_full()
@@ -565,20 +757,41 @@ fn render_selectable_blocks(
         .flex_col()
         .gap(px(opts.block_gap))
         .children(blocks.iter().enumerate().map(|(index, block)| {
-            render_selectable_block(
-                block,
-                tokens,
-                opts,
-                code_actions,
-                &format!("{path}:{index}"),
-                render_text,
-            )
+            div()
+                .id(SharedString::from(format!("{path}:{index}")))
+                .w_full()
+                .min_w_0()
+                .pt(px(style::block_top_padding(block, index, opts)))
+                .child(render_selectable_block(
+                    block,
+                    tokens,
+                    opts,
+                    code_actions,
+                    &format!("{path}:{index}"),
+                    render_text,
+                ))
         }))
         .into_any_element()
 }
 
-fn render_block(block: &Block, tokens: &ThemeTokens, opts: &MarkdownOptions) -> AnyElement {
-    render_block_with_code_actions(block, tokens, opts, None)
+fn wrap_source_block(
+    span: crate::model::SourceSpan,
+    block: &Block,
+    child: AnyElement,
+    opts: &MarkdownOptions,
+) -> AnyElement {
+    let Some(sync) = &opts.scroll_sync else {
+        return child;
+    };
+    if let Block::CodeBlock { language, code } = block
+        && !should_render_mermaid_block(language.as_deref(), code)
+    {
+        // The code body's own probe excludes the action bar and padding.
+        return child;
+    }
+    let collapsed =
+        matches!(block, Block::Details { id, open, .. } if !opts.disclosures.is_open(id, *open));
+    sync.wrap_visibility(span, child, collapsed)
 }
 
 fn render_block_with_code_actions(
@@ -588,17 +801,41 @@ fn render_block_with_code_actions(
     code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
     match block {
+        Block::Located { span, block } => {
+            let mut options = opts.clone();
+            if matches!(block.as_ref(), Block::CodeBlock { .. }) {
+                options.code_source = Some(*span);
+            }
+            let child = render_block_with_code_actions(block, tokens, &options, code_actions);
+            wrap_source_block(*span, block, child, opts)
+        }
         Block::Heading { level, id, inlines } => render_heading(*level, id, inlines, tokens, opts),
         Block::Paragraph { inlines } => render_paragraph(inlines, tokens, opts),
         Block::Html(html) => render_html_block(html, tokens, opts),
         Block::HtmlContainer { alignment, blocks } => {
             render_html_container(*alignment, blocks, tokens, opts, code_actions)
         }
+        Block::Details {
+            id,
+            summary,
+            blocks,
+            open,
+        } => crate::disclosure::HtmlDisclosure {
+            id: id.clone(),
+            summary: render_paragraph(&details_summary(summary, opts), tokens, opts),
+            body: render_blocks_with_code_actions(blocks, tokens, opts, code_actions),
+            default_open: *open,
+            state: opts.disclosures.clone(),
+            tokens: *tokens,
+        }
+        .into_any_element(),
         Block::CodeBlock { language, code } => {
             render_code_block(language.as_deref(), code, tokens, opts, code_actions)
         }
-        Block::UnorderedList { items } => render_unordered_list(items, tokens, opts),
-        Block::OrderedList { start, items } => render_ordered_list(*start, items, tokens, opts),
+        Block::UnorderedList { items } => render_unordered_list(items, tokens, opts, code_actions),
+        Block::OrderedList { start, items } => {
+            render_ordered_list(*start, items, tokens, opts, code_actions)
+        }
         Block::HorizontalRule => render_hr(tokens),
         Block::Blockquote { kind, blocks } => {
             render_blockquote_with_code_actions(*kind, blocks, tokens, opts, code_actions)
@@ -617,9 +854,23 @@ fn render_selectable_block(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     match block {
+        Block::Located { span, block } => {
+            let mut options = opts.clone();
+            if matches!(block.as_ref(), Block::CodeBlock { .. }) {
+                options.code_source = Some(*span);
+            }
+            let child =
+                render_selectable_block(block, tokens, &options, code_actions, path, render_text);
+            wrap_source_block(*span, block, child, opts)
+        }
         Block::Heading { level, id, inlines } => {
             render_selectable_heading(*level, id, inlines, tokens, opts, path, render_text)
         }
@@ -636,6 +887,27 @@ fn render_selectable_block(
             path,
             render_text,
         ),
+        Block::Details {
+            id,
+            summary,
+            blocks,
+            open,
+        } => crate::disclosure::HtmlDisclosure {
+            id: id.clone(),
+            summary: render_paragraph(&details_summary(summary, opts), tokens, opts),
+            body: render_selectable_blocks(
+                blocks,
+                tokens,
+                opts,
+                code_actions,
+                &format!("{path}:details"),
+                render_text,
+            ),
+            default_open: *open,
+            state: opts.disclosures.clone(),
+            tokens: *tokens,
+        }
+        .into_any_element(),
         Block::CodeBlock { language, code } => render_selectable_code_block(
             language.as_deref(),
             code,
@@ -677,15 +949,25 @@ fn render_selectable_block(
 
 // ─── headings ───────────────────────────────────────────────────────────
 
+fn details_summary(summary: &[Inline], opts: &MarkdownOptions) -> Vec<Inline> {
+    if summary.is_empty() {
+        vec![Inline::Text(opts.html_details_label.clone())]
+    } else {
+        summary.to_vec()
+    }
+}
+
 fn render_heading(
     level: u8,
-    _id: &str,
+    id: &str,
     inlines: &[Inline],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
 ) -> AnyElement {
     let font_size = style::heading_font_size(level, opts);
     div()
+        .relative()
+        .child(heading_anchor(id, opts))
         .w_full()
         .min_w_0()
         .flex()
@@ -696,23 +978,39 @@ fn render_heading(
                 .min_w_0()
                 .whitespace_normal()
                 .text_size(font_size)
+                .line_height(relative(1.25))
                 .text_color(style::heading_color(tokens))
-                .child(render_styled_inlines(inlines, tokens, opts)),
+                .child(render_styled_inlines_with_style(
+                    inlines,
+                    tokens,
+                    opts,
+                    FlatRunStyle {
+                        semibold: true,
+                        ..Default::default()
+                    },
+                )),
         )
         .into_any_element()
 }
 
 fn render_selectable_heading(
     level: u8,
-    _id: &str,
+    id: &str,
     inlines: &[Inline],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     let font_size = style::heading_font_size(level, opts);
     div()
+        .relative()
+        .child(heading_anchor(id, opts))
         .w_full()
         .min_w_0()
         .flex()
@@ -723,12 +1021,17 @@ fn render_selectable_heading(
                 .min_w_0()
                 .whitespace_normal()
                 .text_size(font_size)
+                .line_height(relative(1.25))
                 .text_color(style::heading_color(tokens))
-                .child(render_selectable_inlines(
+                .child(render_selectable_inlines_with_style(
                     path,
                     inlines,
                     tokens,
                     opts,
+                    FlatRunStyle {
+                        semibold: true,
+                        ..Default::default()
+                    },
                     render_text,
                 )),
         )
@@ -757,7 +1060,12 @@ fn render_selectable_paragraph(
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     div()
         .w_full()
@@ -786,7 +1094,12 @@ fn render_selectable_html_block(
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     render_selectable_paragraph(
         &[Inline::Html(html.to_string())],
@@ -824,7 +1137,12 @@ fn render_selectable_html_container(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     div()
         .w_full()
@@ -843,6 +1161,13 @@ fn render_selectable_html_container(
 
 // ─── code blocks ────────────────────────────────────────────────────────
 
+fn code_display_text(code: &str) -> &str {
+    // The parser includes the newline before the closing fence; it is not an extra visual row.
+    code.strip_suffix("\r\n")
+        .or_else(|| code.strip_suffix('\n'))
+        .unwrap_or(code)
+}
+
 fn render_code_block(
     language: Option<&str>,
     code: &str,
@@ -854,18 +1179,19 @@ fn render_code_block(
         return render_mermaid_block(code, tokens, opts, code_actions);
     }
 
+    let display_code = code_display_text(code);
     // Attempt syntax highlighting; fall back to plain monospace text.
     let code_element: AnyElement = if let Some(lang) = language {
-        if let Some(runs) = highlight::highlight_code(lang, code, opts) {
+        if let Some(runs) = highlight::highlight_code(lang, display_code, opts) {
             let (text, text_runs) = highlight::highlighted_runs_to_text_runs(&runs);
             StyledText::new(text)
                 .with_runs(text_runs)
                 .into_any_element()
         } else {
-            SharedString::from(code.to_string()).into_any_element()
+            SharedString::from(display_code.to_string()).into_any_element()
         }
     } else {
-        SharedString::from(code.to_string()).into_any_element()
+        SharedString::from(display_code.to_string()).into_any_element()
     };
 
     render_code_block_shell(language, code, tokens, opts, None, code_element).into_any_element()
@@ -878,28 +1204,36 @@ fn render_selectable_code_block(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     if should_render_mermaid_block(language, code) {
         return render_mermaid_block(code, tokens, opts, code_actions);
     }
 
+    let display_code = code_display_text(code);
     let code_element: AnyElement = if let Some(lang) = language {
-        if let Some(runs) = highlight::highlight_code(lang, code, opts) {
+        if let Some(runs) = highlight::highlight_code(lang, display_code, opts) {
             let (text, text_runs) = highlight::highlighted_runs_to_text_runs(&runs);
-            render_text(format!("{path}:code"), text, text_runs)
+            render_text(format!("{path}:code").into(), text, text_runs, Vec::new())
         } else {
             render_text(
-                format!("{path}:code"),
-                SharedString::from(code.to_string()),
-                vec![plain_code_run(code, tokens, opts)],
+                format!("{path}:code").into(),
+                SharedString::from(display_code.to_string()),
+                vec![plain_code_run(display_code, tokens, opts)],
+                Vec::new(),
             )
         }
     } else {
         render_text(
-            format!("{path}:code"),
-            SharedString::from(code.to_string()),
-            vec![plain_code_run(code, tokens, opts)],
+            format!("{path}:code").into(),
+            SharedString::from(display_code.to_string()),
+            vec![plain_code_run(display_code, tokens, opts)],
+            Vec::new(),
         )
     };
 
@@ -913,27 +1247,16 @@ fn render_mermaid_block(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
-    let rendered = mermaid::render_mermaid_svg(code, tokens, opts);
-    div()
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .border_1()
-        .border_color(style::code_block_border_color(tokens))
-        .bg(style::code_block_bg_color(tokens, opts))
-        .rounded(px(tokens.radii.md))
-        .child(render_mermaid_header(
-            code,
-            tokens,
-            opts,
-            code_actions,
-            rendered.as_ref().ok(),
-        ))
-        .child(render_mermaid_body(code, tokens, opts, rendered))
-        .into_any_element()
+    mermaid::MermaidBlock {
+        source: code.to_string(),
+        tokens: *tokens,
+        options: opts.clone(),
+        actions: code_actions.cloned(),
+    }
+    .into_any_element()
 }
 
-fn render_mermaid_header(
+pub(crate) fn render_mermaid_header(
     code: &str,
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
@@ -1014,7 +1337,7 @@ fn render_mermaid_zoom_action(
         .into_any_element()
 }
 
-fn render_mermaid_body(
+pub(crate) fn render_mermaid_body(
     code: &str,
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
@@ -1095,16 +1418,24 @@ fn render_code_block_shell(
         ))
         .child(
             div()
+                .id("markdown-code-body")
                 .w_full()
                 .min_w_0()
-                // Keep the code body bound to the markdown column. GPUI's
-                // horizontal scroller can treat normal sidebar wheel input as
-                // horizontal movement and leave code blocks offset.
+                .whitespace_nowrap()
+                .restrict_scroll_to_axis()
+                .overflow_x_scrollbar()
                 .p(px(opts.code_block_padding))
                 .text_size(style::code_font_size(opts))
+                .line_height(relative(1.5))
                 .text_color(style::text_color(tokens))
                 .font(style::code_font(opts))
-                .child(code_element),
+                .child(
+                    if let (Some(sync), Some(span)) = (&opts.scroll_sync, opts.code_source) {
+                        sync.wrap(span, code_element)
+                    } else {
+                        code_element
+                    },
+                ),
         )
 }
 
@@ -1116,6 +1447,7 @@ fn render_code_block_header(
     code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
     div()
+        .line_height(relative(1.3))
         .w_full()
         .min_w_0()
         .flex()
@@ -1273,20 +1605,14 @@ fn render_blockquote_with_code_actions(
     div()
         .flex()
         .flex_row()
-        .child(
-            // Left border strip
-            div()
-                .w(px(opts.blockquote_border_width))
-                .bg(accent)
-                .rounded(px(tokens.radii.sm))
-                .flex_shrink_0(),
-        )
+        .bg(style::code_bg_color(tokens, opts))
+        .border_l(px(opts.blockquote_border_width))
+        .border_color(accent)
+        .rounded(px(tokens.radii.sm))
         .child(
             div()
                 .flex_1()
                 .pl(px(opts.list_indent))
-                .bg(style::code_bg_color(tokens, opts))
-                .rounded(px(tokens.radii.sm))
                 .when_some(kind, |content, kind| {
                     content.child(render_callout_label(kind, accent, tokens, opts))
                 })
@@ -1307,25 +1633,25 @@ fn render_selectable_blockquote(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     let accent = callout_color(kind, tokens);
     div()
         .flex()
         .flex_row()
-        .child(
-            div()
-                .w(px(opts.blockquote_border_width))
-                .bg(accent)
-                .rounded(px(tokens.radii.sm))
-                .flex_shrink_0(),
-        )
+        .bg(style::code_bg_color(tokens, opts))
+        .border_l(px(opts.blockquote_border_width))
+        .border_color(accent)
+        .rounded(px(tokens.radii.sm))
         .child(
             div()
                 .flex_1()
                 .pl(px(opts.list_indent))
-                .bg(style::code_bg_color(tokens, opts))
-                .rounded(px(tokens.radii.sm))
                 .when_some(kind, |content, kind| {
                     content.child(render_callout_label(kind, accent, tokens, opts))
                 })
@@ -1384,107 +1710,104 @@ fn callout_color(kind: Option<CalloutKind>, tokens: &ThemeTokens) -> Hsla {
 // ─── table ──────────────────────────────────────────────────────────────
 
 fn render_table(
-    headers: &[Vec<Inline>],
+    headers: &[Vec<Block>],
     alignments: &[TableAlignment],
-    rows: &[Vec<Vec<Inline>>],
+    rows: &[Vec<Vec<Block>>],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
 ) -> AnyElement {
-    let col_count = table_column_count(headers, rows);
-    let column_widths = table_column_widths(headers, rows, col_count);
+    render_selectable_table(
+        headers,
+        alignments,
+        rows,
+        tokens,
+        opts,
+        "table",
+        &mut plain_text_element,
+    )
+}
 
-    // Approximate Tauri/browser table auto-layout without letting one long cell
-    // define the whole table width. Short label columns stay compact while
-    // content-heavy columns receive a larger relative share.
-    let has_body_rows = !rows.is_empty();
-    let header_row = div()
-        .w_full()
-        .min_w(px(0.0))
-        .flex()
-        .flex_row()
-        .overflow_hidden()
-        .bg(style::table_header_bg(tokens))
-        .border_b_1()
-        .border_color(style::table_border_color(tokens))
-        // GPUI can paint row backgrounds outside the parent radius. Round the
-        // painted rows themselves so table corners match Tauri clipping.
-        .rounded_t(px(tokens.radii.sm))
-        .when(!has_body_rows, |row| row.rounded_b(px(tokens.radii.sm)))
-        .children((0..col_count).map(|ci| {
-            let cell: &[Inline] = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
-            div()
-                .w(relative(column_widths[ci]))
-                .flex_shrink_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_normal()
-                .p(px(tokens.spacing.two))
-                .text_align(table_alignment_text_align(alignment_for_column(
-                    alignments, ci,
-                )))
-                .font_weight(FontWeight::BOLD)
-                .text_color(style::heading_color(tokens))
-                .child(render_styled_inlines(cell, tokens, opts))
-        }));
-
-    let body_rows = rows.iter().enumerate().map(|(ri, row)| {
-        let is_last = ri + 1 == rows.len();
-        div()
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_row()
-            .overflow_hidden()
-            .when(!is_last, |row| {
-                row.border_b_1()
-                    .border_color(style::table_border_color(tokens))
+fn plain_text_element(
+    key: MarkdownTextFragmentId,
+    text: SharedString,
+    runs: Vec<TextRun>,
+    links: Vec<MarkdownTextLink>,
+) -> AnyElement {
+    let styled = StyledText::new(text).with_runs(runs);
+    if links.is_empty() {
+        styled.into_any_element()
+    } else {
+        let ranges = links.iter().map(|link| link.range.clone()).collect();
+        gpui::InteractiveText::new(SharedString::from(key.key), styled)
+            .on_click(ranges, move |index, window, cx| {
+                (links[index].open)(window, cx)
             })
-            .when(is_last, |row| row.rounded_b(px(tokens.radii.sm)))
-            .children((0..col_count).map(|ci| {
-                let cell: &[Inline] = row.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
-                div()
-                    .w(relative(column_widths[ci]))
-                    .flex_shrink_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_normal()
-                    .p(px(tokens.spacing.two))
-                    .text_align(table_alignment_text_align(alignment_for_column(
-                        alignments, ci,
-                    )))
-                    .text_color(style::text_color(tokens))
-                    .child(render_styled_inlines(cell, tokens, opts))
-            }))
-    });
+            .into_any_element()
+    }
+}
 
+fn render_table_cell(
+    blocks: &[Block],
+    header: bool,
+    path: &str,
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
+) -> AnyElement {
     div()
-        .w_full()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .border_1()
-        .border_color(style::table_border_color(tokens))
-        .rounded(px(tokens.radii.sm))
-        .child(header_row)
-        .children(body_rows)
+        .flex()
+        .flex_col()
+        .gap(px(opts.block_gap * 0.5))
+        .children(blocks.iter().enumerate().map(|(index, block)| {
+            let key = format!("{path}:{index}");
+            div()
+                .id(SharedString::from(key.clone()))
+                .min_w_0()
+                .child(match block.unlocated() {
+                    Block::Paragraph { inlines } => render_selectable_inlines_with_style(
+                        &key,
+                        inlines,
+                        tokens,
+                        opts,
+                        FlatRunStyle {
+                            semibold: header,
+                            ..Default::default()
+                        },
+                        render_text,
+                    ),
+                    _ => render_selectable_block(block, tokens, opts, None, &key, render_text),
+                })
+        }))
         .into_any_element()
 }
 
 fn render_selectable_table(
-    headers: &[Vec<Inline>],
+    headers: &[Vec<Block>],
     alignments: &[TableAlignment],
-    rows: &[Vec<Vec<Inline>>],
+    rows: &[Vec<Vec<Block>>],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     let col_count = table_column_count(headers, rows);
     let column_widths = table_column_widths(headers, rows, col_count);
+    let min_width = table_min_width(headers, rows, &column_widths, tokens, opts);
 
-    // Keep selectable markdown tables on the same shrink contract as normal
-    // tables; selection anchors should not make cells use intrinsic width.
+    // Both rendering paths share minimum widths so selection does not alter table layout.
     let has_body_rows = !rows.is_empty();
     let header_row = div()
+        .id("table-header")
         .w_full()
         .min_w(px(0.0))
         .flex()
@@ -1498,30 +1821,46 @@ fn render_selectable_table(
         .rounded_t(px(tokens.radii.sm))
         .when(!has_body_rows, |row| row.rounded_b(px(tokens.radii.sm)))
         .children((0..col_count).map(|ci| {
-            let cell: &[Inline] = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+            let cell: &[Block] = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
             div()
+                .id(("table-cell", ci))
                 .w(relative(column_widths[ci]))
                 .flex_shrink_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .whitespace_normal()
-                .p(px(tokens.spacing.two))
+                .px(px(10.0))
+                .py(px(5.0))
                 .text_align(table_alignment_text_align(alignment_for_column(
                     alignments, ci,
                 )))
-                .font_weight(FontWeight::BOLD)
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(style::heading_color(tokens))
-                .child(render_selectable_inlines(
-                    &format!("{path}:th:{ci}"),
+                .child(render_table_cell(
                     cell,
+                    true,
+                    &format!("{path}:th:{ci}"),
                     tokens,
                     opts,
                     render_text,
                 ))
         }));
 
+    let header_row = header_row.into_any_element();
+    let header_row = if let (Some(sync), Some(span)) = (
+        &opts.scroll_sync,
+        headers
+            .first()
+            .and_then(|cell| cell.first())
+            .and_then(Block::source_span),
+    ) {
+        sync.wrap(span, header_row)
+    } else {
+        header_row
+    };
     let body_rows = rows.iter().enumerate().map(|(ri, row)| {
-        div()
+        let element = div()
+            .id(("table-row", ri))
             .w_full()
             .min_w(px(0.0))
             .flex()
@@ -1535,41 +1874,90 @@ fn render_selectable_table(
                 row.rounded_b(px(tokens.radii.sm))
             })
             .children((0..col_count).map(|ci| {
-                let cell: &[Inline] = row.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+                let cell: &[Block] = row.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
                 div()
+                    .id(("table-cell", ci))
                     .w(relative(column_widths[ci]))
                     .flex_shrink_1()
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_normal()
-                    .p(px(tokens.spacing.two))
+                    .px(px(10.0))
+                    .py(px(5.0))
                     .text_align(table_alignment_text_align(alignment_for_column(
                         alignments, ci,
                     )))
                     .text_color(style::text_color(tokens))
-                    .child(render_selectable_inlines(
-                        &format!("{path}:td:{ri}:{ci}"),
+                    .child(render_table_cell(
                         cell,
+                        false,
+                        &format!("{path}:td:{ri}:{ci}"),
                         tokens,
                         opts,
                         render_text,
                     ))
             }))
+            .into_any_element();
+        if let (Some(sync), Some(span)) = (
+            &opts.scroll_sync,
+            row.first()
+                .and_then(|cell| cell.first())
+                .and_then(Block::source_span),
+        ) {
+            sync.wrap(span, element)
+        } else {
+            element
+        }
     });
 
     div()
+        .id(SharedString::from(format!("markdown-table:{path}")))
+        .text_size(style::body_font_size(opts))
+        .font(style::body_font(opts))
+        .line_height(relative(style::BODY_LINE_HEIGHT))
         .w_full()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .border_1()
-        .border_color(style::table_border_color(tokens))
-        .rounded(px(tokens.radii.sm))
-        .child(header_row)
-        .children(body_rows)
+        .min_w_0()
+        .restrict_scroll_to_axis()
+        .overflow_x_scrollbar()
+        .child(
+            div()
+                .w_full()
+                .min_w(px(min_width))
+                .border_1()
+                .border_color(style::table_border_color(tokens))
+                .rounded(px(tokens.radii.sm))
+                .overflow_hidden()
+                .child(header_row)
+                .children(body_rows),
+        )
         .into_any_element()
 }
 
-fn table_column_count(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> usize {
+fn table_min_width(
+    headers: &[Vec<Block>],
+    rows: &[Vec<Vec<Block>>],
+    fractions: &[f32],
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+) -> f32 {
+    fractions
+        .iter()
+        .enumerate()
+        .map(|(index, fraction)| {
+            let width = headers
+                .get(index)
+                .into_iter()
+                .chain(rows.iter().filter_map(|row| row.get(index)))
+                .map(|cell| table_cell_text_width(cell))
+                .fold(0.0_f32, f32::max);
+            let cell_width =
+                width.clamp(8.0, 40.0) * opts.base_font_size * 0.55 + tokens.spacing.two * 2.0;
+            cell_width / fraction
+        })
+        .fold(0.0, f32::max)
+}
+
+fn table_column_count(headers: &[Vec<Block>], rows: &[Vec<Vec<Block>>]) -> usize {
     headers
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0))
@@ -1577,8 +1965,8 @@ fn table_column_count(headers: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> usi
 }
 
 fn table_column_widths(
-    headers: &[Vec<Inline>],
-    rows: &[Vec<Vec<Inline>>],
+    headers: &[Vec<Block>],
+    rows: &[Vec<Vec<Block>>],
     col_count: usize,
 ) -> Vec<f32> {
     let mut weights = vec![6.0_f32; col_count.max(1)];
@@ -1597,8 +1985,40 @@ fn table_column_widths(
     weights.into_iter().map(|weight| weight / total).collect()
 }
 
-fn table_cell_text_width(inlines: &[Inline]) -> f32 {
-    inlines.iter().map(inline_text_width).sum::<usize>().max(1) as f32
+fn table_cell_text_width(blocks: &[Block]) -> f32 {
+    blocks
+        .iter()
+        .map(|block| match block {
+            Block::Located { block, .. } => {
+                table_cell_text_width(std::slice::from_ref(block.as_ref()))
+            }
+            Block::Heading { inlines, .. } | Block::Paragraph { inlines } => {
+                inlines.iter().map(inline_text_width).sum::<usize>() as f32
+            }
+            Block::Html(text) | Block::CodeBlock { code: text, .. } => {
+                text.lines()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0) as f32
+            }
+            Block::HtmlContainer { blocks, .. }
+            | Block::Blockquote { blocks, .. }
+            | Block::Details { blocks, .. } => table_cell_text_width(blocks),
+            Block::OrderedList { items, .. } | Block::UnorderedList { items } => items
+                .iter()
+                .map(|item| {
+                    (item.inlines.iter().map(inline_text_width).sum::<usize>() as f32)
+                        .max(table_cell_text_width(&item.children))
+                })
+                .fold(0.0, f32::max),
+            Block::Table { headers, rows, .. } => headers
+                .iter()
+                .chain(rows.iter().flatten())
+                .map(|cell| table_cell_text_width(cell))
+                .sum(),
+            Block::HorizontalRule => 1.0,
+        })
+        .fold(1.0, f32::max)
 }
 
 fn inline_text_width(inline: &Inline) -> usize {
@@ -1649,6 +2069,7 @@ fn render_unordered_list(
     items: &[ListItem],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
+    code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
     div()
         .w_full()
@@ -1657,11 +2078,13 @@ fn render_unordered_list(
         .flex_col()
         .gap(px(tokens.spacing.one))
         .pl(px(opts.list_indent))
-        .children(
-            items
-                .iter()
-                .map(|item| render_list_item("•", item, tokens, opts)),
-        )
+        .children(items.iter().enumerate().map(|(index, item)| {
+            div()
+                .id(("markdown-list-item", index))
+                .w_full()
+                .min_w_0()
+                .child(render_list_item("•", item, tokens, opts, code_actions))
+        }))
         .into_any_element()
 }
 
@@ -1670,6 +2093,7 @@ fn render_ordered_list(
     items: &[ListItem],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
+    code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
     div()
         .w_full()
@@ -1680,7 +2104,11 @@ fn render_ordered_list(
         .pl(px(opts.list_indent))
         .children(items.iter().enumerate().map(|(i, item)| {
             let marker = format!("{}.", start + i as u64);
-            render_list_item(&marker, item, tokens, opts)
+            div()
+                .id(("markdown-list-item", i))
+                .w_full()
+                .min_w_0()
+                .child(render_list_item(&marker, item, tokens, opts, code_actions))
         }))
         .into_any_element()
 }
@@ -1691,7 +2119,12 @@ fn render_selectable_unordered_list(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     div()
         .w_full()
@@ -1721,7 +2154,12 @@ fn render_selectable_ordered_list(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     div()
         .w_full()
@@ -1750,6 +2188,7 @@ fn render_list_item(
     item: &ListItem,
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
+    code_actions: Option<&MarkdownCodeBlockActions>,
 ) -> AnyElement {
     // Task list checkbox overrides the bullet/number marker when enabled.
     let effective_marker = if opts.enable_task_lists {
@@ -1768,13 +2207,15 @@ fn render_list_item(
         .flex()
         .flex_col()
         .text_size(style::body_font_size(opts))
-        .child(
-            div()
+        .child({
+            let header = div()
                 .flex()
                 .flex_row()
                 .gap(px(tokens.spacing.two))
                 .child(
                     div()
+                        .w(px(opts.list_indent))
+                        .flex_none()
                         .text_color(style::muted_color(tokens))
                         .child(SharedString::from(effective_marker.to_string())),
                 )
@@ -1785,17 +2226,27 @@ fn render_list_item(
                         .whitespace_normal()
                         .text_color(style::text_color(tokens))
                         .child(render_styled_inlines(&item.inlines, tokens, opts)),
-                ),
-        );
+                )
+                .into_any_element();
+            if let (Some(sync), Some(span)) = (&opts.scroll_sync, item.source) {
+                sync.wrap(span, header)
+            } else {
+                header
+            }
+        });
 
     // Render nested child blocks if present.
     if !item.children.is_empty() {
         col = col.child(
-            div().flex().flex_col().mt(px(tokens.spacing.one)).children(
-                item.children
-                    .iter()
-                    .map(|block| render_block(block, tokens, opts)),
-            ),
+            div()
+                .mt(px(opts.block_gap))
+                .pl(px(opts.list_indent + tokens.spacing.two))
+                .child(render_blocks_with_code_actions(
+                    &item.children,
+                    tokens,
+                    opts,
+                    code_actions,
+                )),
         );
     }
 
@@ -1809,7 +2260,12 @@ fn render_selectable_list_item(
     opts: &MarkdownOptions,
     code_actions: Option<&MarkdownCodeBlockActions>,
     path: &str,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
     let effective_marker = if opts.enable_task_lists {
         match item.checked {
@@ -1827,13 +2283,15 @@ fn render_selectable_list_item(
         .flex()
         .flex_col()
         .text_size(style::body_font_size(opts))
-        .child(
-            div()
+        .child({
+            let header = div()
                 .flex()
                 .flex_row()
                 .gap(px(tokens.spacing.two))
                 .child(
                     div()
+                        .w(px(opts.list_indent))
+                        .flex_none()
                         .text_color(style::muted_color(tokens))
                         .child(SharedString::from(effective_marker.to_string())),
                 )
@@ -1850,22 +2308,34 @@ fn render_selectable_list_item(
                             opts,
                             render_text,
                         )),
-                ),
-        );
+                )
+                .into_any_element();
+            if let (Some(sync), Some(span)) = (&opts.scroll_sync, item.source) {
+                sync.wrap(span, header)
+            } else {
+                header
+            }
+        });
 
     if !item.children.is_empty() {
-        col = col.child(div().flex().flex_col().mt(px(tokens.spacing.one)).children(
-            item.children.iter().enumerate().map(|(index, block)| {
-                render_selectable_block(
-                    block,
-                    tokens,
-                    opts,
-                    code_actions,
-                    &format!("{path}:child:{index}"),
-                    render_text,
-                )
-            }),
-        ));
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(opts.block_gap))
+                .mt(px(opts.block_gap))
+                .pl(px(opts.list_indent + tokens.spacing.two))
+                .children(item.children.iter().enumerate().map(|(index, block)| {
+                    render_selectable_block(
+                        block,
+                        tokens,
+                        opts,
+                        code_actions,
+                        &format!("{path}:child:{index}"),
+                        render_text,
+                    )
+                })),
+        );
     }
 
     col.into_any_element()
@@ -1899,6 +2369,9 @@ fn render_footnotes(
         .border_color(style::divider_color(tokens))
         .children(footnotes.iter().enumerate().map(|(index, footnote)| {
             div()
+                .id(("markdown-footnote", index))
+                .relative()
+                .child(heading_anchor(&format!("fn:{}", index + 1), opts))
                 .flex()
                 .flex_row()
                 .items_start()
@@ -1908,7 +2381,14 @@ fn render_footnotes(
                     div()
                         .min_w(px(opts.list_indent))
                         .text_color(style::accent_color(tokens))
-                        .child(SharedString::from(format!("[{}]", index + 1))),
+                        .child(render_styled_inlines(
+                            &[Inline::Link {
+                                text: vec![Inline::Text(format!("[{}] ↩", index + 1))],
+                                url: format!("#fnback:{}", index + 1),
+                            }],
+                            tokens,
+                            opts,
+                        )),
                 )
                 .child(
                     div()
@@ -1936,39 +2416,35 @@ fn render_styled_inlines(
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
 ) -> AnyElement {
-    let mut flat: Vec<FlatRun> = Vec::new();
-    collect_runs(inlines, FlatRunStyle::default(), &mut flat);
+    render_styled_inlines_with_style(inlines, tokens, opts, FlatRunStyle::default())
+}
 
-    if flat.is_empty() {
-        return div().into_any_element();
-    }
-
-    // If any run contains an image, use a container with mixed children.
-    let has_images_math_or_links = flat
-        .iter()
-        .any(|r| r.image_url.is_some() || r.math_latex.is_some() || r.link_url.is_some());
-
-    if has_images_math_or_links {
-        return render_mixed_inlines(&flat, tokens, opts);
-    }
-
-    // Fast path: all text, no images — single StyledText.
-    let mut text = String::new();
-    let mut runs: Vec<TextRun> = Vec::new();
-
-    for run in &flat {
-        let start = text.len();
-        text.push_str(&run.text);
-        let len = text.len() - start;
-        if len == 0 {
-            continue;
-        }
-        runs.push(text_run_for_flat(run, len, tokens, opts));
-    }
-
-    StyledText::new(SharedString::from(text))
-        .with_runs(runs)
-        .into_any_element()
+fn render_styled_inlines_with_style(
+    inlines: &[Inline],
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+    initial_style: FlatRunStyle,
+) -> AnyElement {
+    render_selectable_inlines_with_style(
+        "inline",
+        inlines,
+        tokens,
+        opts,
+        initial_style,
+        &mut |key, text, runs, links| {
+            let styled = StyledText::new(text).with_runs(runs);
+            if links.is_empty() {
+                styled.into_any_element()
+            } else {
+                let ranges = links.iter().map(|link| link.range.clone()).collect();
+                gpui::InteractiveText::new(SharedString::from(key.key), styled)
+                    .on_click(ranges, move |index, window, cx| {
+                        (links[index].open)(window, cx)
+                    })
+                    .into_any_element()
+            }
+        },
+    )
 }
 
 fn render_selectable_inlines(
@@ -1976,238 +2452,383 @@ fn render_selectable_inlines(
     inlines: &[Inline],
     tokens: &ThemeTokens,
     opts: &MarkdownOptions,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
 ) -> AnyElement {
-    let mut flat: Vec<FlatRun> = Vec::new();
-    collect_runs(inlines, FlatRunStyle::default(), &mut flat);
+    render_selectable_inlines_with_style(
+        key,
+        inlines,
+        tokens,
+        opts,
+        FlatRunStyle::default(),
+        render_text,
+    )
+}
 
-    if flat.is_empty() {
-        return div().into_any_element();
-    }
-
-    let has_images_math_or_links = flat
+fn render_selectable_inlines_with_style(
+    key: &str,
+    inlines: &[Inline],
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+    initial_style: FlatRunStyle,
+    render_text: &mut impl FnMut(
+        MarkdownTextFragmentId,
+        SharedString,
+        Vec<TextRun>,
+        Vec<MarkdownTextLink>,
+    ) -> AnyElement,
+) -> AnyElement {
+    let mut flat = Vec::new();
+    collect_runs(inlines, initial_style, &mut flat);
+    let anchors = flat
         .iter()
-        .any(|run| run.image_url.is_some() || run.math_latex.is_some() || run.link_url.is_some());
-    if has_images_math_or_links {
-        return render_selectable_mixed_inlines(key, &flat, tokens, opts, render_text);
+        .filter_map(|run| run.anchor.clone())
+        .collect::<Vec<_>>();
+    if !flat
+        .iter()
+        .any(|run| run.image_url.is_some() || run.math_latex.is_some())
+    {
+        let (text, runs, links) = flat_text(&flat, tokens, opts);
+        return with_inline_anchors(
+            render_text(key.to_string().into(), text, runs, links),
+            anchors,
+            opts,
+        );
     }
+    let breaks = inline_break_offsets(&flat);
+    let mut logical_cursor = 0;
+    let mut children = Vec::new();
+    let mut text = Vec::new();
+    let mut part = 0;
+    let previous_hard_break = std::cell::Cell::new(false);
+    let mut flush = |text: &mut Vec<FlatRun>,
+                     children: &mut Vec<InlineFlowChild>,
+                     logical_cursor: &mut usize| {
+        if text.is_empty() {
+            return;
+        }
+        let (value, runs, links) = flat_text(text, tokens, opts);
+        let mut start = 0;
+        let ends = breaks
+            .range((*logical_cursor + 1)..(*logical_cursor + value.len()))
+            .map(|offset| offset - *logical_cursor)
+            .chain(std::iter::once(value.len()))
+            .collect::<Vec<_>>();
+        for end in ends {
+            let segment = &value[start..end];
+            let hard_break = segment.ends_with('\n');
+            let visible_end = if hard_break { end - 1 } else { end };
+            let fragment = MarkdownTextFragmentId {
+                key: format!("{key}:text:{part}"),
+                join_previous: part > 0 && !previous_hard_break.get(),
+            };
+            children.push(InlineFlowChild {
+                element: render_text(
+                    fragment,
+                    SharedString::from(&value[start..visible_end]),
+                    inline_runs_slice(&runs, start..visible_end),
+                    links
+                        .iter()
+                        .filter_map(|link| {
+                            let a = link.range.start.max(start);
+                            let b = link.range.end.min(visible_end);
+                            (a < b).then(|| MarkdownTextLink {
+                                range: a - start..b - start,
+                                open: link.open.clone(),
+                            })
+                        })
+                        .collect(),
+                ),
+                depth: None,
+                block: false,
+                break_before: breaks.contains(&(*logical_cursor + start)),
+                hard_break,
+            });
+            previous_hard_break.set(hard_break);
+            start = end;
+            part += 1;
+        }
+        *logical_cursor += value.len();
+        text.clear();
+    };
+    for (index, run) in flat.into_iter().enumerate() {
+        if let Some(url) = &run.image_url {
+            flush(&mut text, &mut children, &mut logical_cursor);
+            let image = render_image(url, &run.text, run.image_dimensions, opts);
+            let image = if let Some(target) = run.link_url {
+                let options = opts.clone();
+                div()
+                    .id(SharedString::from(format!("{key}:image:{index}")))
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        open_markdown_link(&target, &options, window, cx);
+                        cx.stop_propagation();
+                    })
+                    .child(image)
+                    .into_any_element()
+            } else {
+                image
+            };
+            children.push(InlineFlowChild {
+                element: image,
+                depth: Some(0.0),
+                block: false,
+                break_before: breaks.contains(&logical_cursor),
+                hard_break: false,
+            });
+            logical_cursor += '\u{fffc}'.len_utf8();
+        } else if let Some(latex) = &run.math_latex {
+            flush(&mut text, &mut children, &mut logical_cursor);
+            let depth = math::render_math_svg(latex, run.math_display, tokens, opts)
+                .ok()
+                .map(|image| image.baseline_depth);
+            children.push(InlineFlowChild {
+                element: render_math(latex, run.math_display, tokens, opts),
+                depth,
+                block: run.math_display,
+                break_before: run.math_display || breaks.contains(&logical_cursor),
+                hard_break: run.math_display,
+            });
+            if run.math_display {
+                previous_hard_break.set(true);
+            }
+            logical_cursor += '\u{fffc}'.len_utf8();
+        } else {
+            text.push(run);
+        }
+    }
+    flush(&mut text, &mut children, &mut logical_cursor);
+    let content = InlineFlow {
+        children,
+        font: style::body_font(opts),
+    }
+    .into_any_element();
+    with_inline_anchors(content, anchors, opts)
+}
 
+fn with_inline_anchors(
+    content: AnyElement,
+    anchors: Vec<String>,
+    opts: &MarkdownOptions,
+) -> AnyElement {
+    if anchors.is_empty() {
+        content
+    } else {
+        div()
+            .relative()
+            .children(anchors.iter().map(|id| heading_anchor(id, opts)))
+            .child(content)
+            .into_any_element()
+    }
+}
+
+#[derive(IntoElement)]
+struct InlineFlow {
+    children: Vec<InlineFlowChild>,
+    font: Font,
+}
+
+impl gpui::RenderOnce for InlineFlow {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let line_height = window.pixel_snap(
+            text_style
+                .line_height
+                .to_pixels(font_size.into(), window.rem_size()),
+        );
+        let font_id = window.text_system().resolve_font(&self.font);
+        let text_depth = inline_text_baseline_depth(
+            f32::from(line_height),
+            f32::from(window.text_system().ascent(font_id, font_size)),
+            f32::from(window.text_system().descent(font_id, font_size)),
+        );
+        let depth = self
+            .children
+            .iter()
+            .filter(|child| !child.block)
+            .filter_map(|child| child.depth)
+            .fold(text_depth, f32::max);
+        let mut groups: Vec<Vec<InlineFlowChild>> = Vec::new();
+        for child in self.children {
+            let starts_line = groups
+                .last()
+                .and_then(|group| group.last())
+                .is_some_and(|child| child.hard_break);
+            if groups.is_empty() || child.block || child.break_before || starts_line {
+                groups.push(Vec::new());
+            }
+            groups.last_mut().unwrap().push(child);
+        }
+        // Flex cannot infer the TeX baseline from an SVG. Align its measured descent
+        // with the surrounding font rather than treating the image bottom as a baseline.
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .items_end()
+            .when(text_style.text_align == TextAlign::Center, |row| {
+                row.justify_center()
+            })
+            .when(text_style.text_align == TextAlign::Right, |row| {
+                row.justify_end()
+            })
+            .children(groups.into_iter().flat_map(|group| {
+                let hard_break = group.last().is_some_and(|child| child.hard_break);
+                let block = group.first().is_some_and(|child| child.block);
+                let element = div()
+                    .min_w_0()
+                    .max_w_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_end()
+                    .when(block, |row| row.w_full())
+                    .children(group.into_iter().map(|child| {
+                        div()
+                            .min_w_0()
+                            .max_w_full()
+                            .when(child.block, |piece| piece.w_full())
+                            .pb(px(if child.block {
+                                0.0
+                            } else {
+                                (depth - child.depth.unwrap_or(text_depth)).max(0.0)
+                            }))
+                            .child(child.element)
+                    }))
+                    .into_any_element();
+                std::iter::once(element)
+                    .chain(hard_break.then(|| div().w_full().h(px(0.0)).into_any_element()))
+            }))
+    }
+}
+
+struct InlineFlowChild {
+    element: AnyElement,
+    depth: Option<f32>,
+    hard_break: bool,
+    block: bool,
+    break_before: bool,
+}
+
+fn inline_runs_slice(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+    let mut cursor = 0;
+    runs.iter()
+        .filter_map(|run| {
+            let start = cursor;
+            cursor += run.len;
+            let a = start.max(range.start);
+            let b = cursor.min(range.end);
+            (a < b).then(|| TextRun {
+                len: b - a,
+                ..run.clone()
+            })
+        })
+        .collect()
+}
+
+fn inline_break_offsets(flat: &[FlatRun]) -> std::collections::BTreeSet<usize> {
+    let logical_text = flat
+        .iter()
+        .map(|run| {
+            if run.image_url.is_some() || run.math_latex.is_some() {
+                "\u{fffc}"
+            } else {
+                run.text.as_str()
+            }
+        })
+        .collect::<String>();
+    unicode_linebreak::linebreaks(&logical_text)
+        .map(|(offset, _)| offset)
+        .collect()
+}
+
+fn inline_text_baseline_depth(line_height: f32, ascent: f32, descent: f32) -> f32 {
+    // Native macOS font metrics have a negative descent, whereas GPUI's shaped
+    // lines paint with a positive descent. Match that convention and line leading.
+    (line_height - ascent + descent.abs()) / 2.0
+}
+
+fn flat_text(
+    flat: &[FlatRun],
+    tokens: &ThemeTokens,
+    opts: &MarkdownOptions,
+) -> (SharedString, Vec<TextRun>, Vec<MarkdownTextLink>) {
     let mut text = String::new();
-    let mut runs: Vec<TextRun> = Vec::new();
-    for run in &flat {
+    let mut runs = Vec::new();
+    let mut links = Vec::new();
+    for run in flat {
         let start = text.len();
         text.push_str(&run.text);
-        let len = text.len() - start;
-        if len == 0 {
+        if start == text.len() {
             continue;
         }
-        runs.push(text_run_for_flat(run, len, tokens, opts));
-    }
-
-    render_text(key.to_string(), SharedString::from(text), runs)
-}
-
-/// Render a sequence of flat runs that contains at least one image or formula.
-/// Text segments are grouped into `StyledText` elements; images and RaTeX
-/// formulas are rendered as GPUI image nodes.
-fn render_mixed_inlines(
-    flat: &[FlatRun],
-    tokens: &ThemeTokens,
-    opts: &MarkdownOptions,
-) -> AnyElement {
-    if flat.iter().any(|run| run.math_display) {
-        return render_display_mixed_inlines(flat, tokens, opts);
-    }
-
-    let mut children: Vec<AnyElement> = Vec::new();
-    let mut text_buf = String::new();
-    let mut run_buf: Vec<TextRun> = Vec::new();
-
-    let flush_text =
-        |text_buf: &mut String, run_buf: &mut Vec<TextRun>, children: &mut Vec<AnyElement>| {
-            if !text_buf.is_empty() {
-                children.push(
-                    StyledText::new(SharedString::from(std::mem::take(text_buf)))
-                        .with_runs(std::mem::take(run_buf))
-                        .into_any_element(),
-                );
-            }
-        };
-
-    for run in flat {
-        if let Some(ref url) = run.image_url {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_image(url, opts));
-        } else if let Some(ref latex) = run.math_latex {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_math(latex, false, tokens, opts));
-        } else if let Some(ref url) = run.link_url {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_link_run(run, url, tokens, opts));
-        } else {
-            let start = text_buf.len();
-            text_buf.push_str(&run.text);
-            let len = text_buf.len() - start;
-            if len > 0 {
-                run_buf.push(text_run_for_flat(run, len, tokens, opts));
-            }
+        runs.push(text_run_for_flat(run, text.len() - start, tokens, opts));
+        if let Some(url) = &run.link_url {
+            let url = url.clone();
+            let opts = opts.clone();
+            links.push(MarkdownTextLink {
+                range: start..text.len(),
+                open: Rc::new(move |window, cx| open_markdown_link(&url, &opts, window, cx)),
+            });
         }
     }
-
-    flush_text(&mut text_buf, &mut run_buf, &mut children);
-
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap(px(0.0))
-        .children(children)
-        .into_any_element()
+    (text.into(), runs, links)
 }
 
-fn render_selectable_mixed_inlines(
-    key: &str,
-    flat: &[FlatRun],
-    tokens: &ThemeTokens,
-    opts: &MarkdownOptions,
-    render_text: &mut impl FnMut(String, SharedString, Vec<TextRun>) -> AnyElement,
-) -> AnyElement {
-    if flat.iter().any(|run| run.math_display) {
-        return render_mixed_inlines(flat, tokens, opts);
-    }
-
-    let mut children: Vec<AnyElement> = Vec::new();
-    let mut text_buf = String::new();
-    let mut run_buf: Vec<TextRun> = Vec::new();
-    let mut text_index = 0usize;
-
-    let mut flush_text =
-        |text_buf: &mut String, run_buf: &mut Vec<TextRun>, children: &mut Vec<AnyElement>| {
-            if !text_buf.is_empty() {
-                let text = SharedString::from(std::mem::take(text_buf));
-                let runs = std::mem::take(run_buf);
-                children.push(render_text(format!("{key}:text:{text_index}"), text, runs));
-                text_index = text_index.saturating_add(1);
+fn heading_anchor(id: &str, opts: &MarkdownOptions) -> AnyElement {
+    let id = id.to_string();
+    let navigation = opts.navigation.clone();
+    gpui::canvas(
+        move |bounds, window, cx| {
+            if let Some(navigation) = navigation {
+                navigation.measure(&id, f32::from(bounds.origin.y), window, cx);
             }
-        };
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size(px(0.0))
+    .into_any_element()
+}
 
-    for run in flat {
-        if let Some(ref url) = run.image_url {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_image(url, opts));
-        } else if let Some(ref latex) = run.math_latex {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_math(latex, false, tokens, opts));
-        } else if let Some(ref url) = run.link_url {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_link_run(run, url, tokens, opts));
-        } else {
-            let start = text_buf.len();
-            text_buf.push_str(&run.text);
-            let len = text_buf.len() - start;
-            if len > 0 {
-                run_buf.push(text_run_for_flat(run, len, tokens, opts));
-            }
+fn open_markdown_link(url: &str, opts: &MarkdownOptions, window: &mut Window, cx: &mut App) {
+    if url.starts_with('#') {
+        if let Some(navigation) = &opts.navigation {
+            navigation.open(url, window);
         }
+    } else if let Some(resolved) = resolved_link_url(url, opts) {
+        cx.open_url(&resolved);
     }
-
-    flush_text(&mut text_buf, &mut run_buf, &mut children);
-
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap(px(0.0))
-        .children(children)
-        .into_any_element()
 }
 
-fn render_display_mixed_inlines(
-    flat: &[FlatRun],
-    tokens: &ThemeTokens,
-    opts: &MarkdownOptions,
-) -> AnyElement {
-    let mut children: Vec<AnyElement> = Vec::new();
-    let mut text_buf = String::new();
-    let mut run_buf: Vec<TextRun> = Vec::new();
-
-    let flush_text =
-        |text_buf: &mut String, run_buf: &mut Vec<TextRun>, children: &mut Vec<AnyElement>| {
-            if !text_buf.trim().is_empty() {
-                children.push(
-                    div()
-                        .text_size(style::body_font_size(opts))
-                        .text_color(style::text_color(tokens))
-                        .child(
-                            StyledText::new(SharedString::from(std::mem::take(text_buf)))
-                                .with_runs(std::mem::take(run_buf)),
-                        )
-                        .into_any_element(),
-                );
-            } else {
-                text_buf.clear();
-                run_buf.clear();
-            }
-        };
-
-    for run in flat {
-        if let Some(ref latex) = run.math_latex {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_math(latex, run.math_display, tokens, opts));
-        } else if let Some(ref url) = run.image_url {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_image(url, opts));
-        } else if let Some(ref url) = run.link_url {
-            flush_text(&mut text_buf, &mut run_buf, &mut children);
-            children.push(render_link_run(run, url, tokens, opts));
-        } else {
-            let start = text_buf.len();
-            text_buf.push_str(&run.text);
-            let len = text_buf.len() - start;
-            if len > 0 {
-                run_buf.push(text_run_for_flat(run, len, tokens, opts));
-            }
-        }
+fn resolved_link_url(url: &str, opts: &MarkdownOptions) -> Option<String> {
+    if url.starts_with('#') {
+        return None;
     }
-
-    flush_text(&mut text_buf, &mut run_buf, &mut children);
-
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(opts.block_gap * 0.5))
-        .children(children)
-        .into_any_element()
+    if should_open_link(url, opts) {
+        return Some(url.to_string());
+    }
+    if url_scheme(url).is_some() || url.starts_with("//") {
+        return None;
+    }
+    let base = url::Url::from_directory_path(opts.image_base_dir.as_ref()?).ok()?;
+    let resolved = base.join(url).ok()?;
+    (resolved.scheme() == "file").then(|| resolved.to_string())
 }
 
-fn render_link_run(
-    run: &FlatRun,
+fn render_image(
     url: &str,
-    tokens: &ThemeTokens,
+    alt: &str,
+    dimensions: ImageDimensions,
     opts: &MarkdownOptions,
 ) -> AnyElement {
-    let text_len = run.text.len();
-    let text = SharedString::from(run.text.clone());
-    let link_url = url.to_string();
-    let openable = should_open_link(url, opts);
-    let run = text_run_for_flat(run, text_len, tokens, opts);
-
-    div()
-        .cursor_pointer()
-        .child(StyledText::new(text).with_runs(vec![run]))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            if openable {
-                cx.open_url(&link_url);
-            }
-            cx.stop_propagation();
-        })
-        .into_any_element()
-}
-
-fn render_image(url: &str, opts: &MarkdownOptions) -> AnyElement {
     if !opts.enable_async_images {
         return SharedString::from(format!("[Image: {}]", url)).into_any_element();
     }
@@ -2215,13 +2836,27 @@ fn render_image(url: &str, opts: &MarkdownOptions) -> AnyElement {
         return SharedString::from(format!("[Image: {}]", url)).into_any_element();
     }
 
-    if let Some(path) = image_path_from_url(url, opts) {
-        img(path).max_w(px(opts.max_image_width)).into_any_element()
+    let image = if let Some(path) = image_path_from_url(url, opts) {
+        img(path)
     } else {
         img(url.to_string())
-            .max_w(px(opts.max_image_width))
-            .into_any_element()
-    }
+    };
+    let alt = SharedString::from(alt.to_owned());
+    let image = image
+        .with_fallback(move || alt.clone().into_any_element())
+        .max_w_full()
+        .when_some(dimensions.width, |image, width| match width {
+            ImageLength::Pixels(width) => image.w(px(width)),
+            ImageLength::Percent(width) => image.w(relative(width / 100.0)),
+        })
+        .when_some(dimensions.height, |image, height| image.h(px(height)));
+    div()
+        .max_w_full()
+        .when(dimensions == ImageDimensions::default(), |wrapper| {
+            wrapper.max_w(px(opts.max_image_width))
+        })
+        .child(image)
+        .into_any_element()
 }
 
 fn image_path_from_url(url: &str, opts: &MarkdownOptions) -> Option<PathBuf> {
@@ -2298,14 +2933,24 @@ fn render_math(
         Ok(rendered) => {
             let formula = img(rendered.image)
                 .w(px(rendered.display_width))
-                .max_w(relative(1.0));
+                .h(px(rendered.display_height))
+                .flex_shrink_0();
             if display {
                 div()
+                    .id("markdown-display-math")
                     .w_full()
-                    .flex()
-                    .justify_center()
-                    .py(px(opts.math_display_padding))
-                    .child(formula)
+                    .min_w_0()
+                    .restrict_scroll_to_axis()
+                    .overflow_x_scrollbar()
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w(px(rendered.display_width))
+                            .flex()
+                            .justify_center()
+                            .py(px(opts.math_display_padding))
+                            .child(formula),
+                    )
                     .into_any_element()
             } else {
                 formula.into_any_element()
@@ -2348,6 +2993,9 @@ fn text_run_for_flat(
     } else {
         style::body_font(opts)
     };
+    if run.semibold && !run.bold {
+        font.weight = FontWeight::SEMIBOLD;
+    }
     if let Some(feature_tag) = run.script_position.open_type_feature() {
         // OpenType `subs`/`sups` keeps the run inside one selectable text
         // layout while allowing fonts with native glyphs to shift the baseline.
@@ -2419,6 +3067,7 @@ fn plain_code_run(code: &str, tokens: &ThemeTokens, opts: &MarkdownOptions) -> T
 struct FlatRun {
     text: String,
     bold: bool,
+    semibold: bool,
     italic: bool,
     code: bool,
     link: bool,
@@ -2429,6 +3078,8 @@ struct FlatRun {
     script_position: ScriptPosition,
     /// If set, this run represents an image and should be rendered via `img()`.
     image_url: Option<String>,
+    image_dimensions: ImageDimensions,
+    anchor: Option<String>,
     math_latex: Option<String>,
     math_display: bool,
 }
@@ -2454,6 +3105,7 @@ impl ScriptPosition {
 #[derive(Clone, Copy, Default)]
 struct FlatRunStyle {
     bold: bool,
+    semibold: bool,
     italic: bool,
     code: bool,
     link: bool,
@@ -2470,6 +3122,7 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                 out.push(FlatRun {
                     text: text.clone(),
                     bold: run_style.bold,
+                    semibold: run_style.semibold,
                     italic: run_style.italic,
                     code: run_style.code,
                     link: run_style.link,
@@ -2479,6 +3132,8 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     highlight: run_style.highlight,
                     script_position: run_style.script_position,
                     image_url: None,
+                    image_dimensions: Default::default(),
+                    anchor: None,
                     math_latex: None,
                     math_display: false,
                 });
@@ -2507,6 +3162,7 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                 out.push(FlatRun {
                     text: text.clone(),
                     bold: run_style.bold,
+                    semibold: run_style.semibold,
                     italic: run_style.italic,
                     code: true,
                     link: run_style.link,
@@ -2516,6 +3172,8 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     highlight: run_style.highlight,
                     script_position: run_style.script_position,
                     image_url: None,
+                    image_dimensions: Default::default(),
+                    anchor: None,
                     math_latex: None,
                     math_display: false,
                 });
@@ -2597,10 +3255,15 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     out,
                 );
             }
-            Inline::Image { alt, url } => {
+            Inline::Image {
+                alt,
+                url,
+                dimensions,
+            } => {
                 out.push(FlatRun {
                     text: format!("[{}]", alt),
                     bold: false,
+                    semibold: false,
                     italic: false,
                     code: false,
                     link: false,
@@ -2610,6 +3273,8 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     highlight: false,
                     script_position: ScriptPosition::Normal,
                     image_url: Some(url.clone()),
+                    image_dimensions: *dimensions,
+                    anchor: None,
                     math_latex: None,
                     math_display: false,
                 });
@@ -2618,6 +3283,7 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                 out.push(FlatRun {
                     text: String::new(),
                     bold: false,
+                    semibold: false,
                     italic: false,
                     code: false,
                     link: false,
@@ -2627,23 +3293,30 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     highlight: false,
                     script_position: ScriptPosition::Normal,
                     image_url: None,
+                    image_dimensions: Default::default(),
+                    anchor: None,
                     math_latex: Some(latex.clone()),
                     math_display: *display,
                 });
             }
-            Inline::FootnoteReference { index, .. } => {
+            Inline::FootnoteReference {
+                index, occurrence, ..
+            } => {
                 out.push(FlatRun {
-                    text: format!("[{}]", index),
+                    text: format!("[{index}]"),
                     bold: run_style.bold,
+                    semibold: run_style.semibold,
                     italic: run_style.italic,
                     code: run_style.code,
                     link: true,
-                    link_url: None,
+                    link_url: Some(format!("#fn:{index}:from:{occurrence}")),
                     strikethrough: run_style.strikethrough,
                     underline: run_style.underline,
                     highlight: run_style.highlight,
                     script_position: run_style.script_position,
                     image_url: None,
+                    image_dimensions: Default::default(),
+                    anchor: Some(format!("fnref:{index}:{occurrence}")),
                     math_latex: None,
                     math_display: false,
                 });
@@ -2652,6 +3325,7 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                 out.push(FlatRun {
                     text: "\n".into(),
                     bold: run_style.bold,
+                    semibold: run_style.semibold,
                     italic: run_style.italic,
                     code: run_style.code,
                     link: run_style.link,
@@ -2661,6 +3335,8 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     highlight: run_style.highlight,
                     script_position: run_style.script_position,
                     image_url: None,
+                    image_dimensions: Default::default(),
+                    anchor: None,
                     math_latex: None,
                     math_display: false,
                 });
@@ -2669,6 +3345,7 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                 out.push(FlatRun {
                     text: html.clone(),
                     bold: run_style.bold,
+                    semibold: run_style.semibold,
                     italic: run_style.italic,
                     code: run_style.code,
                     link: run_style.link,
@@ -2678,6 +3355,8 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
                     highlight: run_style.highlight,
                     script_position: run_style.script_position,
                     image_url: None,
+                    image_dimensions: Default::default(),
+                    anchor: None,
                     math_latex: None,
                     math_display: false,
                 });
@@ -2688,43 +3367,266 @@ fn collect_runs(inlines: &[Inline], run_style: FlatRunStyle, out: &mut Vec<FlatR
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn image_path_resolution_uses_local_paths_and_defers_remote_uris() {
-        let opts = MarkdownOptions::default();
-        for (url, expected) in [
-            ("images/logo.png", Some("images/logo.png")),
-            ("file:///tmp/logo.png", Some("/tmp/logo.png")),
-            ("https://example.com/logo.png", None),
-            ("http://example.com/logo.png", None),
-            ("data:image/png;base64,AAAA", None),
-        ] {
+    fn mixed_flow_keeps_punctuation_with_formula_and_preserves_image_links() {
+        let mut flat = Vec::new();
+        collect_runs(
+            &[
+                Inline::Text("甲".into()),
+                Inline::Math {
+                    latex: "x".into(),
+                    display: false,
+                },
+                Inline::Text("，乙".into()),
+            ],
+            FlatRunStyle::default(),
+            &mut flat,
+        );
+        assert_eq!(
+            inline_break_offsets(&flat).into_iter().collect::<Vec<_>>(),
+            vec![3, 9, 12]
+        );
+        flat.clear();
+        collect_runs(
+            &[Inline::Link {
+                url: "https://example.com".into(),
+                text: vec![Inline::Image {
+                    alt: "Chart".into(),
+                    url: "chart.png".into(),
+                    dimensions: Default::default(),
+                }],
+            }],
+            FlatRunStyle::default(),
+            &mut flat,
+        );
+        assert_eq!(
+            (&flat[0].image_url, &flat[0].link_url),
+            (
+                &Some("chart.png".into()),
+                &Some("https://example.com".into())
+            )
+        );
+    }
+    #[test]
+    fn inline_baseline_normalizes_signed_font_descent() {
+        // A 13px ascent and 3px descent leave 3px of leading on each side
+        // in a 22px line, placing its alphabetic baseline at y = 16px.
+        for (line_height, descent, expected) in
+            [(22.0, -3.0, 6.0), (22.0, 3.0, 6.0), (16.0, -3.0, 3.0)]
+        {
             assert_eq!(
-                image_path_from_url(url, &opts),
-                expected.map(PathBuf::from),
-                "{url}"
+                super::inline_text_baseline_depth(line_height, 13.0, descent),
+                expected
             );
         }
+    }
 
-        let source_opts = MarkdownOptions::default().with_source_path("/tmp/docs/README.md");
+    #[test]
+    fn measured_formula_blocks_allow_scrolling_to_the_final_block() {
+        let opts = super::MarkdownOptions::default();
+        let document =
+            crate::parser::parse(&format!("{}The end", "$$\\frac{1}{2}$$\n\n".repeat(30)));
+        let measurements = crate::layout::MarkdownMeasurements::default();
+        let layout = measurements.prepare(
+            crate::MarkdownBlockLayout::from_document(&document, &opts),
+            640.0,
+            &opts,
+        );
+        for index in 0..30 {
+            layout.record_height(index, 80.0);
+        }
+        layout.record_height(30, 22.0);
+        let layout = measurements.prepare(
+            crate::MarkdownBlockLayout::from_document(&document, &opts),
+            640.0,
+            &opts,
+        );
+        let sizes = layout.item_sizes();
         assert_eq!(
-            image_path_from_url("./assets/logo.png", &source_opts),
-            Some(PathBuf::from("/tmp/docs/./assets/logo.png")),
+            super::estimated_markdown_height(&sizes, opts.block_gap),
+            2902.0
+        );
+        for viewport_top in [2702.0, 2802.0, 3702.0] {
+            let window =
+                super::markdown_virtual_window(&sizes, opts.block_gap, viewport_top, 200.0, 0.0)
+                    .unwrap();
+            assert_eq!(window.range, 28..31);
+            assert_eq!(window.top_spacer, 2688.0, "scroll top {viewport_top}");
+            assert_eq!(window.bottom_spacer, 0.0);
+        }
+        let window =
+            super::markdown_virtual_window(&sizes, opts.block_gap, 2602.0, 200.0, 0.0).unwrap();
+        assert_eq!(window.range, 27..30);
+        assert_eq!(window.top_spacer, 2592.0);
+        assert_eq!(window.bottom_spacer, 38.0);
+        let resized = measurements.prepare(
+            crate::MarkdownBlockLayout::from_document(&document, &opts),
+            320.0,
+            &opts,
+        );
+        assert_eq!(f32::from(resized.item_sizes()[0].height), 22.0);
+        let changed = crate::parser::parse("Replacement paragraph");
+        let edited = measurements.prepare(
+            crate::MarkdownBlockLayout::from_document(&changed, &opts),
+            320.0,
+            &opts,
+        );
+        assert_eq!(
+            edited.items().as_ref(),
+            &vec![crate::MarkdownLayoutItem::Block(
+                crate::model::Block::Paragraph {
+                    inlines: vec![crate::model::Inline::Text("Replacement paragraph".into())],
+                }
+            )]
         );
     }
 
     #[test]
-    fn blocks_images_with_unconfigured_schemes() {
-        let opts = MarkdownOptions::default();
-        assert!(!should_load_image("javascript:alert(1)", &opts));
-        assert!(!should_load_image("ftp://example.com/logo.png", &opts));
-        assert!(should_load_image("https://example.com/logo.png", &opts));
-        assert!(should_load_image("./assets/logo.png", &opts));
-        assert_eq!(
-            image_path_from_url("ftp://example.com/logo.png", &opts),
-            None
+    fn heading_weight_preserves_strong_emphasis() {
+        let tokens = oxideterm_theme::default_tokens();
+        let opts = super::MarkdownOptions::from_theme(&tokens);
+        let mut flat = Vec::new();
+        super::collect_runs(
+            &[
+                super::Inline::Text("Heading ".into()),
+                super::Inline::Bold(vec![super::Inline::Text("strong".into())]),
+            ],
+            super::FlatRunStyle {
+                semibold: true,
+                ..Default::default()
+            },
+            &mut flat,
         );
+        let (text, runs, _) = super::flat_text(&flat, &tokens, &opts);
+        assert_eq!(text.as_ref(), "Heading strong");
+        assert_eq!(
+            runs.iter().map(|run| run.font.weight).collect::<Vec<_>>(),
+            vec![gpui::FontWeight::SEMIBOLD, gpui::FontWeight::BOLD]
+        );
+    }
+
+    #[test]
+    fn links_share_the_paragraph_text_and_keep_byte_ranges() {
+        let tokens = oxideterm_theme::default_tokens();
+        let opts = super::MarkdownOptions::default();
+        let mut flat = Vec::new();
+        super::collect_runs(
+            &[
+                super::Inline::Text("中文 ".into()),
+                super::Inline::Link {
+                    text: vec![super::Inline::Bold(vec![super::Inline::Text(
+                        "long link".into(),
+                    )])],
+                    url: "https://example.com".into(),
+                },
+                super::Inline::Text(" 后文".into()),
+            ],
+            super::FlatRunStyle::default(),
+            &mut flat,
+        );
+        assert!(flat[1].link);
+        assert_eq!(flat[1].link_url.as_deref(), Some("https://example.com"));
+        let (text, runs, links) = super::flat_text(&flat, &tokens, &opts);
+        assert_eq!(text.as_ref(), "中文 long link 后文");
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.range.clone())
+                .collect::<Vec<_>>(),
+            vec![7..16]
+        );
+        assert_eq!(runs[1].font.weight, gpui::FontWeight::BOLD);
+    }
+
+    #[test]
+    fn link_resolution_enforces_schemes_and_requires_a_base_for_relative_paths() {
+        let opts = MarkdownOptions::default();
+        let source_opts = MarkdownOptions::default().with_source_path("/tmp/notes/readme.md");
+        for (url, options, directly_openable, resolved) in [
+            (
+                "https://example.com",
+                &opts,
+                true,
+                Some("https://example.com"),
+            ),
+            (
+                "mailto:hello@example.com",
+                &opts,
+                true,
+                Some("mailto:hello@example.com"),
+            ),
+            ("#intro", &opts, false, None),
+            ("javascript:alert(1)", &opts, false, None),
+            ("javascript:alert(1)", &source_opts, false, None),
+            ("//other-host/file", &source_opts, false, None),
+            ("relative.md", &opts, false, None),
+            (
+                "../guide%20one.md#intro",
+                &source_opts,
+                false,
+                Some("file:///tmp/guide%20one.md#intro"),
+            ),
+        ] {
+            assert_eq!(should_open_link(url, options), directly_openable, "{url}");
+            assert_eq!(
+                resolved_link_url(url, options).as_deref(),
+                resolved,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_tables_keep_readable_columns() {
+        let tokens = oxideterm_theme::default_tokens();
+        let opts = super::MarkdownOptions::default();
+        let headers = vec![
+            vec![Block::Paragraph {
+                inlines: vec![Inline::Text("Host".into())]
+            }];
+            8
+        ];
+        let rows = vec![vec![
+            vec![Block::Paragraph {
+                inlines: vec![Inline::Code("command".repeat(20))]
+            }];
+            8
+        ]];
+        let fractions = super::table_column_widths(&headers, &rows, 8);
+        let minimum = super::table_min_width(&headers, &rows, &fractions, &tokens, &opts);
+        assert!(minimum > 1200.0);
+        assert!(fractions.iter().all(|fraction| minimum * fraction >= 150.0));
+    }
+
+    use super::*;
+
+    #[test]
+    fn image_resolution_preserves_local_paths_and_enforces_scheme_policy() {
+        let opts = MarkdownOptions::default();
+        let source_opts = MarkdownOptions::default().with_source_path("/tmp/docs/README.md");
+        for (url, options, allowed, path) in [
+            ("images/logo.png", &opts, true, Some("images/logo.png")),
+            ("file:///tmp/logo.png", &opts, true, Some("/tmp/logo.png")),
+            ("https://example.com/logo.png", &opts, true, None),
+            ("http://example.com/logo.png", &opts, true, None),
+            ("data:image/png;base64,AAAA", &opts, true, None),
+            ("javascript:alert(1)", &opts, false, None),
+            ("ftp://example.com/logo.png", &opts, false, None),
+            ("./assets/logo.png", &opts, true, Some("./assets/logo.png")),
+            (
+                "./assets/logo.png",
+                &source_opts,
+                true,
+                Some("/tmp/docs/./assets/logo.png"),
+            ),
+        ] {
+            assert_eq!(should_load_image(url, options), allowed, "{url}");
+            assert_eq!(
+                image_path_from_url(url, options),
+                path.map(PathBuf::from),
+                "{url}"
+            );
+        }
     }
 
     #[test]
@@ -2751,98 +3653,58 @@ mod tests {
     }
 
     #[test]
-    fn flat_runs_preserve_link_targets_for_click_rendering() {
-        let mut runs = Vec::new();
-        collect_runs(
-            &[Inline::Link {
-                text: vec![Inline::Text("docs".into())],
-                url: "https://example.com/docs".into(),
-            }],
-            FlatRunStyle::default(),
-            &mut runs,
-        );
-
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text, "docs");
-        assert!(runs[0].link);
-        assert_eq!(
-            runs[0].link_url.as_deref(),
-            Some("https://example.com/docs")
-        );
-    }
-
-    #[test]
-    fn flat_runs_preserve_html_as_plain_text() {
-        let mut runs = Vec::new();
-        collect_runs(
-            &[Inline::Html("<kbd>Esc</kbd>".into())],
-            FlatRunStyle::default(),
-            &mut runs,
-        );
-
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text, "<kbd>Esc</kbd>");
-        assert!(runs[0].link_url.is_none());
-        assert!(runs[0].image_url.is_none());
-        assert!(runs[0].math_latex.is_none());
-    }
-
-    #[test]
-    fn flat_runs_preserve_html_underline_and_highlight_styles() {
-        let mut runs = Vec::new();
-        collect_runs(
-            &[Inline::Underline(vec![Inline::Highlight(vec![
-                Inline::Text("styled".into()),
-            ])])],
-            FlatRunStyle::default(),
-            &mut runs,
-        );
-
-        assert_eq!(runs.len(), 1);
-        assert!(runs[0].underline);
-        assert!(runs[0].highlight);
+    fn inline_html_runs_preserve_text_and_native_style_features() {
         let tokens = oxideterm_theme::default_tokens();
         let opts = MarkdownOptions::from_theme(&tokens);
-        let text_run = text_run_for_flat(&runs[0], runs[0].text.len(), &tokens, &opts);
-        assert!(text_run.underline.is_some());
-        assert_eq!(
-            text_run.background_color,
-            Some(style::highlight_bg_color(&tokens))
-        );
-    }
-
-    #[test]
-    fn flat_runs_apply_native_subscript_and_superscript_features() {
-        let mut runs = Vec::new();
-        collect_runs(
-            &[
-                Inline::Subscript(vec![Inline::Text("2".into())]),
-                Inline::Superscript(vec![Inline::Text("3".into())]),
-            ],
-            FlatRunStyle::default(),
-            &mut runs,
-        );
-
-        let tokens = oxideterm_theme::default_tokens();
-        let opts = MarkdownOptions::from_theme(&tokens);
-        let subscript = text_run_for_flat(&runs[0], 1, &tokens, &opts);
-        let superscript = text_run_for_flat(&runs[1], 1, &tokens, &opts);
-        assert_eq!(
-            subscript.font.features.tag_value_list(),
-            &[("subs".to_string(), 1)]
-        );
-        assert_eq!(
-            superscript.font.features.tag_value_list(),
-            &[("sups".to_string(), 1)]
-        );
-    }
-
-    #[test]
-    fn allows_only_configured_link_schemes() {
-        let opts = MarkdownOptions::default();
-        assert!(should_open_link("https://example.com", &opts));
-        assert!(should_open_link("mailto:hello@example.com", &opts));
-        assert!(!should_open_link("#intro", &opts));
-        assert!(!should_open_link("javascript:alert(1)", &opts));
+        for (inlines, expected) in [
+            (
+                vec![Inline::Html("<kbd>Esc</kbd>".into())],
+                vec![("<kbd>Esc</kbd>", false, false, None)],
+            ),
+            (
+                vec![Inline::Underline(vec![Inline::Highlight(vec![
+                    Inline::Text("styled".into()),
+                ])])],
+                vec![("styled", true, true, None)],
+            ),
+            (
+                vec![
+                    Inline::Subscript(vec![Inline::Text("2".into())]),
+                    Inline::Superscript(vec![Inline::Text("3".into())]),
+                ],
+                vec![
+                    ("2", false, false, Some("subs")),
+                    ("3", false, false, Some("sups")),
+                ],
+            ),
+        ] {
+            let mut runs = Vec::new();
+            collect_runs(&inlines, FlatRunStyle::default(), &mut runs);
+            assert_eq!(runs.len(), expected.len(), "{inlines:?}");
+            for (run, (text, underline, highlight, feature)) in runs.iter().zip(expected) {
+                assert_eq!(
+                    (run.text.as_str(), run.underline, run.highlight),
+                    (text, underline, highlight)
+                );
+                assert_eq!(
+                    (&run.link_url, &run.image_url, &run.math_latex),
+                    (&None, &None, &None)
+                );
+                let styled = text_run_for_flat(run, run.text.len(), &tokens, &opts);
+                assert_eq!(styled.underline.is_some(), underline, "{text}");
+                assert_eq!(
+                    styled.background_color,
+                    highlight.then(|| style::highlight_bg_color(&tokens)),
+                    "{text}"
+                );
+                if let Some(feature) = feature {
+                    assert_eq!(
+                        styled.font.features.tag_value_list(),
+                        &[(feature.to_string(), 1)],
+                        "{text}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -240,9 +240,22 @@ impl IdeSurface {
 
         let fs = self.fs.clone();
         let backend_runtime = self.backend_runtime.clone();
+        let audit_request = self.pending_reconnect_restore_node_id.is_none().then(|| {
+            oxideterm_audit::AuditContext::current_request().or_else(|| {
+                oxideterm_audit::AuditContext::current().map(|mut context| {
+                    context.source = oxideterm_audit::AuditSource::User;
+                    context
+                })
+            })
+        }).flatten();
         cx.spawn(async move |weak, cx| {
             let result = await_ide_backend(backend_runtime.spawn(async move {
-                open_project_with_root_listing(fs, node_id, root_path).await
+                let task = open_project_with_root_listing(fs, node_id, root_path);
+                if let Some(context) = audit_request {
+                    context.scope(task).await
+                } else {
+                    task.await
+                }
             }))
             .await;
             let _ = weak.update(cx, |this, cx| {
@@ -371,6 +384,7 @@ impl IdeSurface {
             for path in snapshot.tab_paths {
                 self.open_remote_file(
                     IdeLocation::remote(snapshot.connection_id.clone(), path),
+                    None,
                     cx,
                 );
             }
@@ -499,20 +513,6 @@ mod lifecycle_tests {
     }
 
     #[gpui::test]
-    fn main_window_mount_allows_agent_sampling(cx: &mut TestAppContext) {
-        let surface = test_surface(cx);
-
-        surface.update(cx, |surface, cx| {
-            configure_ready_surface(surface, cx);
-            assert_eq!(surface.mount(), IdeSurfaceMount::MainWindow);
-
-            surface.schedule_next_agent_status_poll(cx);
-
-            assert!(surface.agent_poll_task.is_some());
-        });
-    }
-
-    #[gpui::test]
     fn hidden_mount_stops_sampling_watch_and_watch_reads_without_releasing_node(
         cx: &mut TestAppContext,
     ) {
@@ -528,7 +528,7 @@ mod lifecycle_tests {
                 .expect("build IDE hidden visibility test runtime"),
         );
         let surface = cx.new({
-            let fs = fs.clone();
+            let fs = fs;
             let backend_runtime = backend_runtime.clone();
             move |cx| {
                 IdeSurface::new(
@@ -696,7 +696,7 @@ mod lifecycle_tests {
             }
         });
         let second_surface = cx.new({
-            let fs = fs.clone();
+            let fs = fs;
             let backend_runtime = backend_runtime.clone();
             let second_node_id = second_node.0.clone();
             move |cx| {

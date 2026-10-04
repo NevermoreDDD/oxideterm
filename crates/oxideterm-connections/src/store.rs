@@ -24,12 +24,19 @@ include!("store/encrypted_config.rs");
 include!("store/connection_store.rs");
 include!("store/helpers.rs");
 include!("store/sync.rs");
+include!("store/ftp.rs");
+include!("store/local_terminal.rs");
+include!("store/resolved_sync.rs");
+include!("store/managed_sync.rs");
+include!("store/privilege_sync.rs");
 #[cfg(test)]
 include!("store/tests.rs");
 
 mod credential_sync;
+mod totp;
 pub use credential_sync::{
     CLEARED_PROFILE_CREDENTIAL_KIND, CredentialOwner, CredentialSlot, CredentialSyncSelection,
     CredentialTarget, PROFILE_CREDENTIAL_KIND, PreparedProfileCredentials,
     ProfileCredentialRestoreSummary, is_profile_credential,
 };
+pub use totp::{TotpBinding, TotpResolver};

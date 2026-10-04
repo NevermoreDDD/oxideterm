@@ -515,7 +515,7 @@ pub(in crate::workspace) fn view_for_ai_intent(intent: &str) -> &'static str {
         "command" | "terminal" => "live_sessions",
         "settings" | "app_surface" | "local" => "app_surfaces",
         "file" | "sftp" | "knowledge" => "files",
-        "connection" | "status" | "unknown" | _ => "connections",
+        _ => "connections",
     }
 }
 
@@ -788,10 +788,6 @@ pub(in crate::workspace) fn trim_tail_chars(value: &str, max_chars: usize) -> St
         "[trimmed {omitted} chars]\n{}",
         tail.into_iter().rev().collect::<String>()
     )
-}
-
-pub(in crate::workspace) fn ai_short_id(value: &str) -> String {
-    value.chars().take(8).collect()
 }
 
 pub(in crate::workspace) fn truncate_for_model(value: String, max_chars: usize) -> String {

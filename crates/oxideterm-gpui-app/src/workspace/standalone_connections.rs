@@ -1,4 +1,5 @@
 use super::*;
+use oxideterm_connections::SavedUpstreamProxyPolicy;
 mod persistence;
 use crate::workspace::new_connection::MoshConnectionOptions;
 use oxideterm_remote_desktop::{
@@ -34,11 +35,13 @@ pub(super) enum StandaloneConnectionLaunch {
     },
     Telnet {
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         terminal_options: ConnectionTerminalOptions,
     },
     SavedTelnet {
         profile_id: String,
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         terminal_options: ConnectionTerminalOptions,
     },
     MoshPreflight {
@@ -85,6 +88,7 @@ enum StandaloneReconnectPlan {
     },
     Telnet {
         config: TelnetSessionConfig,
+        upstream_proxy: SavedUpstreamProxyPolicy,
         terminal_options: ConnectionTerminalOptions,
         saved_profile_id: Option<String>,
     },
@@ -181,11 +185,13 @@ impl WorkspaceApp {
                 }),
             StandaloneReconnectPlan::Telnet {
                 config,
+                upstream_proxy,
                 terminal_options,
                 saved_profile_id,
             } => self
                 .create_telnet_terminal_tab_for_connection(
                     config,
+                    upstream_proxy,
                     None,
                     terminal_options,
                     title,
@@ -282,6 +288,7 @@ impl WorkspaceApp {
         if let Some(surface) = surface {
             self.close_standalone_connection_surface(surface, window, cx);
         }
+        self.expanded_standalone_connections.remove(connection_id);
         self.standalone_connections.remove(connection_id);
         cx.notify();
     }
@@ -361,15 +368,18 @@ impl WorkspaceApp {
             }
             StandaloneConnectionLaunch::Telnet {
                 config,
+                upstream_proxy,
                 terminal_options,
             } => StandaloneReconnectPlan::Telnet {
                 config: config.clone(),
+                upstream_proxy: upstream_proxy.clone(),
                 terminal_options: terminal_options.clone(),
                 saved_profile_id: None,
             },
             StandaloneConnectionLaunch::SavedTelnet {
                 profile_id,
                 config,
+                upstream_proxy,
                 terminal_options,
             } => {
                 let current_profile = self
@@ -378,6 +388,10 @@ impl WorkspaceApp {
                     .iter()
                     .find(|profile| profile.id == *profile_id);
                 StandaloneReconnectPlan::Telnet {
+                    upstream_proxy: current_profile.map_or_else(
+                        || upstream_proxy.clone(),
+                        |profile| profile.upstream_proxy.clone(),
+                    ),
                     config: current_profile.map_or_else(
                         || config.clone(),
                         |profile| TelnetSessionConfig {
@@ -446,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn releasing_surface_keeps_connection_record_for_fresh_binding() {
+    fn reconnect_rejects_stale_and_cancelled_attempts_before_binding_a_fresh_surface() {
         let first_surface = StandaloneConnectionSurface::Terminal(TerminalSessionId(41));
         let next_surface = StandaloneConnectionSurface::Terminal(TerminalSessionId(73));
         let mut registry = StandaloneConnectionRegistry::default();
@@ -466,54 +480,24 @@ mod tests {
         assert_eq!(disconnected.readiness, ActiveSessionReadiness::Disconnected);
 
         let next_attempt_id = registry.begin_reconnect(&connection_id).unwrap();
-        assert!(registry.bind_surface_for_attempt(&next_attempt_id, next_surface));
-        let rebound = registry.record(&connection_id).expect("record must remain");
-        assert_eq!(rebound.surface, Some(next_surface));
-        assert_ne!(rebound.surface, Some(first_surface));
-    }
-
-    #[test]
-    fn cancelled_pending_connection_rejects_late_failure_state() {
-        let surface = StandaloneConnectionSurface::Terminal(TerminalSessionId(19));
-        let mut registry = StandaloneConnectionRegistry::default();
-        let connection_id = registry.insert(
-            StandaloneConnectionKind::Serial,
-            "Pending serial".to_string(),
-            serial_launch(),
-            surface,
-        );
-        registry.release_surface(surface);
-        registry.record_mut(&connection_id).unwrap().readiness = ActiveSessionReadiness::Connecting;
-
-        registry.mark_disconnected(&connection_id);
         registry.mark_attempt_error(&connection_id);
-
-        let cancelled = registry.record(&connection_id).unwrap();
-        assert_eq!(cancelled.readiness, ActiveSessionReadiness::Disconnected);
-        assert!(!registry.is_connecting_attempt(&connection_id));
-    }
-
-    #[test]
-    fn stale_attempt_cannot_complete_after_a_new_reconnect_starts() {
-        let first_surface = StandaloneConnectionSurface::Terminal(TerminalSessionId(5));
-        let mut registry = StandaloneConnectionRegistry::default();
-        let connection_id = registry.insert(
-            StandaloneConnectionKind::Serial,
-            "Serial generation".to_string(),
-            serial_launch(),
-            first_surface,
-        );
-        let stale_attempt_id = connection_id.clone();
-        registry.release_surface(first_surface);
-        let current_attempt_id = registry.begin_reconnect(&connection_id).unwrap();
-
-        registry.mark_attempt_error(&stale_attempt_id);
-
-        assert!(registry.is_connecting_attempt(&current_attempt_id));
+        assert!(registry.is_connecting_attempt(&next_attempt_id));
         assert_eq!(
             registry.record(&connection_id).unwrap().readiness,
             ActiveSessionReadiness::Connecting
         );
+
+        registry.mark_disconnected(&connection_id);
+        registry.mark_attempt_error(&next_attempt_id);
+        let cancelled = registry.record(&connection_id).unwrap();
+        assert_eq!(cancelled.readiness, ActiveSessionReadiness::Disconnected);
+        assert!(!registry.is_connecting_attempt(&next_attempt_id));
+
+        let fresh_attempt_id = registry.begin_reconnect(&connection_id).unwrap();
+        assert!(registry.bind_surface_for_attempt(&fresh_attempt_id, next_surface));
+        let rebound = registry.record(&connection_id).expect("record must remain");
+        assert_eq!(rebound.surface, Some(next_surface));
+        assert_ne!(rebound.surface, Some(first_surface));
     }
 }
 
@@ -671,6 +655,7 @@ impl StandaloneConnectionRegistry {
         &mut self,
         surface: StandaloneConnectionSurface,
         profile_id: String,
+        store: &ConnectionStore,
     ) {
         let Some(record) = self
             .records
@@ -694,15 +679,20 @@ impl StandaloneConnectionRegistry {
                 }
             }
             StandaloneConnectionKind::Telnet => {
-                if let StandaloneConnectionLaunch::Telnet {
-                    config,
-                    terminal_options,
-                } = &record.launch
-                {
+                let Some(profile) = store
+                    .telnet_profiles()
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                else {
+                    return;
+                };
+                if let StandaloneConnectionLaunch::Telnet { config, .. } = &record.launch {
                     record.launch = StandaloneConnectionLaunch::SavedTelnet {
                         profile_id,
                         config: config.clone(),
-                        terminal_options: terminal_options.clone(),
+                        // Saving transfers retry credentials to the protected store.
+                        upstream_proxy: profile.upstream_proxy.clone(),
+                        terminal_options: profile.terminal.clone(),
                     };
                 }
             }

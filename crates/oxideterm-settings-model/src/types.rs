@@ -87,6 +87,7 @@ pub enum SettingsSelect {
     UpdateProxyMode,
     UpdateProxyProtocol,
     AppearanceTheme,
+    AppearanceTerminalTheme,
     AppearanceDensity,
     AppearanceAnimation,
     AppearanceRenderProfile,
@@ -142,10 +143,21 @@ pub enum SettingsSelect {
     ConnectionImportDuplicateStrategy,
 }
 
+impl SettingsSelect {
+    pub fn theme_target(self) -> Option<crate::ThemeTarget> {
+        match self {
+            Self::AppearanceTheme => Some(crate::ThemeTarget::Application),
+            Self::AppearanceTerminalTheme => Some(crate::ThemeTarget::Terminal),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum SettingsInput {
     SettingsSearch,
     TerminalCustomFontFamily,
+    TerminalCjkFontFamily,
     TerminalFontSize,
     TerminalFontWeight,
     TerminalScrollback,
@@ -154,6 +166,7 @@ pub enum SettingsInput {
     TerminalPaddingVertical,
     IdeFontWeight,
     IdeCustomFontFamily,
+    IdeCjkFontFamily,
     IdeFontSize,
     IdeLineHeight,
     AppearanceUiFont,
@@ -163,6 +176,10 @@ pub enum SettingsInput {
     LocalPrivilegeLabel,
     LocalPrivilegeUsernameHint,
     LocalPrivilegeSecret,
+    TotpName,
+    TotpSecret,
+    TotpPattern,
+    TotpPeriod,
     LocalPrivilegePromptPatterns,
     ConnectionDefaultUsername,
     ConnectionDefaultPort,
@@ -199,6 +216,7 @@ pub enum SettingsInput {
     TerminalTriggerWorkingDirectory,
     TerminalTriggerDelayMs,
     TerminalTriggerCooldownMs,
+    TerminalTriggerConnectionSearch,
     KeybindingSearch,
     CustomThemeName,
     CustomThemeTerminalColor(usize),
@@ -458,7 +476,7 @@ impl SettingsTab {
             Self::Terminal => "settings_view.terminal.title",
             Self::Appearance => "settings_view.appearance.title",
             Self::Connections => "settings_view.connections.keys_and_connections_title",
-            Self::Privilege => "settings_view.privilege_credentials.title",
+            Self::Privilege => "settings_view.credentials.title",
             Self::Network => "settings_view.network.title",
             Self::Sftp => "settings_view.sftp.title",
             Self::Ide => "settings_view.ide.title",
@@ -476,7 +494,7 @@ impl SettingsTab {
             Self::Terminal => "settings_view.terminal.description",
             Self::Appearance => "settings_view.appearance.description",
             Self::Connections => "settings_view.connections.keys_and_connections_description",
-            Self::Privilege => "settings_view.privilege_credentials.description",
+            Self::Privilege => "settings_view.credentials.description",
             Self::Network => "settings_view.network.description",
             Self::Sftp => "settings_view.sftp.description",
             Self::Ide => "settings_view.ide.description",
@@ -543,6 +561,7 @@ impl SettingsInput {
         match self {
             Self::SettingsSearch => SETTINGS_SEARCH_INPUT_ANCHOR_KEY,
             Self::TerminalCustomFontFamily => 19,
+            Self::TerminalCjkFontFamily => 24,
             Self::TerminalFontSize => 1,
             Self::TerminalFontWeight => 21,
             Self::TerminalScrollback => 33_000,
@@ -551,6 +570,7 @@ impl SettingsInput {
             Self::TerminalPaddingVertical => 23,
             Self::IdeFontWeight => 34_010,
             Self::IdeCustomFontFamily => 34_011,
+            Self::IdeCjkFontFamily => 34_012,
             Self::IdeFontSize => 3,
             Self::IdeLineHeight => 4,
             Self::AppearanceUiFont => 5,
@@ -560,6 +580,10 @@ impl SettingsInput {
             Self::LocalPrivilegeLabel => 31_000,
             Self::LocalPrivilegeUsernameHint => 31_001,
             Self::LocalPrivilegeSecret => 31_002,
+            Self::TotpName => 31_010,
+            Self::TotpSecret => 31_011,
+            Self::TotpPattern => 31_012,
+            Self::TotpPeriod => 31_013,
             Self::LocalPrivilegePromptPatterns => 31_003,
             Self::ConnectionDefaultUsername => 9,
             Self::ConnectionDefaultPort => 10,
@@ -596,6 +620,7 @@ impl SettingsInput {
             Self::TerminalTriggerWorkingDirectory => 33_106,
             Self::TerminalTriggerDelayMs => 33_107,
             Self::TerminalTriggerCooldownMs => 33_108,
+            Self::TerminalTriggerConnectionSearch => 33_109,
             Self::KeybindingSearch => 18,
             Self::CustomThemeName => 10_000,
             Self::CustomThemeTerminalColor(index) => 10_100 + index as u64,
@@ -697,6 +722,7 @@ impl SettingsInput {
                 | Self::AppLockNewPassword
                 | Self::AppLockConfirmPassword
                 | Self::LocalPrivilegeSecret
+                | Self::TotpSecret
                 | Self::ManagedKeyFilePassphrase
                 | Self::ManagedKeyPastePrivateKey
                 | Self::ManagedKeyPastePassphrase

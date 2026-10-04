@@ -28,24 +28,12 @@ PERMISSIVE_LICENSES = {
 
 VENDORED_WORKSPACE_PACKAGES = {
     "alacritty_terminal",
-    "gpui",
-    "gpui_apple",
-    "gpui_ce_util",
-    "gpui_collections",
-    "gpui_derive_refineable",
-    "gpui_linux",
-    "gpui_macos",
-    "gpui_macros",
-    "gpui_media",
-    "gpui_path",
-    "gpui_platform",
-    "gpui_refineable",
-    "gpui_scheduler",
-    "gpui_shared_string",
-    "gpui_sum_tree",
-    "gpui_wgpu",
-    "gpui_windows",
-    "gpui_zed_util",
+    "gpui-pre",
+    "gpui-pre-apple",
+    "gpui-pre-linux",
+    "gpui-pre-macos",
+    "gpui-pre-wgpu",
+    "gpui-pre-windows",
     "russh",
     "vte",
 }
@@ -110,7 +98,7 @@ def cargo_deny_license_data(cwd: Path) -> dict[str, dict[str, list[str]]]:
 def workspace_package_names(cwd: Path) -> set[str]:
     # `cargo deny list` includes local workspace packages. Third-party notices
     # should describe external/vendor obligations, not OxideTerm's own GPL
-    # crates. Keep vendored workspace packages such as our patched russh fork:
+    # crates. Keep vendored workspace packages such as alacritty_terminal:
     # those are local paths, but still third-party attribution obligations.
     completed = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
@@ -344,6 +332,9 @@ def build_notices(args: argparse.Namespace) -> tuple[str, int, int]:
     if bundled_assets:
         output += "## Bundled Fonts / Assets\n\n"
         output += bundled_asset_table(bundled_assets)
+    # Asset attribution must survive notice regeneration during native packaging.
+    output += "## Distribution Icon Assets\n\n"
+    output += (cwd / "licenses/third-party/DISTRO-ICONS-NOTICE.md").read_text(encoding="utf-8") + "\n"
     output += "## Notes\n\n"
     output += "- Multi-license policy: where a crate offers multiple licenses, OxideTerm uses the most permissive compatible option available.\n"
     output += "- License data is generated from crate metadata through cargo-deny and may include multiple licenses per crate.\n"

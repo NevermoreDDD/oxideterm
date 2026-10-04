@@ -451,7 +451,7 @@ pub fn get_action_secrets(
     )>::new();
 
     if include_sync_password {
-        reads.push((secret_keys::SYNC_PASSWORD, |secrets, value| {
+        reads.push((settings.password_secret_key(), |secrets, value| {
             secrets.sync_password = value
         }));
     }
@@ -506,9 +506,17 @@ pub fn get_action_secrets(
     }
 
     if matches!(mode, SecretReadMode::Silent)
-        && reads
-            .iter()
-            .any(|(key, _)| provider.has_hint(key) && secret_missing(key, &secrets))
+        && reads.iter().any(|(key, _)| {
+            provider.has_hint(key)
+                && secret_missing(
+                    if Some(*key) == settings.sync_password_ref.as_deref() {
+                        secret_keys::SYNC_PASSWORD
+                    } else {
+                        key
+                    },
+                    &secrets,
+                )
+        })
     {
         return Err(CloudSyncSecretError::UnlockRequired);
     }
@@ -637,79 +645,57 @@ mod tests {
     }
 
     #[test]
-    fn onedrive_actions_read_refresh_token_instead_of_short_lived_access_token() {
-        let mut provider = TestSecrets {
-            hints: HashSet::from([
-                secret_keys::TOKEN.to_string(),
-                secret_keys::MICROSOFT_REFRESH_TOKEN.to_string(),
-            ]),
-            values: HashMap::from([(
-                secret_keys::MICROSOFT_REFRESH_TOKEN.to_string(),
-                "refresh".to_string(),
-            )]),
-            ..TestSecrets::default()
-        };
-        let settings = CloudSyncSettings {
-            backend_type: BackendType::OneDrive,
-            ..CloudSyncSettings::default()
-        };
+    fn drive_actions_read_only_their_backend_refresh_token() {
+        for (backend_type, key, token, expected_tokens) in [
+            (
+                BackendType::OneDrive,
+                secret_keys::MICROSOFT_REFRESH_TOKEN,
+                "refresh",
+                (Some("refresh"), None),
+            ),
+            (
+                BackendType::GoogleDrive,
+                secret_keys::GOOGLE_REFRESH_TOKEN,
+                "google-refresh",
+                (None, Some("google-refresh")),
+            ),
+        ] {
+            let mut provider = TestSecrets {
+                hints: HashSet::from([secret_keys::TOKEN.to_string(), key.to_string()]),
+                values: HashMap::from([(key.to_string(), token.to_string())]),
+                ..TestSecrets::default()
+            };
+            let settings = CloudSyncSettings {
+                backend_type,
+                ..CloudSyncSettings::default()
+            };
+            let secrets =
+                get_action_secrets(&settings, &mut provider, false, SecretReadMode::Prompt)
+                    .unwrap();
 
-        let secrets =
-            get_action_secrets(&settings, &mut provider, false, SecretReadMode::Prompt).unwrap();
-
-        assert!(secrets.token.is_none());
-        assert_eq!(
-            secrets
-                .microsoft_refresh_token
-                .as_ref()
-                .map(|secret| secret.as_str()),
-            Some("refresh")
-        );
-        assert_eq!(
-            provider.batch_reads,
-            vec![(
-                vec![secret_keys::MICROSOFT_REFRESH_TOKEN.to_string()],
-                SecretReadMode::Prompt,
-            )]
-        );
-    }
-
-    #[test]
-    fn google_drive_actions_read_refresh_token_instead_of_short_lived_access_token() {
-        let mut provider = TestSecrets {
-            hints: HashSet::from([
-                secret_keys::TOKEN.to_string(),
-                secret_keys::GOOGLE_REFRESH_TOKEN.to_string(),
-            ]),
-            values: HashMap::from([(
-                secret_keys::GOOGLE_REFRESH_TOKEN.to_string(),
-                "google-refresh".to_string(),
-            )]),
-            ..TestSecrets::default()
-        };
-        let settings = CloudSyncSettings {
-            backend_type: BackendType::GoogleDrive,
-            ..CloudSyncSettings::default()
-        };
-
-        let secrets =
-            get_action_secrets(&settings, &mut provider, false, SecretReadMode::Prompt).unwrap();
-
-        assert!(secrets.token.is_none());
-        assert_eq!(
-            secrets
-                .google_refresh_token
-                .as_ref()
-                .map(|secret| secret.as_str()),
-            Some("google-refresh")
-        );
-        assert_eq!(
-            provider.batch_reads,
-            vec![(
-                vec![secret_keys::GOOGLE_REFRESH_TOKEN.to_string()],
-                SecretReadMode::Prompt,
-            )]
-        );
+            assert!(secrets.token.is_none());
+            assert_eq!(
+                (
+                    secrets
+                        .microsoft_refresh_token
+                        .as_ref()
+                        .map(|value| value.as_str()),
+                    secrets
+                        .google_refresh_token
+                        .as_ref()
+                        .map(|value| value.as_str()),
+                ),
+                expected_tokens,
+                "{:?}",
+                settings.backend_type
+            );
+            assert_eq!(
+                provider.batch_reads,
+                vec![(vec![key.to_string()], SecretReadMode::Prompt)],
+                "{:?}",
+                settings.backend_type
+            );
+        }
     }
 
     #[test]
@@ -765,6 +751,26 @@ mod tests {
                 ],
                 SecretReadMode::Prompt,
             )]
+        );
+        provider
+            .values
+            .insert("sync-v3-password-fixture".into(), "rotated".into());
+        let mut settings = CloudSyncSettings {
+            sync_password_ref: Some("sync-v3-password-fixture".into()),
+            ..settings
+        };
+        let rotated =
+            get_action_secrets(&settings, &mut provider, true, SecretReadMode::Prompt).unwrap();
+        assert_eq!(
+            rotated.sync_password.as_deref().map(String::as_str),
+            Some("rotated")
+        );
+        settings.local_file_mode = true;
+        let file_password =
+            get_action_secrets(&settings, &mut provider, true, SecretReadMode::Prompt).unwrap();
+        assert_eq!(
+            file_password.sync_password.as_deref().map(String::as_str),
+            Some("sync")
         );
     }
 }

@@ -350,7 +350,7 @@ impl HostToolsEntity {
         let show_context_columns = sidebar_width >= HOST_PACKAGE_CONTEXT_COLUMNS_MIN_WIDTH;
         let row_tokens = *tokens;
         let row_i18n = i18n.clone();
-        let row_mono_font_family = mono_font_family.clone();
+        let row_mono_font_family = mono_font_family;
         div()
             .w_full()
             .min_w_0()
@@ -1201,7 +1201,7 @@ mod tests {
 
     #[gpui::test]
     fn package_copy_stays_in_entity_and_emits_structured_notice(cx: &mut TestAppContext) {
-        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::channel(1);
         let entity = cx.new(|cx| {
             HostToolsEntity::new(
                 profiler_update_tx,
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[gpui::test]
     fn package_filter_and_expansion_do_not_start_remote_capture(cx: &mut TestAppContext) {
-        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::channel(1);
         let entity = cx.new(|cx| {
             HostToolsEntity::new(
                 profiler_update_tx,

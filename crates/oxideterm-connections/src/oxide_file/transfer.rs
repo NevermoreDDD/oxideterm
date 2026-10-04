@@ -105,6 +105,8 @@ pub struct OxideImportOptions {
     pub import_standalone_sftp_profiles: bool,
     pub import_remote_desktop_profiles: bool,
     pub import_portable_secrets: bool,
+    /// Structured sync stages protected slots after merging connection metadata.
+    pub defer_totp_secrets: bool,
     /// Restore managed-key metadata instead of extracting managed keys as plain imported key files.
     pub restore_managed_keys: bool,
     /// Store managed-key passphrases from the encrypted archive when callers explicitly opt in.
@@ -124,6 +126,7 @@ impl Default for OxideImportOptions {
             import_standalone_sftp_profiles: true,
             import_remote_desktop_profiles: true,
             import_portable_secrets: false,
+            defer_totp_secrets: false,
             restore_managed_keys: true,
             restore_managed_key_passphrases: false,
         }
@@ -172,6 +175,7 @@ impl ImportConflictStrategy {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
+    pub metadata: OxideMetadata,
     pub total_connections: usize,
     pub unchanged: Vec<String>,
     pub will_rename: Vec<(String, String)>,
@@ -324,6 +328,7 @@ include!("transfer/common.rs");
 include!("transfer/export.rs");
 include!("transfer/preview.rs");
 include!("transfer/import.rs");
+include!("transfer/sync.rs");
 include!("transfer/app_settings.rs");
 include!("transfer/planning.rs");
 include!("transfer/tests.rs");

@@ -54,9 +54,11 @@ pub(in crate::workspace::sftp) fn list_local_files(
         .map(|files| files.into_iter().map(sftp_file_entry_from_local).collect())
 }
 
-pub(in crate::workspace::sftp) fn refreshed_local_files(path: &str) -> Vec<SftpFileEntry> {
-    // Keep navigation and explicit refresh failures visible in the file pane.
-    list_local_files(path).unwrap_or_else(|error| {
+pub(in crate::workspace::sftp) fn local_files_or_error(
+    path: &str,
+    listing: std::io::Result<Vec<SftpFileEntry>>,
+) -> Vec<SftpFileEntry> {
+    listing.unwrap_or_else(|error| {
         vec![sftp_file_entry(
             format!("Unable to read folder: {error}"),
             path.to_string(),
@@ -84,6 +86,7 @@ fn sftp_file_entry_from_local(entry: oxideterm_local_files::LocalFileEntry) -> S
             oxideterm_local_files::LocalFileType::File
             | oxideterm_local_files::LocalFileType::Symlink => SftpFileType::File,
         },
+        size_known: true,
         size: entry.size,
         modified: entry.modified,
         permissions: None,
@@ -117,6 +120,7 @@ pub(in crate::workspace::sftp) fn sftp_file_entry(
         path,
         file_type,
         size,
+        size_known: true,
         modified,
         permissions: None,
         owner: None,
@@ -484,10 +488,10 @@ async fn load_remote_sftp_listing_inner(
     path: &str,
     update_ready_path: bool,
 ) -> Result<RemoteSftpListing, String> {
-    let transfer = backend
-        .acquire_transfer_sftp()
-        .await
-        .map_err(|error| error.to_string())?;
+    if let SftpRemoteBackend::Ftp { runtime } = &backend {
+        return runtime.listing(path).await;
+    }
+    let transfer = backend.acquire_transfer_sftp().await?;
     match list_remote_sftp_once(&transfer, path).await {
         Ok(listing) => {
             if update_ready_path
@@ -513,10 +517,7 @@ async fn load_remote_sftp_listing_inner(
             // Retry directory listing on a new transfer channel. The shared
             // SFTP owner is not part of this path, so a slow list cannot block
             // preview/save operations that already use their own channels.
-            let transfer = backend
-                .acquire_transfer_sftp()
-                .await
-                .map_err(|route_error| route_error.to_string())?;
+            let transfer = backend.acquire_transfer_sftp().await?;
             let listing = list_remote_sftp_once(&transfer, path)
                 .await
                 .map_err(|retry_error| retry_error.to_string())?;
@@ -547,19 +548,16 @@ pub(in crate::workspace::sftp) async fn load_remote_sftp_preview(
     backend: SftpRemoteBackend,
     path: &str,
 ) -> Result<PreviewContent, String> {
-    let sftp = backend
-        .acquire_transfer_sftp()
-        .await
-        .map_err(|error| error.to_string())?;
+    if let SftpRemoteBackend::Ftp { runtime } = &backend {
+        return runtime.preview(path, 0).await;
+    }
+    let sftp = backend.acquire_transfer_sftp().await?;
     match load_remote_sftp_preview_once(&sftp, path).await {
         Ok(preview) => Ok(preview),
         Err(error) if error.is_channel_recoverable() => {
             // Preview can be slow and must not hold the shared directory-owner
             // SFTP mutex; retry once with a fresh short-lived SFTP channel.
-            let sftp = backend
-                .acquire_transfer_sftp()
-                .await
-                .map_err(|route_error| route_error.to_string())?;
+            let sftp = backend.acquire_transfer_sftp().await?;
             load_remote_sftp_preview_once(&sftp, path)
                 .await
                 .map_err(|retry_error| retry_error.to_string())
@@ -580,19 +578,16 @@ pub(in crate::workspace::sftp) async fn load_remote_sftp_preview_hex(
     path: &str,
     offset: u64,
 ) -> Result<PreviewContent, String> {
-    let sftp = backend
-        .acquire_transfer_sftp()
-        .await
-        .map_err(|error| error.to_string())?;
+    if let SftpRemoteBackend::Ftp { runtime } = &backend {
+        return runtime.preview(path, offset).await;
+    }
+    let sftp = backend.acquire_transfer_sftp().await?;
     match load_remote_sftp_preview_hex_once(&sftp, path, offset).await {
         Ok(preview) => Ok(preview),
         Err(error) if error.is_channel_recoverable() => {
             // Hex preview uses its own channel for the same reason as text
             // preview: large reads should not block directory navigation.
-            let sftp = backend
-                .acquire_transfer_sftp()
-                .await
-                .map_err(|route_error| route_error.to_string())?;
+            let sftp = backend.acquire_transfer_sftp().await?;
             load_remote_sftp_preview_hex_once(&sftp, path, offset)
                 .await
                 .map_err(|retry_error| retry_error.to_string())
@@ -623,10 +618,10 @@ pub(in crate::workspace::sftp) async fn save_remote_sftp_preview(
     };
     let remote_content = restore_text_line_endings(content, line_ending);
     let encoded = encode_to_encoding(&remote_content, target_encoding);
-    let sftp = backend
-        .acquire_transfer_sftp()
-        .await
-        .map_err(|error| error.to_string())?;
+    if let SftpRemoteBackend::Ftp { runtime } = &backend {
+        return runtime.save(path, &encoded, target_encoding).await;
+    }
+    let sftp = backend.acquire_transfer_sftp().await?;
     // Saving uses a short-lived SFTP channel so a large write/stat round trip
     // cannot stall the shared directory listing owner.
     let write_result = sftp
@@ -690,6 +685,7 @@ fn remote_listing_from_file_infos(cwd: String, entries: Vec<RemoteFileInfo>) -> 
                     SftpFileType::File
                 }
             },
+            size_known: true,
             size: entry.size,
             modified: Some(entry.modified),
             permissions: Some(entry.permissions),
@@ -912,16 +908,16 @@ mod sftp_helper_tests {
     use super::*;
 
     #[test]
-    fn refreshed_local_files_reads_the_directory_again() {
+    fn local_listing_reads_the_directory_again() {
         let directory =
             std::env::temp_dir().join(format!("oxideterm-sftp-refresh-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).expect("temporary directory should be created");
         let path = directory.to_string_lossy();
 
-        let initial_files = refreshed_local_files(&path);
+        let initial_files = list_local_files(&path).expect("initial listing should succeed");
         std::fs::write(directory.join("country.mmdb"), b"test")
             .expect("fixture file should be created");
-        let refreshed_files = refreshed_local_files(&path);
+        let refreshed_files = list_local_files(&path).expect("second listing should succeed");
 
         assert!(!initial_files.iter().any(|file| file.name == "country.mmdb"));
         assert!(

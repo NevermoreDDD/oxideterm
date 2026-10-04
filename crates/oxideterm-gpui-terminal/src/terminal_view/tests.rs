@@ -1,7 +1,7 @@
 use super::*;
 use std::{path::Path, sync::Arc};
 
-use gpui::{Bounds, IntoColor, Keystroke, Modifiers, MouseButton, Pixels, point, px, rgb, size};
+use gpui::{Bounds, Keystroke, Modifiers, MouseButton, Pixels, point, px, rgb, size};
 use oxideterm_terminal::{
     TermMode, TerminalCell, TerminalColor, TerminalCommandMark, TerminalCommandMarkClosedBy,
     TerminalCommandMarkConfidence, TerminalCommandMarkDetectionSource, TerminalCursorShape,
@@ -253,30 +253,12 @@ fn terminal_element_hides_cursor_when_blink_cycle_is_invisible() {
     assert!(hidden.cursor.is_none());
     assert_eq!(hidden.text_runs.first().unwrap().text, "x");
     assert_eq!(hidden.text_runs.first().unwrap().col, 1);
-}
 
-#[test]
-fn ime_cursor_bounds_track_terminal_cursor_even_when_cursor_blink_is_hidden() {
-    let layout = TerminalElement::new(
-        cursor_snapshot(),
-        None,
-        test_metrics(),
-        false,
-        None,
-        None,
-        Vec::new(),
-        None,
-        None,
-        None,
-    )
-    .layout();
-
-    let bounds = layout.ime_cursor_bounds.unwrap();
+    let bounds = hidden.ime_cursor_bounds.unwrap();
     assert_eq!(bounds.origin.x, px(0.0));
     assert_eq!(bounds.origin.y, px(0.0));
     assert_eq!(bounds.size.width, px(8.0));
     assert_eq!(bounds.size.height, px(10.0));
-    assert!(layout.cursor.is_none());
 }
 
 #[test]
@@ -294,25 +276,39 @@ fn ime_cursor_bounds_expand_for_wide_cursor_cell() {
 
 #[test]
 fn marked_text_is_laid_out_at_terminal_cursor() {
-    let layout = TerminalElement::new(
-        cursor_snapshot(),
-        None,
-        test_metrics(),
-        true,
-        Some("拼".to_string()),
-        None,
-        Vec::new(),
-        None,
-        None,
-        None,
-    )
-    .layout();
+    for (foreground, background) in [(0x102030, 0xfdf6e3), (0xe6e8eb, 0x0d0f12)] {
+        let theme = TerminalUiTheme {
+            foreground,
+            background,
+            ..Default::default()
+        };
+        let layout = TerminalElement::new_with_images(
+            cursor_snapshot(),
+            Vec::new(),
+            None,
+            test_metrics(),
+            theme,
+            true,
+            Some("拼".to_string()),
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .layout();
 
-    let marked_text = layout.marked_text.unwrap();
-    assert_eq!(marked_text.row, 0);
-    assert_eq!(marked_text.col, 0);
-    assert_eq!(marked_text.text, "拼");
-    assert!(layout.ime_cursor_bounds.is_some());
+        let marked_text = layout.marked_text.unwrap();
+        assert_eq!(marked_text.row, 0);
+        assert_eq!(marked_text.col, 0);
+        assert_eq!(marked_text.text, "拼");
+        assert_eq!(marked_text.style.color, rgb(foreground).into());
+        assert_eq!(
+            marked_text.style.background_color,
+            Some(rgb(background).into())
+        );
+        assert!(layout.ime_cursor_bounds.is_some());
+    }
 }
 
 #[test]
@@ -328,25 +324,11 @@ fn open_command_mark_overlay_uses_transient_prompt_boundary() {
         row_from_text("   ~ ··············· lips@host 15:16:05", snapshot.cols),
         row_from_text("❯", snapshot.cols),
     ];
-    let mark = TerminalCommandMark {
-        command_id: "cmd-1".to_string(),
-        command: Some("ls".to_string()),
-        start_line: 0,
-        command_line: 0,
-        command_line_clipped: false,
-        end_line: None,
-        is_closed: false,
-        closed_by: None,
-        exit_code: None,
-        duration_ms: None,
-        detection_source: TerminalCommandMarkDetectionSource::CommandBar,
-        submitted_by: None,
-        confidence: TerminalCommandMarkConfidence::High,
-        output_confidence: TerminalCommandMarkConfidence::Unknown,
-        stale: false,
-        started_at: 1,
-        finished_at: None,
-    };
+    let mut mark = test_command_mark("cmd-1", 0, None, None);
+    mark.command = Some("ls".to_string());
+    mark.duration_ms = None;
+    mark.detection_source = TerminalCommandMarkDetectionSource::CommandBar;
+    mark.output_confidence = TerminalCommandMarkConfidence::Unknown;
 
     let layout = TerminalElement::new(
         snapshot,
@@ -371,7 +353,7 @@ fn open_command_mark_overlay_uses_transient_prompt_boundary() {
 }
 
 #[test]
-fn command_mark_overlays_include_visible_unselected_blocks() {
+fn command_mark_overlays_preserve_boundaries_and_distinguish_selection_from_hover() {
     let mut snapshot = test_snapshot(0, 0);
     snapshot.rows = 6;
     snapshot.cols = 80;
@@ -386,83 +368,53 @@ fn command_mark_overlays_include_visible_unselected_blocks() {
     let success = test_command_mark("cmd-success", 0, Some(1), Some(0));
     let failure = test_command_mark("cmd-failure", 2, Some(4), Some(1));
 
-    let layout = TerminalElement::new(
-        snapshot,
-        None,
-        test_metrics(),
-        true,
-        None,
-        None,
-        Vec::new(),
-        None,
-        None,
-        None,
-    )
-    .command_marks(vec![success, failure], None, None)
-    .layout();
+    for (selected, hovered, first_selected, second_hovered) in [
+        (None, None, false, false),
+        (Some("cmd-success"), Some("cmd-failure"), true, true),
+    ] {
+        let layout = TerminalElement::new(
+            snapshot.clone(),
+            None,
+            test_metrics(),
+            true,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .command_marks(
+            vec![success.clone(), failure.clone()],
+            selected.map(str::to_string),
+            hovered.map(str::to_string),
+        )
+        .layout();
 
-    assert_eq!(layout.command_mark_overlays.len(), 2);
-    assert!(
-        layout
+        let mut overlays = layout
             .command_mark_overlays
             .iter()
-            .all(|overlay| { !overlay.selected && !overlay.hovered && !overlay.running })
-    );
-    assert!(layout.command_mark_overlays.iter().any(|overlay| {
-        overlay.start_row == 0 && overlay.end_row == 1 && overlay.exit_code == Some(0)
-    }));
-    assert!(layout.command_mark_overlays.iter().any(|overlay| {
-        overlay.start_row == 2 && overlay.end_row == 4 && overlay.exit_code == Some(1)
-    }));
-}
-
-#[test]
-fn command_mark_overlay_distinguishes_hovered_and_selected_blocks() {
-    let mut snapshot = test_snapshot(0, 0);
-    snapshot.rows = 4;
-    snapshot.cols = 80;
-    snapshot.lines = vec![
-        row_from_text("❯ pwd", snapshot.cols),
-        row_from_text("/tmp", snapshot.cols),
-        row_from_text("❯ ls", snapshot.cols),
-        row_from_text("file", snapshot.cols),
-    ];
-    let selected = test_command_mark("cmd-selected", 0, Some(1), Some(0));
-    let hovered = test_command_mark("cmd-hovered", 2, Some(3), Some(0));
-
-    let layout = TerminalElement::new(
-        snapshot,
-        None,
-        test_metrics(),
-        true,
-        None,
-        None,
-        Vec::new(),
-        None,
-        None,
-        None,
-    )
-    .command_marks(
-        vec![selected, hovered],
-        Some("cmd-selected".to_string()),
-        Some("cmd-hovered".to_string()),
-    )
-    .layout();
-
-    let selected_overlay = layout
-        .command_mark_overlays
-        .iter()
-        .find(|overlay| overlay.start_row == 0)
-        .expect("selected overlay");
-    let hovered_overlay = layout
-        .command_mark_overlays
-        .iter()
-        .find(|overlay| overlay.start_row == 2)
-        .expect("hovered overlay");
-    assert!(selected_overlay.selected);
-    assert!(!selected_overlay.hovered);
-    assert!(!hovered_overlay.selected);
-    assert!(hovered_overlay.hovered);
+            .map(|overlay| {
+                (
+                    overlay.start_row,
+                    overlay.end_row,
+                    overlay.exit_code,
+                    overlay.selected,
+                    overlay.hovered,
+                    overlay.running,
+                )
+            })
+            .collect::<Vec<_>>();
+        overlays.sort_by_key(|overlay| overlay.0);
+        assert_eq!(
+            overlays,
+            [
+                (0, 1, Some(0), first_selected, false, false),
+                (2, 4, Some(1), false, second_hovered, false),
+            ],
+            "selected={selected:?}, hovered={hovered:?}"
+        );
+    }
 }
 
 fn test_command_mark(
@@ -493,64 +445,25 @@ fn test_command_mark(
 }
 
 #[test]
-fn cursor_blink_mode_on_does_not_wait_for_terminal_control_sequence() {
-    assert!(should_blink_cursor_for_mode(
-        TerminalBlinkMode::On,
-        true,
-        false,
-        false,
-        TerminalCursorShape::Block,
-    ));
-}
+fn cursor_blink_respects_preference_terminal_state_and_surface_ownership() {
+    use TerminalBlinkMode::{Off, On, TerminalControlled};
+    use TerminalCursorShape::{Block, Hidden};
 
-#[test]
-fn terminal_controlled_cursor_blink_still_respects_terminal_state() {
-    assert!(!should_blink_cursor_for_mode(
-        TerminalBlinkMode::TerminalControlled,
-        true,
-        false,
-        false,
-        TerminalCursorShape::Block,
-    ));
-    assert!(should_blink_cursor_for_mode(
-        TerminalBlinkMode::TerminalControlled,
-        true,
-        true,
-        false,
-        TerminalCursorShape::Block,
-    ));
-}
-
-#[test]
-fn cursor_blink_is_disabled_when_unfocused_alt_screen_hidden_or_off() {
-    assert!(!should_blink_cursor_for_mode(
-        TerminalBlinkMode::On,
-        false,
-        true,
-        false,
-        TerminalCursorShape::Block,
-    ));
-    assert!(!should_blink_cursor_for_mode(
-        TerminalBlinkMode::On,
-        true,
-        true,
-        true,
-        TerminalCursorShape::Block,
-    ));
-    assert!(!should_blink_cursor_for_mode(
-        TerminalBlinkMode::On,
-        true,
-        true,
-        false,
-        TerminalCursorShape::Hidden,
-    ));
-    assert!(!should_blink_cursor_for_mode(
-        TerminalBlinkMode::Off,
-        true,
-        true,
-        false,
-        TerminalCursorShape::Block,
-    ));
+    for (mode, focused, terminal_blinking, alt_screen, shape, expected) in [
+        (On, true, false, false, Block, true),
+        (TerminalControlled, true, false, false, Block, false),
+        (TerminalControlled, true, true, false, Block, true),
+        (On, false, true, false, Block, false),
+        (On, true, true, true, Block, false),
+        (On, true, true, false, Hidden, false),
+        (Off, true, true, false, Block, false),
+    ] {
+        assert_eq!(
+            should_blink_cursor_for_mode(mode, focused, terminal_blinking, alt_screen, shape),
+            expected,
+            "{mode:?}, focused={focused}, terminal={terminal_blinking}, alt={alt_screen}, {shape:?}"
+        );
+    }
 }
 
 mod input_tests;

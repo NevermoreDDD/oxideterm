@@ -8,48 +8,67 @@ fn should_retry_password_auth(result: &client::AuthResult) -> bool {
     )
 }
 
+enum PasswordFallbackOutcome {
+    NotAuthenticated,
+    Authenticated { password_confirmed: bool },
+}
+
 async fn try_password_as_keyboard_interactive(
     handle: &mut client::Handle<NativeClientHandler>,
     config: &SshConfig,
     password: &str,
     password_result: &client::AuthResult,
     prompt_handler: Option<&dyn SshPromptHandler>,
-) -> Result<bool, SshTransportError> {
+    audit: &mut AuthenticationAudit,
+) -> Result<PasswordFallbackOutcome, SshTransportError> {
     let client::AuthResult::Failure {
         partial_success: false,
         remaining_methods,
     } = password_result
     else {
-        return Ok(false);
+        return Ok(PasswordFallbackOutcome::NotAuthenticated);
     };
     if !remaining_methods.contains(&MethodKind::KeyboardInteractive)
         || remaining_methods.contains(&MethodKind::Password)
     {
-        return Ok(false);
+        return Ok(PasswordFallbackOutcome::NotAuthenticated);
     }
     tracing::debug!("SSH attempting password-as-keyboard-interactive fallback");
 
     let mut password_prompt_consumed = false;
-    let mut response = tokio::time::timeout(
-        PASSWORD_AUTH_TIMEOUT,
-        handle.authenticate_keyboard_interactive_start(config.username.clone(), None::<String>),
-    )
-    .await
-    .map_err(|_| {
-        SshTransportError::AuthenticationFailed(
-            "keyboard-interactive password fallback timed out".to_string(),
-        )
-    })?
-    .map_err(|error| {
-        SshTransportError::AuthenticationFailed(format!(
-            "keyboard-interactive password fallback failed: {error}"
-        ))
-    })?;
+    let mut response = audit
+        .interactive("start", async {
+            tokio::time::timeout(
+                PASSWORD_AUTH_TIMEOUT,
+                handle.authenticate_keyboard_interactive_start(
+                    config.username.clone(),
+                    None::<String>,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                SshTransportError::AuthenticationFailed(
+                    "keyboard-interactive password fallback timed out".to_string(),
+                )
+            })?
+            .map_err(|error| {
+                SshTransportError::AuthenticationFailed(format!(
+                    "keyboard-interactive password fallback failed: {error}"
+                ))
+            })
+        })
+        .await?;
 
     for _ in 0..MAX_PASSWORD_KBI_FALLBACK_ROUNDS {
         match response {
-            client::KeyboardInteractiveAuthResponse::Success => return Ok(true),
-            client::KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            client::KeyboardInteractiveAuthResponse::Success => {
+                return Ok(PasswordFallbackOutcome::Authenticated {
+                    password_confirmed: password_prompt_consumed,
+                });
+            }
+            client::KeyboardInteractiveAuthResponse::Failure { .. } => {
+                return Ok(PasswordFallbackOutcome::NotAuthenticated);
+            }
             client::KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -67,14 +86,15 @@ async fn try_password_as_keyboard_interactive(
                     && prompts.len() == 1
                     && !prompts[0].echo
                     && prompt_looks_like_password(&prompts[0].prompt)
+                    && !totp::matches_bound_prompt(config.totp.as_ref(), &prompts[0].prompt).await
                 {
                     password_prompt_consumed = true;
                     vec![password.to_string()]
                 } else {
                     let Some(prompt_handler) = prompt_handler else {
-                        return Ok(false);
+                        return Ok(PasswordFallbackOutcome::NotAuthenticated);
                     };
-                    return continue_keyboard_interactive_flow(
+                    let authenticated = continue_keyboard_interactive_flow(
                         handle,
                         prompt_handler,
                         client::KeyboardInteractiveAuthResponse::InfoRequest {
@@ -83,57 +103,76 @@ async fn try_password_as_keyboard_interactive(
                             prompts,
                         },
                         false,
+                        audit,
                     )
-                    .await;
+                    .await?;
+                    // Further user answers can replace a rejected password; success alone cannot confirm it.
+                    return Ok(if authenticated {
+                        PasswordFallbackOutcome::Authenticated {
+                            password_confirmed: false,
+                        }
+                    } else {
+                        PasswordFallbackOutcome::NotAuthenticated
+                    });
                 };
-                response = tokio::time::timeout(
-                    PASSWORD_AUTH_TIMEOUT,
-                    handle.authenticate_keyboard_interactive_respond(replies),
-                )
-                .await
-                .map_err(|_| {
-                    SshTransportError::AuthenticationFailed(
-                        "keyboard-interactive password fallback response timed out".to_string(),
-                    )
-                })?
-                .map_err(|error| {
-                    SshTransportError::AuthenticationFailed(format!(
-                        "keyboard-interactive password fallback response failed: {error}"
-                    ))
-                })?;
+                response = audit
+                    .interactive("response", async {
+                        tokio::time::timeout(
+                            PASSWORD_AUTH_TIMEOUT,
+                            handle.authenticate_keyboard_interactive_respond(replies),
+                        )
+                        .await
+                        .map_err(|_| {
+                            SshTransportError::AuthenticationFailed(
+                                "keyboard-interactive password fallback response timed out"
+                                    .to_string(),
+                            )
+                        })?
+                        .map_err(|error| {
+                            SshTransportError::AuthenticationFailed(format!(
+                                "keyboard-interactive password fallback response failed: {error}"
+                            ))
+                        })
+                    })
+                    .await?;
             }
         }
     }
-    Ok(false)
+    Ok(PasswordFallbackOutcome::NotAuthenticated)
 }
 
 async fn authenticate_keyboard_interactive(
     handle: &mut client::Handle<NativeClientHandler>,
     username: &str,
     prompt_handler: Option<&dyn SshPromptHandler>,
+    audit: &mut AuthenticationAudit,
 ) -> Result<client::AuthResult, SshTransportError> {
     let Some(prompt_handler) = prompt_handler else {
         return Err(SshTransportError::UnsupportedAuth(
             "keyboard-interactive requires a native prompt flow",
         ));
     };
-    let response = tokio::time::timeout(
-        PASSWORD_AUTH_TIMEOUT,
-        handle.authenticate_keyboard_interactive_start(username, None::<String>),
-    )
-    .await
-    .map_err(|_| {
-        SshTransportError::AuthenticationFailed(
-            "keyboard-interactive authentication timed out".to_string(),
-        )
-    })?
-    .map_err(|error| {
-        SshTransportError::AuthenticationFailed(format!(
-            "keyboard-interactive authentication start failed: {error}"
-        ))
-    })?;
+    let response = audit
+        .interactive("start", async {
+            tokio::time::timeout(
+                PASSWORD_AUTH_TIMEOUT,
+                handle.authenticate_keyboard_interactive_start(username, None::<String>),
+            )
+            .await
+            .map_err(|_| {
+                SshTransportError::AuthenticationFailed(
+                    "keyboard-interactive authentication timed out".to_string(),
+                )
+            })?
+            .map_err(|error| {
+                SshTransportError::AuthenticationFailed(format!(
+                    "keyboard-interactive authentication start failed: {error}"
+                ))
+            })
+        })
+        .await?;
     let success =
-        continue_keyboard_interactive_flow(handle, prompt_handler, response, false).await?;
+        continue_keyboard_interactive_flow(handle, prompt_handler, response, false, audit).await?;
     Ok(if success {
         client::AuthResult::Success
     } else {
@@ -149,6 +188,7 @@ async fn try_keyboard_interactive_chain(
     username: &str,
     auth_result: &client::AuthResult,
     prompt_handler: Option<&dyn SshPromptHandler>,
+    audit: &mut AuthenticationAudit,
 ) -> Result<bool, SshTransportError> {
     let client::AuthResult::Failure {
         partial_success: true,
@@ -164,15 +204,19 @@ async fn try_keyboard_interactive_chain(
         return Ok(false);
     };
     tracing::debug!("SSH chained keyboard-interactive authentication starting");
-    let response = handle
-        .authenticate_keyboard_interactive_start(username, None::<String>)
-        .await
-        .map_err(|error| {
-            SshTransportError::AuthenticationFailed(format!(
-                "keyboard-interactive chained authentication start failed: {error}"
-            ))
-        })?;
-    continue_keyboard_interactive_flow(handle, prompt_handler, response, true).await
+    let response = audit
+        .interactive("start", async {
+            handle
+                .authenticate_keyboard_interactive_start(username, None::<String>)
+                .await
+                .map_err(|error| {
+                    SshTransportError::AuthenticationFailed(format!(
+                        "keyboard-interactive chained authentication start failed: {error}"
+                    ))
+                })
+        })
+        .await?;
+    continue_keyboard_interactive_flow(handle, prompt_handler, response, true, audit).await
 }
 
 async fn continue_keyboard_interactive_flow(
@@ -180,6 +224,7 @@ async fn continue_keyboard_interactive_flow(
     prompt_handler: &dyn SshPromptHandler,
     mut response: client::KeyboardInteractiveAuthResponse,
     chained: bool,
+    audit: &mut AuthenticationAudit,
 ) -> Result<bool, SshTransportError> {
     loop {
         match response {
@@ -210,30 +255,29 @@ async fn continue_keyboard_interactive_flow(
                         .collect(),
                     chained,
                 };
-                let replies = tokio::time::timeout(
-                    KBI_USER_PROMPT_TIMEOUT,
-                    prompt_handler.keyboard_interactive(request),
-                )
-                .await
-                .map_err(|_| {
-                    SshTransportError::AuthenticationFailed(SshPromptError::Timeout.to_string())
-                })?
-                .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
-                response = tokio::time::timeout(
-                    PASSWORD_AUTH_TIMEOUT,
-                    handle.authenticate_keyboard_interactive_respond(replies),
-                )
-                .await
-                .map_err(|_| {
-                    SshTransportError::AuthenticationFailed(
-                        "keyboard-interactive response timed out".to_string(),
-                    )
-                })?
-                .map_err(|error| {
-                    SshTransportError::AuthenticationFailed(format!(
-                        "keyboard-interactive response failed: {error}"
-                    ))
-                })?;
+                let replies = audit
+                    .prompt(prompt_handler, request, Some(KBI_USER_PROMPT_TIMEOUT))
+                    .await
+                    .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
+                response = audit
+                    .interactive("response", async {
+                        tokio::time::timeout(
+                            PASSWORD_AUTH_TIMEOUT,
+                            handle.authenticate_keyboard_interactive_respond(replies),
+                        )
+                        .await
+                        .map_err(|_| {
+                            SshTransportError::AuthenticationFailed(
+                                "keyboard-interactive response timed out".to_string(),
+                            )
+                        })?
+                        .map_err(|error| {
+                            SshTransportError::AuthenticationFailed(format!(
+                                "keyboard-interactive response failed: {error}"
+                            ))
+                        })
+                    })
+                    .await?;
             }
         }
     }
@@ -484,6 +528,7 @@ async fn authenticate_publickey_best_algo(
     handle: &mut client::Handle<NativeClientHandler>,
     username: &str,
     key: Arc<PrivateKey>,
+    audit: &mut AuthenticationAudit,
 ) -> Result<client::AuthResult, SshTransportError> {
     let algorithms = auth_algorithm_attempt_order(
         matches!(key.algorithm(), Algorithm::Rsa { .. }),
@@ -497,13 +542,17 @@ async fn authenticate_publickey_best_algo(
             rsa_hash_algorithm = ?hash_alg,
             "SSH public-key authentication attempt"
         );
-        let result = handle
-            .authenticate_publickey(
-                username,
-                PrivateKeyWithHashAlg::new(Arc::clone(&key), hash_alg),
-            )
-            .await
-            .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
+        let result = audit
+            .authenticate("publickey", Some(key.algorithm().as_str()), async {
+                handle
+                    .authenticate_publickey(
+                        username,
+                        PrivateKeyWithHashAlg::new(Arc::clone(&key), hash_alg),
+                    )
+                    .await
+                    .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
+            })
+            .await?;
         if result.success() || !server_allows_more_publickey_attempts(&result) {
             return Ok(result);
         }
@@ -521,6 +570,7 @@ async fn authenticate_certificate_best_algo(
     username: &str,
     key: Arc<PrivateKey>,
     cert: Certificate,
+    audit: &mut AuthenticationAudit,
 ) -> Result<client::AuthResult, SshTransportError> {
     let algorithms = auth_algorithm_attempt_order(
         matches!(cert.algorithm(), Algorithm::Rsa { .. }),
@@ -535,14 +585,18 @@ async fn authenticate_certificate_best_algo(
             rsa_hash_algorithm = ?hash_alg,
             "SSH certificate authentication attempt"
         );
-        let result = handle
-            .authenticate_certificate_with(username, cert.clone(), hash_alg, &mut signer)
-            .await
-            .map_err(|error| {
-                SshTransportError::AuthenticationFailed(format!(
-                    "certificate authentication failed: {error}"
-                ))
-            })?;
+        let result = audit
+            .authenticate("certificate", Some(cert.algorithm().as_str()), async {
+                handle
+                    .authenticate_certificate_with(username, cert.clone(), hash_alg, &mut signer)
+                    .await
+                    .map_err(|error| {
+                        SshTransportError::AuthenticationFailed(format!(
+                            "certificate authentication failed: {error}"
+                        ))
+                    })
+            })
+            .await?;
         if result.success() || !server_allows_more_publickey_attempts(&result) {
             return Ok(result);
         }
@@ -588,6 +642,7 @@ struct AgentAuthenticationAttempt {
 async fn authenticate_agent(
     handle: &mut client::Handle<NativeClientHandler>,
     config: &SshConfig,
+    audit: &mut AuthenticationAudit,
 ) -> AgentAuthenticationAttempt {
     let mut offered_public_keys = HashSet::new();
     let mut agent = match connect_agent_client(config.identity_agent.as_deref()).await {
@@ -645,30 +700,34 @@ async fn authenticate_agent(
                 rsa_hash_algorithm = ?hash_alg,
                 "SSH agent authentication attempt"
             );
-            let result = match &identity {
-                AgentIdentity::PublicKey { .. } => {
-                    handle
-                        .authenticate_publickey_with(
-                            config.username.clone(),
-                            public_key.clone(),
-                            hash_alg,
-                            &mut AgentSigner { agent: &mut agent },
-                        )
-                        .await
-                }
-                AgentIdentity::Certificate { certificate, .. } => {
-                    // Preserve certificate principals and the CA signature while
-                    // the agent retains ownership of the private signing key.
-                    handle
-                        .authenticate_certificate_with(
-                            config.username.clone(),
-                            certificate.clone(),
-                            hash_alg,
-                            &mut AgentSigner { agent: &mut agent },
-                        )
-                        .await
-                }
-            };
+            let result = audit
+                .authenticate("agent", Some(public_key.algorithm().as_str()), async {
+                    match &identity {
+                        AgentIdentity::PublicKey { .. } => {
+                            handle
+                                .authenticate_publickey_with(
+                                    config.username.clone(),
+                                    public_key.clone(),
+                                    hash_alg,
+                                    &mut AgentSigner { agent: &mut agent },
+                                )
+                                .await
+                        }
+                        AgentIdentity::Certificate { certificate, .. } => {
+                            // Preserve certificate principals and the CA signature while
+                            // the agent retains ownership of the private signing key.
+                            handle
+                                .authenticate_certificate_with(
+                                    config.username.clone(),
+                                    certificate.clone(),
+                                    hash_alg,
+                                    &mut AgentSigner { agent: &mut agent },
+                                )
+                                .await
+                        }
+                    }
+                })
+                .await;
             match result {
                 Ok(result) if result.success() => {
                     return AgentAuthenticationAttempt {
@@ -764,34 +823,17 @@ mod private_key_auth_error_tests {
     }
 
     #[test]
-    fn private_key_auth_errors_distinguish_missing_and_invalid_passphrases() {
+    fn private_key_auth_errors_distinguish_passphrases_and_unsupported_material() {
         let key = generated_key_text(Some("secret-pass"));
-
-        let missing = decode_private_key_for_auth(&key, None).unwrap_err();
-        let invalid = decode_private_key_for_auth(&key, Some("wrong-pass")).unwrap_err();
-
-        assert!(
-            missing.to_string().contains("requires a passphrase"),
-            "missing passphrase error: {missing}"
-        );
-        assert!(
-            invalid.to_string().contains("Invalid SSH key passphrase"),
-            "invalid passphrase error: {invalid}"
-        );
-    }
-
-    #[test]
-    fn private_key_auth_errors_distinguish_unsupported_formats() {
-        let error = decode_private_key_for_auth("not a private key", None).unwrap_err();
-
-        assert!(error.to_string().contains("Unsupported SSH private key format"));
-    }
-
-    #[test]
-    fn private_key_auth_errors_distinguish_hardware_key_material() {
-        let error = decode_private_key_for_auth("sk-ssh-ed25519", None).unwrap_err();
-
-        assert!(error.to_string().contains("FIDO/security-key"));
+        for (input, passphrase, diagnostic) in [
+            (key.as_str(), None, "requires a passphrase"),
+            (key.as_str(), Some("wrong-pass"), "Invalid SSH key passphrase"),
+            ("not a private key", None, "Unsupported SSH private key format"),
+            ("sk-ssh-ed25519", None, "FIDO/security-key"),
+        ] {
+            let error = decode_private_key_for_auth(input, passphrase).unwrap_err();
+            assert!(error.to_string().contains(diagnostic), "{diagnostic}: {error}");
+        }
     }
 }
 

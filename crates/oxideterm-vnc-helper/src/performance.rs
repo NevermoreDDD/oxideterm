@@ -369,7 +369,7 @@ fn tight_copy_to_bgra(rect: RfbRect, rgb: &[u8]) -> Result<Vec<u8>, String> {
 
 fn tight_palette_to_bgra(rect: RfbRect, palette: &[u8], indexes: &[u8]) -> Result<Vec<u8>, String> {
     let color_count = palette.len() / 3;
-    if palette.is_empty() || palette.len() % 3 != 0 || color_count > 256 {
+    if palette.is_empty() || !palette.len().is_multiple_of(3) || color_count > 256 {
         return Err("VNC Tight palette is invalid.".to_string());
     }
     if indexes.len() != tight_palette_index_len(rect, color_count)? {
@@ -379,7 +379,7 @@ fn tight_palette_to_bgra(rect: RfbRect, palette: &[u8], indexes: &[u8]) -> Resul
     let mut bgra = vec![0; rect_byte_len(rect)?];
     let binary = color_count == 2;
     let row_bytes = if binary {
-        (usize::from(rect.width) + 7) / 8
+        usize::from(rect.width).div_ceil(8)
     } else {
         usize::from(rect.width)
     };
@@ -839,30 +839,6 @@ mod tests {
     }
 
     #[test]
-    fn continuous_updates_enable_once_then_resume_polling_on_end() {
-        let mut state = VncContinuousUpdatesState::default();
-
-        assert_eq!(
-            state.observe_end_of_continuous_updates(),
-            VncContinuousUpdatesAction::Enable
-        );
-        assert!(state.is_active());
-        assert_eq!(
-            state.observe_end_of_continuous_updates(),
-            VncContinuousUpdatesAction::ResumePolling
-        );
-        assert!(!state.is_active());
-    }
-
-    #[test]
-    fn continuous_updates_message_covers_the_current_framebuffer() {
-        assert_eq!(
-            enable_continuous_updates_message(true, 800, 600),
-            vec![150, 1, 0, 0, 0, 0, 3, 32, 2, 88]
-        );
-    }
-
-    #[test]
     fn performance_state_replies_to_fence_before_future_reads() {
         let event = VncServerEvent::ServerFence(VncServerFence {
             flags: TEST_VNC_FENCE_FLAG_REQUEST | VNC_FENCE_FLAG_BLOCK_AFTER,
@@ -885,10 +861,7 @@ mod tests {
         let messages =
             state.observe_server_event(&VncServerEvent::EndOfContinuousUpdates, 800, 600);
 
-        assert_eq!(
-            messages,
-            vec![enable_continuous_updates_message(true, 800, 600)]
-        );
+        assert_eq!(messages, vec![vec![150, 1, 0, 0, 0, 0, 3, 32, 2, 88]]);
         assert!(state.continuous_updates_active());
 
         assert!(

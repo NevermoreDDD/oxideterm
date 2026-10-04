@@ -1,6 +1,7 @@
 pub use oxideterm_render_policy::RenderProfile;
 
 pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
+pub const DEFAULT_COLOR_THEME: &str = "default";
 pub const DEFAULT_TERMINAL_SCROLLBACK: i64 = 1000;
 pub const TERMINAL_SCROLLBACK_MIN: i64 = 500;
 pub const TERMINAL_SCROLLBACK_MAX: i64 = 20_000;
@@ -19,8 +20,10 @@ pub const MAX_HIGHLIGHT_PATTERN_LENGTH: usize = 512;
 pub type ExtraFields = Map<String, Value>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Default)]
 pub enum Language {
     #[serde(rename = "zh-CN")]
+    #[default]
     ZhCn,
     #[serde(rename = "en")]
     En,
@@ -44,11 +47,6 @@ pub enum Language {
     ZhTw,
 }
 
-impl Default for Language {
-    fn default() -> Self {
-        Self::ZhCn
-    }
-}
 
 impl Language {
     pub fn as_str(self) -> &'static str {

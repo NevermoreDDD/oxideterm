@@ -110,11 +110,13 @@
       "auth_key": "SSH Key",
       "auth_agent": "Agent",
       "saved_password": "Saved Password",
-      "password_placeholder": "Saved in system keychain",
+      "password_placeholder": "Click to view the saved password",
       "password_required": "Enter the password to connect.",
       "show_password": "Show saved password",
       "hide_password": "Hide saved password",
-      "password_load_failed": "Could not read the saved password. Check access to your credential store and try again.",
+      "password_load_failed": "Could not read the credential store. Retry, or enter the password again and save it.",
+      "password_not_found": "The password referenced by this connection is missing from the credential store. Enter it again and save it.",
+      "password_store_locked": "The portable vault is locked. Restart OxideTerm and unlock it with your portable-mode password, then retry.",
       "password_hint": "Use the eye button to view the saved password. Viewing it does not change it; edit the value to replace it, or leave the field blank to keep it.",
       "key_path": "Key File Path",
       "browse": "Browse",
@@ -125,6 +127,9 @@
       "choose_icon": "Change icon",
       "hide_icons": "Hide icons",
       "default_icon": "Default icon",
+      "auto_icon": "Auto-detect",
+      "custom_icon": "Choose icon",
+      "auto_icon_hint": "After connecting, active sessions use the detected system icon. If no matching icon is available, a generic server icon is used.",
       "color": "Color",
       "icon_color": "Icon color",
       "icon_background_color": "Icon background color",
@@ -132,7 +137,8 @@
       "cancel": "Cancel",
       "save": "Save",
       "saving": "Saving...",
-      "passphrase_hint": "Leave blank to keep the saved passphrase when the key path is unchanged."
+      "passphrase_hint": "Leave blank to keep the saved passphrase when the key path is unchanged.",
+      "brand_icon_hint": "Distribution logos retain their original colors and proportions."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "Saved sessions",
       "expand_all": "Expand all",
       "collapse_all": "Collapse all"
+    },
+    "local_terminal_profiles": {
+      "delete": "Delete local session",
+      "delete_failed": "Could not delete local session",
+      "confirm_delete": "Delete local session \"{{name}}\"? Running terminals will remain open."
     }
   }
 }

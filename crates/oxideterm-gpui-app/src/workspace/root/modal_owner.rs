@@ -7,6 +7,8 @@ use super::super::*;
 pub(in crate::workspace) enum ActiveTabWindowModalKind {
     SettingsNavigationEditor,
     AiMcpServer,
+    KnowledgeLeaveConfirmation,
+    KnowledgeRename,
     KnowledgeCollectionCreate,
     KnowledgeDocumentCreate,
     KnowledgeDelete,
@@ -697,7 +699,11 @@ impl WorkspaceApp {
             onboarding_open: self.onboarding.open,
             shortcuts_open: self.shortcuts_modal.open,
             app_lock_dialog_open: self.app_lock.dialog.is_some(),
-            mermaid_zoom_open: self.mermaid_zoom.is_some(),
+            mermaid_zoom_open: self.mermaid_zoom.as_ref().is_some_and(|state| {
+                self.window_registry
+                    .handle_for_role(window_registry::WindowRole::Main)
+                    .is_some_and(|handle| handle.window_id() == state.window_id)
+            }),
             native_update_toast_visible: self.native_update_notification_open,
         }
         .top_owner()
@@ -705,7 +711,10 @@ impl WorkspaceApp {
 
     fn active_tab_window_modal_owner(&self, cx: &App) -> Option<ActiveTabWindowModalSnapshot> {
         let visible = oxideterm_gpui_ui::motion::ExitPhase::Visible;
-        if !self.sidebar_collapsed
+        if self
+            .active_content_tab(cx)
+            .is_none_or(|tab| tab.kind != TabKind::Sftp)
+            && !self.sidebar_collapsed
             && self.effective_sidebar_panel_section() == SidebarSection::Sessions
             && self.embedded_sftp_node_id.is_some()
             && self.sftp_view.read(cx).current_surface_id == Some(sftp::SftpSurfaceId::Sidebar)
@@ -720,8 +729,48 @@ impl WorkspaceApp {
                 phase: self.sftp_view.read(cx).dialog_phase(),
             });
         }
-        let active_tab = self.active_tab(cx)?;
+        let active_tab = self.active_content_tab(cx)?;
         match active_tab.kind {
+            TabKind::Knowledge => {
+                if self.knowledge_workspace.read(cx).rename.is_some() {
+                    return Some(ActiveTabWindowModalSnapshot {
+                        kind: ActiveTabWindowModalKind::KnowledgeRename,
+                        phase: visible,
+                    });
+                }
+                if self.knowledge_leave_confirmation_open(cx) {
+                    return Some(ActiveTabWindowModalSnapshot {
+                        kind: ActiveTabWindowModalKind::KnowledgeLeaveConfirmation,
+                        phase: visible,
+                    });
+                }
+                let ai = self.ai_entity.read(cx);
+                if ai.knowledge_delete_confirm().is_some() {
+                    return Some(ActiveTabWindowModalSnapshot {
+                        kind: ActiveTabWindowModalKind::KnowledgeDelete,
+                        phase: visible,
+                    });
+                }
+                let main_window_id = self
+                    .window_registry
+                    .handle_for_role(window_registry::WindowRole::Main)
+                    .map(|handle| handle.window_id());
+                if main_window_id
+                    .is_some_and(|window_id| ai.knowledge_document_dialog_owned_by(window_id))
+                {
+                    return Some(ActiveTabWindowModalSnapshot {
+                        kind: ActiveTabWindowModalKind::KnowledgeDocumentCreate,
+                        phase: ai.knowledge_document_dialog_phase(),
+                    });
+                }
+                if ai.knowledge_create_dialog_open() {
+                    return Some(ActiveTabWindowModalSnapshot {
+                        kind: ActiveTabWindowModalKind::KnowledgeCollectionCreate,
+                        phase: ai.knowledge_create_dialog_phase(),
+                    });
+                }
+                None
+            }
             TabKind::Settings => {
                 let settings = self.settings_workspace.read(cx);
                 let ai = self.ai_entity.read(cx);
@@ -745,7 +794,11 @@ impl WorkspaceApp {
                         kind: ActiveTabWindowModalKind::KnowledgeDelete,
                         phase: visible,
                     })
-                } else if ai.knowledge_document_dialog_open() {
+                } else if self
+                    .window_registry
+                    .handle_for_role(window_registry::WindowRole::Main)
+                    .is_some_and(|handle| ai.knowledge_document_dialog_owned_by(handle.window_id()))
+                {
                     Some(ActiveTabWindowModalSnapshot {
                         kind: ActiveTabWindowModalKind::KnowledgeDocumentCreate,
                         phase: ai.knowledge_document_dialog_phase(),
@@ -786,6 +839,7 @@ impl WorkspaceApp {
                 }
             }
             TabKind::Forwards => {
+                let _scope = self.enter_forwarding_page(active_tab.id, cx);
                 let forwarding = self.forwarding.read(cx);
                 if forwarding.delete_confirm_open() {
                     Some(ActiveTabWindowModalSnapshot {
@@ -802,7 +856,8 @@ impl WorkspaceApp {
                 }
             }
             TabKind::Sftp => {
-                let sftp = self.sftp_view.read(cx);
+                let _scope = self.enter_sftp_surface(sftp::SftpSurfaceId::Tab(active_tab.id));
+                let sftp = self.sftp_view().read(cx);
                 sftp.dialog_is_open().then(|| ActiveTabWindowModalSnapshot {
                     kind: if matches!(
                         sftp.dialog(),
@@ -836,6 +891,27 @@ impl WorkspaceApp {
         let Some(owner) = self.active_window_modal_owner(cx) else {
             return false;
         };
+        // Exiting search dialogs still own input until their backdrop is removed.
+        // Route only their reopen shortcut; do not start a new IME composition.
+        if owner == ActiveWindowModalOwner::CommandPalette
+            && self.command_palette.read(cx).is_closing()
+        {
+            self.handle_command_palette_key(event, window, cx);
+            return true;
+        }
+        if owner == ActiveWindowModalOwner::Shortcuts
+            && self.shortcuts_modal.presence.phase()
+                == oxideterm_gpui_ui::motion::ExitPhase::Exiting
+        {
+            self.handle_shortcuts_modal_key(event, cx);
+            return true;
+        }
+        if owner == ActiveWindowModalOwner::QuickCommandsManager
+            && self.quick_command_text_editor_focused(window, cx)
+            && !matches!(event.keystroke.key.as_str(), "escape" | "tab")
+        {
+            return false;
+        }
         let route = owner.key_route(event.keystroke.key.as_str());
         if route.dispatch_owner.is_some() && owner.allows_modal_ime() {
             if self.defer_active_ime_key(&event.keystroke, window, cx) {
@@ -1025,7 +1101,7 @@ impl WorkspaceApp {
                     .focused_input()
                     .is_some()
                 {
-                    self.handle_quick_commands_key(event, cx);
+                    self.handle_quick_commands_key(event, window, cx);
                 } else if event.keystroke.key.as_str() == "escape" {
                     self.close_quick_commands_manager(cx);
                 }
@@ -1080,6 +1156,12 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> bool {
         match kind {
+            ActiveTabWindowModalKind::KnowledgeRename => {
+                self.handle_knowledge_input_key(event, window, cx)
+            }
+            ActiveTabWindowModalKind::KnowledgeLeaveConfirmation => {
+                self.handle_knowledge_leave_confirmation_key(event, window, cx)
+            }
             ActiveTabWindowModalKind::PortablePassword => {
                 if event.keystroke.key.as_str() == "escape" {
                     self.close_portable_password_change_dialog(cx);

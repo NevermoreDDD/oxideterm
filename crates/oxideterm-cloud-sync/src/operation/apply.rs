@@ -81,7 +81,7 @@ impl CloudSyncOperationService {
             connections: preview
                 .connections_snapshot
                 .as_ref()
-                .map(|snapshot| snapshot.records.len())
+                .map(|snapshot| snapshot.record_count())
                 .unwrap_or(0),
             forwards: preview
                 .forwards_snapshot
@@ -170,6 +170,7 @@ impl CloudSyncOperationService {
                             import_standalone_sftp_profiles: false,
                             import_remote_desktop_profiles: false,
                             import_portable_secrets: true,
+                            defer_totp_secrets: true,
                             restore_managed_keys: true,
                             restore_managed_key_passphrases: true,
                         },
@@ -296,10 +297,27 @@ impl CloudSyncOperationService {
                 .flat_map(|s| &s.records)
                 .map(|p| p.id.clone())
                 .collect();
+            credential_selection.ftp_ids = preview
+                .standalone_sftp_profiles_snapshot
+                .as_ref()
+                .and_then(|s| s.ftp.as_ref())
+                .into_iter()
+                .flat_map(|s| &s.records)
+                .map(|p| p.id.clone())
+                .collect();
         }
         if selection.mosh_profiles {
             credential_selection.mosh_ids = preview
                 .mosh_profiles_snapshot
+                .as_ref()
+                .into_iter()
+                .flat_map(|s| &s.records)
+                .map(|p| p.id.clone())
+                .collect();
+        }
+        if selection.telnet_profiles {
+            credential_selection.telnet_ids = preview
+                .telnet_profiles_snapshot
                 .as_ref()
                 .into_iter()
                 .flat_map(|s| &s.records)
@@ -475,6 +493,32 @@ impl CloudSyncOperationService {
         conflict_strategy: ConflictStrategy,
         progress: Option<&mut dyn CloudSyncProgressSink>,
     ) -> Result<Option<ApplyLegacyPreviewOutcome>> {
+        self.apply_legacy_preview_with_options(
+            connection_store,
+            preview,
+            sync_password,
+            OxideImportOptions {
+                selected_names: legacy_preview_selected_names(
+                    import_connections,
+                    selected_connection_names,
+                ),
+                conflict_strategy: import_strategy_from_cloud(conflict_strategy),
+                import_forwards,
+                import_portable_secrets,
+                ..OxideImportOptions::default()
+            },
+            progress,
+        )
+    }
+
+    pub fn apply_legacy_preview_with_options(
+        &self,
+        connection_store: &mut ConnectionStore,
+        preview: &LegacyPreview,
+        sync_password: Option<&str>,
+        options: OxideImportOptions,
+        progress: Option<&mut dyn CloudSyncProgressSink>,
+    ) -> Result<Option<ApplyLegacyPreviewOutcome>> {
         let Some(_permit) = self
             .guard
             .begin(CloudSyncOperationKind::ApplyPreview, false)?
@@ -498,16 +542,7 @@ impl CloudSyncOperationService {
             connection_store,
             &preview.bytes,
             password,
-            OxideImportOptions {
-                selected_names: legacy_preview_selected_names(
-                    import_connections,
-                    selected_connection_names,
-                ),
-                conflict_strategy: import_strategy_from_cloud(conflict_strategy),
-                import_forwards,
-                import_portable_secrets,
-                ..OxideImportOptions::default()
-            },
+            options,
             &mut import_progress,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;

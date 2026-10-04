@@ -70,6 +70,72 @@ mod agent_loop_tests {
     }
 
     #[tokio::test]
+    async fn ui_tool_delivery_preserves_audit_request_identity() {
+        use oxideterm_audit::{AuditContext, AuditKeyProvider, AuditService, AuditSource};
+        use zeroize::Zeroizing;
+
+        struct Keys;
+        impl AuditKeyProvider for Keys {
+            fn load(&self, _: &str) -> Result<Zeroizing<Vec<u8>>, oxideterm_audit::AuditError> {
+                Ok(Zeroizing::new(vec![31; 32]))
+            }
+            fn create(&self, id: &str) -> Result<Zeroizing<Vec<u8>>, oxideterm_audit::AuditError> {
+                self.load(id)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let audit = AuditService::with_key_provider(directory.path().join("audit.db"), Keys).unwrap();
+        let mut context = AuditContext::new(audit.client(), AuditSource::Ai);
+        context.parent_id = Some("originating-tool-operation".into());
+        context.agent_id = Some(Zeroizing::new("request-agent".into()));
+        let (sender, receiver) = AiStreamDeliverySender::channel();
+        let host = std::thread::spawn(move || {
+            let delivery = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            let AiStreamDeliveryEvent::ToolExecutionRequested {
+                audit_context,
+                tool_call_id,
+                name,
+                sender,
+                ..
+            } = delivery.event
+            else {
+                panic!("expected a UI tool request");
+            };
+            let delivered = audit_context.expect("request lost its audit context at the UI boundary");
+            assert_eq!(delivered.source, AuditSource::Ai);
+            assert_eq!(
+                delivered.parent_id.as_deref(),
+                Some("originating-tool-operation")
+            );
+            assert_eq!(
+                delivered.agent_id.as_deref().map(String::as_str),
+                Some("request-agent")
+            );
+            sender.send(executed(tool_call_id, name, "accepted")).unwrap();
+        });
+        let result = context
+            .scope(execute_ai_tool_uncoordinated(
+                &services(directory.path()),
+                &sender,
+                1,
+                &ToolSessionId::new(),
+                "conversation",
+                "assistant",
+                "background-create".into(),
+                "create_background_task".into(),
+                json!({}),
+                false,
+                false,
+                vec![],
+                None,
+            ))
+            .await;
+        host.join().unwrap();
+        assert_eq!(result.tool_call_id, "background-create");
+        assert_eq!(result.output, "accepted");
+    }
+
+    #[tokio::test]
     async fn local_command_cleanup_and_request_ownership_are_independent() {
         use oxideterm_ai::agent::{AgentModel, AgentResourceCoordinator, AgentRuntime, AgentScope, AgentToolLease};
         let runtime = AgentRuntime::new(1);
@@ -311,18 +377,13 @@ mod agent_loop_tests {
     }
 
     #[test]
-    fn command_observation_deadline_is_bounded_and_can_be_renewed() {
+    fn command_observation_deadline_caps_requested_wait_without_extending_it() {
         let start = std::time::Instant::now();
-        let wait = AiTerminalCommandWait::new(start);
-        for seconds in [31, 90, 1799] {
-            assert!(!wait.expired(start + Duration::from_secs(seconds)));
-        }
-        assert!(wait.expired(start + Duration::from_secs(1800)));
-        let renewed = AiTerminalCommandWait::new(start + Duration::from_secs(1800));
-        assert!(!renewed.expired(start + Duration::from_secs(1801)));
-        assert!(renewed.expired(start + Duration::from_secs(3600)));
-        let capped = AiTerminalCommandWait::with_timeout(start, Duration::from_secs(7200));
-        assert!(capped.expired(start + Duration::from_secs(1800)));
+        let wait = AiTerminalCommandWait::with_timeout(start, Duration::from_secs(1800));
+        assert!(!wait.expired(start + Duration::from_secs(29)));
+        assert!(wait.expired(start + Duration::from_secs(30)));
+        let short = AiTerminalCommandWait::with_timeout(start, Duration::from_secs(2));
+        assert!(short.expired(start + Duration::from_secs(2)));
     }
 
     #[tokio::test]
@@ -375,7 +436,7 @@ mod agent_loop_tests {
         assert_eq!(
             history
                 .iter()
-                .map(|message| (message.role.clone(), message.content.as_str()))
+                .map(|message| (message.role, message.content.as_str()))
                 .collect::<Vec<_>>(),
             vec![(AiChatRole::User, "Only inspect; do not modify files")]
         );
@@ -862,7 +923,7 @@ mod agent_loop_tests {
                 let session = ToolSessionId::new();
                 let started = std::time::Instant::now();
                 let results = if parallel {
-                    futures_util::future::join_all(calls.iter().cloned().map(|call| {
+                    futures_util::future::join_all(calls.iter().map(|call| {
                         let config = &config;
                         let backend = &backend;
                         let available = &available;
@@ -870,7 +931,7 @@ mod agent_loop_tests {
                         let session = &session;
                         async move {
                             execute_ai_round_call(
-                                call,
+                                call.clone(),
                                 config,
                                 backend,
                                 available,

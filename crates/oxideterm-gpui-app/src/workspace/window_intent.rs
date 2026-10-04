@@ -12,7 +12,7 @@ use std::{
 };
 
 use gpui::{Context, EventEmitter, Task, Window};
-use oxideterm_ssh_launch::NativeConnectionLaunch;
+use oxideterm_ssh_launch::{NativeConnectionHandoff, NativeConnectionLaunch};
 use tokio::sync::Notify;
 
 use super::{WorkspaceApp, delivery};
@@ -25,7 +25,7 @@ pub(in crate::workspace) enum WindowIntentAction {
     OpenSettings,
     CheckForUpdates,
     Quit,
-    OpenNativeConnection(NativeConnectionLaunch),
+    OpenNativeConnection(NativeConnectionHandoff),
     OpenExternalConnectionUri(NativeConnectionLaunch),
 }
 
@@ -436,11 +436,13 @@ impl WorkspaceApp {
                 self.check_native_update(cx);
             }
             WindowIntentAction::Quit => {
-                super::request_app_quit(cx);
+                // Tray events may arrive while every window is hidden, so they cannot rely on
+                // focused action bubbling to protect a dirty Knowledge draft.
+                self.request_application_quit(cx);
             }
             WindowIntentAction::OpenNativeConnection(launch) => {
                 oxideterm_desktop_presence::show_main_window();
-                if let Err(error) = self.open_native_connection_launch(launch, window, cx) {
+                if let Err(error) = self.open_native_connection_handoff(launch, window, cx) {
                     eprintln!("failed to open forwarded connection launch: {error:#}");
                 }
                 window.activate_window();

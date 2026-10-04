@@ -50,32 +50,6 @@ fn write_skill(root: &Path, name: &str, description: &str, body: &str) -> PathBu
 }
 
 #[test]
-fn discovers_workspace_skill_and_loads_body_on_demand() {
-    let directory = TestDirectory::new("workspace");
-    write_skill(
-        &directory.path().join(".agents/skills"),
-        "release-review",
-        "Review a release before publishing",
-        "Run the release checklist.",
-    );
-    let registry = SkillRegistry::discover(&SkillDiscoveryOptions {
-        workspace_root: Some(directory.path().to_path_buf()),
-        ..SkillDiscoveryOptions::default()
-    });
-
-    let catalog = registry.catalog();
-    let discovered = catalog
-        .iter()
-        .find(|skill| skill.id == "release-review")
-        .expect("workspace skill");
-    assert_eq!(discovered.scope, SkillScope::Workspace);
-    assert_eq!(
-        registry.load("release-review").unwrap(),
-        "Run the release checklist."
-    );
-}
-
-#[test]
 fn discovers_skill_from_the_settings_data_directory() {
     let directory = TestDirectory::new("application-data");
     let data_dir = directory.path().join("portable-store");
@@ -122,6 +96,13 @@ fn workspace_standard_skill_wins_compatible_duplicate() {
         ..SkillDiscoveryOptions::default()
     });
 
+    let discovered = registry
+        .catalog()
+        .into_iter()
+        .find(|skill| skill.id == "review")
+        .expect("workspace skill");
+    assert_eq!(discovered.scope, SkillScope::Workspace);
+    assert_eq!(discovered.description, "Standard review");
     assert_eq!(registry.load("review").unwrap(), "standard");
     assert!(
         registry
@@ -129,31 +110,6 @@ fn workspace_standard_skill_wins_compatible_duplicate() {
             .iter()
             .any(|diagnostic| diagnostic.kind == SkillDiagnosticKind::Shadowed)
     );
-}
-
-#[test]
-fn disabled_skill_is_hidden_and_cannot_be_loaded() {
-    let directory = TestDirectory::new("disabled");
-    let path = write_skill(
-        &directory.path().join(".agents/skills"),
-        "manual-only",
-        "Manual workflow",
-        "instructions",
-    );
-    let canonical_path = fs::canonicalize(path).unwrap();
-    let registry = SkillRegistry::discover(&SkillDiscoveryOptions {
-        workspace_root: Some(directory.path().to_path_buf()),
-        disabled_paths: HashSet::from([canonical_path]),
-        ..SkillDiscoveryOptions::default()
-    });
-
-    assert!(
-        registry
-            .catalog()
-            .iter()
-            .all(|skill| skill.id != "manual-only")
-    );
-    assert!(registry.load("manual-only").is_err());
 }
 
 #[test]
@@ -188,13 +144,19 @@ fn resource_reader_rejects_paths_outside_skill_root() {
 }
 
 #[test]
-fn invalid_name_is_reported_without_poisoning_other_skills() {
+fn discovery_excludes_disabled_and_invalid_skills_without_poisoning_valid_skills() {
     let directory = TestDirectory::new("invalid");
-    write_skill(
+    let invalid_name = write_skill(
         &directory.path().join(".agents/skills"),
         "Bad_Name",
         "Invalid name",
         "ignored",
+    );
+    let empty_body = write_skill(
+        &directory.path().join(".agents/skills"),
+        "empty-skill",
+        "Invalid empty workflow",
+        "",
     );
     write_skill(
         &directory.path().join(".agents/skills"),
@@ -202,51 +164,33 @@ fn invalid_name_is_reported_without_poisoning_other_skills() {
         "Valid workflow",
         "loaded",
     );
-    let registry = SkillRegistry::discover(&SkillDiscoveryOptions {
-        workspace_root: Some(directory.path().to_path_buf()),
-        ..SkillDiscoveryOptions::default()
-    });
-
-    assert!(
-        registry
-            .catalog()
-            .iter()
-            .any(|skill| skill.id == "valid-name")
-    );
-    assert!(
-        registry
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.kind == SkillDiagnosticKind::Invalid)
-    );
-}
-
-#[test]
-fn empty_instructions_are_rejected() {
-    let directory = TestDirectory::new("empty-body");
-    write_skill(
+    let disabled_path = write_skill(
         &directory.path().join(".agents/skills"),
-        "empty-skill",
-        "Invalid empty workflow",
-        "",
+        "manual-only",
+        "Manual workflow",
+        "instructions",
     );
     let registry = SkillRegistry::discover(&SkillDiscoveryOptions {
         workspace_root: Some(directory.path().to_path_buf()),
+        disabled_paths: HashSet::from([fs::canonicalize(disabled_path).unwrap()]),
         ..SkillDiscoveryOptions::default()
     });
 
+    assert_eq!(registry.load("valid-name").unwrap(), "loaded");
     assert!(
         registry
             .catalog()
             .iter()
-            .all(|skill| skill.id != "empty-skill")
+            .all(|skill| skill.id != "manual-only")
     );
-    assert!(
-        registry
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.kind == SkillDiagnosticKind::Invalid)
-    );
+    assert!(registry.load("manual-only").is_err());
+    for (id, path) in [("Bad_Name", invalid_name), ("empty-skill", empty_body)] {
+        assert!(registry.catalog().iter().all(|skill| skill.id != id));
+        let path = fs::canonicalize(path).unwrap();
+        assert!(registry.diagnostics().iter().any(|diagnostic| {
+            diagnostic.path == path && diagnostic.kind == SkillDiagnosticKind::Invalid
+        }));
+    }
 }
 
 #[cfg(unix)]

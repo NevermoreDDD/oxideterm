@@ -280,6 +280,13 @@
       "verifying": "확인 중..."
     },
     "new_connection": {
+      "transport_ftp": "FTP / FTPS",
+      "ftp_description": "패시브 데이터 연결로 FTP 또는 명시적 FTPS를 통해 원격 파일을 관리합니다.",
+      "ftp_tls": "FTPS 사용 (명시적 TLS)",
+      "ftp_initial_path": "초기 디렉터리",
+      "ftp_timeout": "연결 시간 제한 (초)",
+      "ftp_invalid": "FTP 호스트, 포트, 사용자 이름 및 시간 제한을 확인하세요.",
+      "ftp_failed": "FTP 연결 실패",
       "title": "새 연결",
       "description": "터미널, SFTP, 포트 포워딩, 원격 파일 편집에 사용할 SSH 호스트를 설정합니다.",
       "twofa_error": "2FA 오류: {{error}}",
@@ -356,7 +363,7 @@
       "save_failed": "연결 저장 실패",
       "transport_local_terminal": "로컬 터미널",
       "local_terminal_description": "현재 터미널 설정으로 이 기기에서 셸을 엽니다.",
-      "local_terminal_detail": "이 세션은 즉시 열리며 저장된 연결에 추가되지 않습니다.",
+      "local_terminal_detail": "프로젝트의 셸과 시작 디렉터리를 저장합니다. 열 때마다 독립된 터미널을 만듭니다.",
       "local_terminal_open": "터미널 열기",
       "transport_ssh": "SSH 호스트",
       "advanced_group": "고급 연결",

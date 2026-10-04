@@ -116,8 +116,8 @@ fn plan_directory_transfer(
         .map(|limit| limit.saturating_sub(DIRECTORY_HANDLE_HEADROOM).max(1) as usize)
         .unwrap_or(crate::MAX_SFTP_DIRECTORY_PARALLELISM);
     let worker_count = requested_workers.min(handle_workers).max(1);
-    let channel_count = worker_count.min(DIRECTORY_AUX_CHANNEL_LIMIT).max(1);
-    let bulk_lane_workers = worker_count.min(DIRECTORY_BULK_LANE_WORKERS).max(1);
+    let channel_count = worker_count.clamp(1, DIRECTORY_AUX_CHANNEL_LIMIT);
+    let bulk_lane_workers = worker_count.clamp(1, DIRECTORY_BULK_LANE_WORKERS);
     let queue_capacity = worker_count
         .saturating_mul(DIRECTORY_QUEUE_WORKER_MULTIPLIER)
         .max(1);
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_rate_limiter_reserves_one_batch_budget() {
+    fn shared_rate_limiter_shares_a_batch_budget_and_resets_when_limit_changes() {
         let limiter = DirectoryRateLimiter::new();
         let now = Instant::now();
         let bytes_per_second = 64 * 1024;
@@ -170,14 +170,6 @@ mod tests {
 
         assert_eq!(first, std::time::Duration::from_millis(750));
         assert_eq!(second, std::time::Duration::from_millis(1_750));
-    }
-
-    #[test]
-    fn shared_rate_limiter_resets_when_limit_changes() {
-        let limiter = DirectoryRateLimiter::new();
-        let now = Instant::now();
-        let _ = limiter.reserve_delay_at(64 * 1024, 64 * 1024, now);
-
         let changed = limiter.reserve_delay_at(128 * 1024, 128 * 1024, now);
         let disabled = limiter.reserve_delay_at(128 * 1024, 0, now);
 

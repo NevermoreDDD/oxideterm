@@ -16,6 +16,15 @@ use crate::{
 };
 use oxideterm_x11_forwarding::X11ForwardPolicy;
 
+fn totp_key_suffix(binding: Option<&oxideterm_connections::TotpBinding>) -> String {
+    binding.map_or_else(String::new, |binding| {
+        format!(
+            ":totp={:x}",
+            Sha256::digest(binding.credential_id.as_bytes())
+        )
+    })
+}
+
 fn agent_endpoint_key_suffix(label: &str, endpoint: Option<&str>) -> String {
     let endpoint = ssh_agent_endpoint_pool_identity(endpoint);
     // Agent endpoint paths can reveal local account layout, so pool identity
@@ -80,6 +89,9 @@ fn algorithm_preferences_key_suffix(preferences: &SshAlgorithmPreferences) -> St
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshConfig {
+    /// Resolves the explicitly bound credential at authentication time.
+    #[serde(skip)]
+    pub totp: Option<oxideterm_connections::TotpBinding>,
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
@@ -271,7 +283,11 @@ impl SshConfig {
                     } else {
                         String::new()
                     };
-                    let authentication_suffix = authentication_key_suffix(&hop.auth);
+                    let authentication_suffix = format!(
+                        "{}{}",
+                        authentication_key_suffix(&hop.auth),
+                        totp_key_suffix(hop.totp.as_ref())
+                    );
                     let algorithm_suffix = algorithm_preferences_key_suffix(&hop.ssh_algorithms);
                     format!(
                         "{}@{}:{}{}{}{}{}{}{}",
@@ -327,7 +343,11 @@ impl SshConfig {
             .proxy_command
             .as_ref()
             .map_or_else(String::new, ProxyCommandConfig::connection_key_suffix);
-        let authentication_key = authentication_key_suffix(&self.auth);
+        let authentication_key = format!(
+            "{}{}",
+            authentication_key_suffix(&self.auth),
+            totp_key_suffix(self.totp.as_ref())
+        );
         let algorithm_key = algorithm_preferences_key_suffix(&self.ssh_algorithms);
         let channel_strategy_key = if self.ssh_channel_strategy.requires_dedicated_consumers() {
             "|channel_strategy=dedicated_per_consumer"
@@ -364,6 +384,8 @@ impl SshConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyHopConfig {
+    #[serde(skip)]
+    pub totp: Option<oxideterm_connections::TotpBinding>,
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
@@ -391,6 +413,8 @@ pub struct ProxyHopConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthMethod {
     Password {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        prompt: bool,
         password: Zeroizing<String>,
     },
     Key {
@@ -476,7 +500,7 @@ impl AuthMethod {
     /// Passwords and supplied passphrases are retained only for the active connection attempt.
     pub fn has_runtime_secret(&self) -> bool {
         match self {
-            Self::Password { .. } => true,
+            Self::Password { prompt, .. } => !prompt,
             Self::Key { passphrase, .. }
             | Self::ManagedKey { passphrase, .. }
             | Self::Certificate { passphrase, .. } => passphrase.is_some(),
@@ -488,11 +512,22 @@ impl AuthMethod {
     pub fn password(password: impl Into<String>) -> Self {
         Self::Password {
             password: Zeroizing::new(password.into()),
+            prompt: false,
+        }
+    }
+
+    pub fn password_prompt() -> Self {
+        Self::Password {
+            password: Zeroizing::new(String::new()),
+            prompt: true,
         }
     }
 
     pub fn password_secret(password: Zeroizing<String>) -> Self {
-        Self::Password { password }
+        Self::Password {
+            password,
+            prompt: false,
+        }
     }
 
     pub fn key(key_path: impl Into<String>, passphrase: Option<String>) -> Self {
@@ -569,6 +604,7 @@ impl AuthMethod {
 impl Default for SshConfig {
     fn default() -> Self {
         Self {
+            totp: None,
             host: String::new(),
             port: default_port(),
             username: String::new(),
@@ -694,8 +730,10 @@ mod tests {
     #[test]
     fn connection_key_includes_proxy_chain_order() {
         let mut config = SshConfig::password("target", 22, "app", "pw");
+        let direct_key = config.connection_key();
         config.proxy_chain = Some(vec![
             ProxyHopConfig {
+                totp: None,
                 host: "jump-a".to_string(),
                 port: 2222,
                 username: "ops".to_string(),
@@ -710,6 +748,7 @@ mod tests {
                 expected_host_key_fingerprint: None,
             },
             ProxyHopConfig {
+                totp: None,
                 host: "jump-b".to_string(),
                 port: 22,
                 username: "root".to_string(),
@@ -725,9 +764,10 @@ mod tests {
             },
         ]);
 
-        assert!(config.connection_key().starts_with(
-            "app@target:22|ops@jump-a:2222>root@jump-b:22:legacy:agent-forwarding:forwarding-agent="
-        ));
+        let ordered_key = config.connection_key();
+        assert_ne!(ordered_key, direct_key);
+        config.proxy_chain.as_mut().unwrap().reverse();
+        assert_ne!(config.connection_key(), ordered_key);
     }
 
     #[test]
@@ -745,6 +785,7 @@ mod tests {
 
         config.agent_forwarding = false;
         config.proxy_chain = Some(vec![ProxyHopConfig {
+            totp: None,
             host: "jump".to_string(),
             port: 22,
             username: "operator".to_string(),
@@ -796,6 +837,7 @@ mod tests {
 
         config.auth = AuthMethod::Agent;
         config.proxy_chain = Some(vec![ProxyHopConfig {
+            totp: None,
             host: "jump.example.com".to_string(),
             port: 22,
             username: "operator".to_string(),

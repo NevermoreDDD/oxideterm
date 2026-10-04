@@ -21,6 +21,7 @@ pub mod secrets;
 pub mod service;
 pub mod state;
 pub mod state_transitions;
+pub mod sync_v3;
 
 pub const CLOUD_SYNC_PLUGIN_ID: &str = "com.oxideterm.cloud-sync";
 
@@ -112,7 +113,9 @@ pub mod secret_keys {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum CloudSyncStatus {
+    #[default]
     Idle,
     Uploading,
     Checking,
@@ -121,15 +124,11 @@ pub enum CloudSyncStatus {
     Error,
 }
 
-impl Default for CloudSyncStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum BackendType {
+    #[default]
     Webdav,
     HttpJson,
     Dropbox,
@@ -140,29 +139,23 @@ pub enum BackendType {
     Git,
 }
 
-impl Default for BackendType {
-    fn default() -> Self {
-        Self::Webdav
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum AuthMode {
+    #[default]
     Bearer,
     Basic,
     None,
 }
 
-impl Default for AuthMode {
-    fn default() -> Self {
-        Self::Bearer
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSyncSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_password_ref: Option<String>,
+    #[serde(default)]
+    pub local_file_mode: bool,
     #[serde(default)]
     pub backend_type: BackendType,
     #[serde(default)]
@@ -193,9 +186,42 @@ pub struct CloudSyncSettings {
     pub default_conflict_strategy: ConflictStrategy,
 }
 
+impl CloudSyncSettings {
+    pub fn same_destination(&self, other: &Self) -> bool {
+        (
+            &self.backend_type,
+            &self.endpoint,
+            &self.namespace,
+            &self.git_repository,
+            &self.git_branch,
+            &self.s3_bucket,
+            &self.s3_region,
+        ) == (
+            &other.backend_type,
+            &other.endpoint,
+            &other.namespace,
+            &other.git_repository,
+            &other.git_branch,
+            &other.s3_bucket,
+            &other.s3_region,
+        )
+    }
+    pub fn password_secret_key(&self) -> &str {
+        if self.local_file_mode {
+            secret_keys::SYNC_PASSWORD
+        } else {
+            self.sync_password_ref
+                .as_deref()
+                .unwrap_or(secret_keys::SYNC_PASSWORD)
+        }
+    }
+}
+
 impl Default for CloudSyncSettings {
     fn default() -> Self {
         Self {
+            local_file_mode: false,
+            sync_password_ref: None,
             backend_type: BackendType::default(),
             auth_mode: AuthMode::default(),
             endpoint: String::new(),
@@ -216,17 +242,13 @@ impl Default for CloudSyncSettings {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum ConflictStrategy {
+    #[default]
     Merge,
     Replace,
     Skip,
     Rename,
-}
-
-impl Default for ConflictStrategy {
-    fn default() -> Self {
-        Self::Merge
-    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -973,10 +995,9 @@ pub fn format_revision_timestamp(timestamp: DateTime<Utc>) -> String {
 
 pub fn revision_id(timestamp: DateTime<Utc>, device_id: &str, sequence: u64) -> String {
     format!(
-        "{}-{}-{}",
+        "{}-{}-{sequence:03}",
         format_revision_timestamp(timestamp),
         device_id,
-        format!("{sequence:03}")
     )
 }
 

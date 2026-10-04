@@ -18,6 +18,7 @@ impl WorkspaceApp {
         ]);
         let top_items_after_plugins = [
             (SidebarSection::CloudSync, LucideIcon::Cloud),
+            (SidebarSection::Knowledge, LucideIcon::BookOpen),
             (SidebarSection::Assistant, LucideIcon::Sparkles),
             (SidebarSection::HostTools, LucideIcon::Wrench),
         ];
@@ -34,7 +35,7 @@ impl WorkspaceApp {
             .flex_col()
             .items_center()
             .border_r_1()
-            .border_color(rgb(theme.border));
+            .border_color(self.workspace_chrome_divider());
 
         bar = bar.child(
             div()
@@ -49,7 +50,7 @@ impl WorkspaceApp {
                 // matches the adjacent sidebar and workspace tab bars exactly.
                 .bg(self.workspace_chrome_background(theme.bg))
                 .border_b_1()
-                .border_color(rgb(theme.border))
+                .border_color(self.workspace_chrome_divider())
                 .child(
                     div()
                         .id("activity-sidebar-toggle")
@@ -146,10 +147,16 @@ impl WorkspaceApp {
         for (section, icon) in top_items_after_plugins {
             primary_items = primary_items.child(self.render_activity_icon(section, icon, cx));
         }
-        // App lock is a global action rather than a selectable panel. Keep it
-        // directly below Host Tools as the final primary activity action.
-        if self.settings_store.settings().sidebar_ui.show_app_lock_icon {
-            primary_items = primary_items.child(self.render_app_lock_activity_icon(cx));
+        // The sessions footer owns the lock action while visible. Keep the rail
+        // entry reachable when that footer is hidden or another panel is selected.
+        if self.settings_store.settings().sidebar_ui.show_app_lock_icon
+            && (self.sidebar_collapsed
+                || self.effective_sidebar_panel_section() != SidebarSection::Sessions)
+        {
+            primary_items =
+                primary_items.child(div().mb(px(self.tokens.metrics.activity_icon_gap)).child(
+                    self.render_app_lock_button(self.tokens.metrics.activity_icon_size, cx),
+                ));
         }
 
         let mut bottom = div().relative().flex().flex_col().items_center().child(
@@ -201,28 +208,31 @@ impl WorkspaceApp {
         let active = match section {
             SidebarSection::Terminal => false,
             SidebarSection::Runtime => self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Runtime),
             SidebarSection::Network => {
-                self.active_tab(cx)
+                self.active_content_tab(cx)
                     .is_some_and(|tab| tab.kind == TabKind::Runtime)
                     && self.host_tools.read(cx).active_runtime_section
                         == ConnectionRuntimeSection::Topology
             }
             SidebarSection::Files => self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::FileManager),
             SidebarSection::Notifications => self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::NotificationCenter),
             SidebarSection::Extensions => self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::PluginManager),
             SidebarSection::CloudSync => self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::CloudSync),
+            SidebarSection::Knowledge => self
+                .active_content_tab(cx)
+                .is_some_and(|tab| tab.kind == TabKind::Knowledge),
             SidebarSection::Settings => self
-                .active_tab(cx)
+                .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Settings),
             SidebarSection::Assistant => self.ai_sidebar_visible(),
             SidebarSection::HostTools => {
@@ -240,12 +250,7 @@ impl WorkspaceApp {
             } else {
                 self.notification_center.notifications.unread_count
             };
-            let event_count = if self.notification_center.event_log.dnd_enabled {
-                0
-            } else {
-                self.notification_center.event_log.unread_count
-            };
-            notification_count.saturating_add(event_count)
+            notification_count
         } else if section == SidebarSection::Workspace {
             self.visible_local_terminal_session_count(cx)
                 .saturating_add(self.detached_local_terminals.len())
@@ -254,10 +259,8 @@ impl WorkspaceApp {
             0
         };
         let badge_is_error = section == SidebarSection::Notifications
-            && ((!self.notification_center.notifications.dnd_enabled
-                && self.notification_center.notifications.unread_critical_count > 0)
-                || (!self.notification_center.event_log.dnd_enabled
-                    && self.notification_center.event_log.unread_errors > 0));
+            && !self.notification_center.notifications.dnd_enabled
+            && self.notification_center.notifications.unread_critical_count > 0;
         let badge_color = if badge_is_error {
             theme.error
         } else if section == SidebarSection::Workspace && !self.detached_local_terminals.is_empty()
@@ -331,7 +334,6 @@ impl WorkspaceApp {
                 )
             })
             .on_mouse_move(cx.listener({
-                let tooltip = tooltip;
                 move |this, event: &MouseMoveEvent, _window, cx| {
                     this.queue_workspace_tooltip(
                         tooltip_id_for_move.clone(),
@@ -383,6 +385,8 @@ impl WorkspaceApp {
                         this.open_notification_center_tab(window, cx);
                     } else if section == SidebarSection::Assistant {
                         let _ = this.toggle_ai_sidebar(cx);
+                    } else if section == SidebarSection::Knowledge {
+                        this.open_knowledge_workspace_tab(window, cx);
                     } else if section == SidebarSection::HostTools {
                         let _ =
                             this.toggle_context_sidebar_panel(ContextSidebarPanel::HostTools, cx);
@@ -409,6 +413,7 @@ impl WorkspaceApp {
             SidebarSection::Network => self.i18n.t("sidebar.panels.connection_matrix"),
             SidebarSection::Extensions => self.i18n.t("sidebar.panels.plugins"),
             SidebarSection::CloudSync => self.i18n.t("plugin.cloud_sync.panel_title"),
+            SidebarSection::Knowledge => self.i18n.t("sidebar.panels.knowledge"),
             SidebarSection::Assistant => self.i18n.t("sidebar.panels.ai"),
             SidebarSection::HostTools => self.i18n.t("sidebar.panels.host_tools"),
             SidebarSection::Automation => self.i18n.t("sidebar.panels.activity"),
@@ -474,7 +479,6 @@ impl WorkspaceApp {
             .relative()
             .mb(px(self.tokens.metrics.activity_icon_gap))
             .on_mouse_move(cx.listener({
-                let tooltip = tooltip;
                 move |this, event: &MouseMoveEvent, _window, cx| {
                     this.queue_workspace_tooltip(
                         tooltip_id_for_move.clone(),

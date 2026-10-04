@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::ssh_paths::{default_ssh_dir, expand_home_path};
+use crate::ssh_paths::{default_ssh_dir, expand_home_path, user_ssh_dir};
 use crate::{
     ConnectionStore, ConnectionX11ForwardingMode, ConnectionX11ForwardingOptions, SecretString,
     saved_connection_from_ssh_host,
@@ -92,7 +92,18 @@ struct SshHostOptions {
 const MAX_PROXY_JUMP_DEPTH: usize = 16;
 
 pub fn default_ssh_config_path() -> PathBuf {
-    default_ssh_dir().join("config")
+    ssh_config_path_in_dirs(default_ssh_dir(), user_ssh_dir())
+}
+
+fn ssh_config_path_in_dirs(ssh_dir: PathBuf, user_dir: PathBuf) -> PathBuf {
+    let preferred = ssh_dir.join("config");
+    // An existing portable config, including an empty one, owns host selection.
+    // Only absence selects the user's config; an access error must not switch profiles.
+    if preferred.try_exists().unwrap_or(true) {
+        preferred
+    } else {
+        user_dir.join("config")
+    }
 }
 
 pub fn list_ssh_config_hosts(existing_names: &HashSet<String>) -> Result<Vec<SshConfigHost>> {
@@ -1226,6 +1237,65 @@ fn alias_contains_pattern(alias: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn portable_config_selection_reads_user_hosts_until_a_portable_config_exists() {
+        let root = tempfile::tempdir().unwrap();
+        let user_dir = root.path().join("profile/.ssh");
+        let portable_dir = root.path().join("data/.ssh");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::write(
+            user_dir.join("config"),
+            "Host personal\n HostName personal.example\n",
+        )
+        .unwrap();
+        let selected = ssh_config_path_in_dirs(portable_dir.clone(), user_dir.clone());
+        assert_eq!(selected, user_dir.join("config"));
+        let hosts = list_ssh_config_hosts_from_path(&selected, &HashSet::new()).unwrap();
+        assert_eq!(
+            hosts
+                .iter()
+                .map(|host| host.alias.as_str())
+                .collect::<Vec<_>>(),
+            ["personal"]
+        );
+
+        fs::create_dir_all(&portable_dir).unwrap();
+        assert_eq!(
+            ssh_config_path_in_dirs(portable_dir.clone(), user_dir.clone()),
+            selected
+        );
+        fs::write(
+            portable_dir.join("config"),
+            "Host travel\n HostName travel.example\n",
+        )
+        .unwrap();
+        let selected = ssh_config_path_in_dirs(portable_dir.clone(), user_dir.clone());
+        assert_eq!(selected, portable_dir.join("config"));
+        let hosts = list_ssh_config_hosts_from_path(&selected, &HashSet::new()).unwrap();
+        assert_eq!(
+            hosts
+                .iter()
+                .map(|host| host.alias.as_str())
+                .collect::<Vec<_>>(),
+            ["travel"]
+        );
+
+        fs::write(&selected, "").unwrap();
+        assert_eq!(
+            ssh_config_path_in_dirs(portable_dir, user_dir.clone()),
+            selected
+        );
+        assert!(
+            list_ssh_config_hosts_from_path(&selected, &HashSet::new())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            ssh_config_path_in_dirs(user_dir.clone(), user_dir.clone()),
+            user_dir.join("config")
+        );
+    }
+
     fn block(patterns: &[&str], options: SshHostOptions) -> SshHostBlock {
         SshHostBlock {
             patterns: patterns
@@ -1253,79 +1323,20 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_equals_separated_options() {
-        let directory = std::env::temp_dir().join(format!(
-            "oxideterm-ssh-config-equals-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
+    fn file_parser_preserves_mixed_syntax_auth_policy_and_remote_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
         fs::write(
-            directory.join("config"),
-            "Host=production\nHostName=prod.example.com\nPort=2200\nConnectTimeout=120\n",
-        )
-        .unwrap();
-
-        let blocks = parse_ssh_config_file(&directory.join("config")).unwrap();
-        let host = resolve_ssh_config_alias_from_blocks("production", &blocks)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(host.hostname.as_deref(), Some("prod.example.com"));
-        assert_eq!(host.port, Some(2200));
-        assert_eq!(host.connect_timeout_seconds, Some(120));
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn parser_preserves_explicit_gssapi_policy() {
-        let directory = std::env::temp_dir().join(format!(
-            "oxideterm-ssh-config-gssapi-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(
-            directory.join("config"),
+            &path,
             concat!(
-                "Host production\n",
-                "  HostName prod.example.com\n",
+                "Host=production\n",
+                "HostName=prod.example.com\n",
+                "Port=2200\n",
+                "ConnectTimeout=120\n",
+                "  User deploy\n",
                 "  GSSAPIAuthentication yes\n",
                 "  GSSAPIServerIdentity host/service.example.com@EXAMPLE.COM\n",
                 "  GSSAPIDelegateCredentials yes\n",
-            ),
-        )
-        .unwrap();
-
-        let blocks = parse_ssh_config_file(&directory.join("config")).unwrap();
-        let host = resolve_ssh_config_alias_from_blocks("production", &blocks)
-            .unwrap()
-            .unwrap();
-
-        assert!(host.gssapi_authentication);
-        assert_eq!(
-            host.gssapi_server_identity.as_deref(),
-            Some("host/service.example.com@EXAMPLE.COM")
-        );
-        assert!(host.gssapi_delegate_credentials);
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn remote_command_preserves_shell_text_and_expands_connection_tokens() {
-        let directory = std::env::temp_dir().join(format!(
-            "oxideterm-ssh-config-remote-command-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(
-            directory.join("config"),
-            concat!(
-                "Host production\n",
-                "  HostName prod.example.com\n",
-                "  User deploy\n",
-                "  Port 2200\n",
                 "  RemoteCommand printf '\"%h\" %n %p %r %% # preserved'\n",
                 "Host *\n",
                 "  RemoteCommand echo ignored\n",
@@ -1333,77 +1344,79 @@ mod tests {
         )
         .unwrap();
 
-        let blocks = parse_ssh_config_file(&directory.join("config")).unwrap();
+        let blocks = parse_ssh_config_file(&path).unwrap();
         let host = resolve_ssh_config_alias_from_blocks("production", &blocks)
             .unwrap()
             .unwrap();
-
+        assert_eq!(host.hostname.as_deref(), Some("prod.example.com"));
+        assert_eq!(host.port, Some(2200));
+        assert_eq!(host.connect_timeout_seconds, Some(120));
+        assert!(host.gssapi_authentication);
+        assert_eq!(
+            host.gssapi_server_identity.as_deref(),
+            Some("host/service.example.com@EXAMPLE.COM")
+        );
+        assert!(host.gssapi_delegate_credentials);
         assert_eq!(
             host.remote_command
                 .as_ref()
                 .map(SecretString::expose_secret),
             Some("printf '\"prod.example.com\" production 2200 deploy % # preserved'")
         );
-        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
-    fn x11_options_import_trust_and_compound_timeout() {
-        let blocks = vec![block(
-            &["workstation"],
-            SshHostOptions {
-                forward_x11: Some("yes".to_string()),
-                forward_x11_trusted: Some("yes".to_string()),
-                forward_x11_timeout: Some("1h30m".to_string()),
+    fn x11_host_options_preserve_safe_defaults_and_openssh_timeout_semantics() {
+        for (enabled, trusted, timeout, expected) in [
+            (
+                Some("yes"),
+                Some("yes"),
+                Some("1h30m"),
+                Some(ConnectionX11ForwardingOptions {
+                    enabled: true,
+                    mode: ConnectionX11ForwardingMode::Trusted,
+                    untrusted_timeout_seconds: 5400,
+                }),
+            ),
+            (
+                None,
+                None,
+                None,
+                Some(ConnectionX11ForwardingOptions {
+                    enabled: false,
+                    mode: ConnectionX11ForwardingMode::Untrusted,
+                    untrusted_timeout_seconds: crate::DEFAULT_X11_UNTRUSTED_TIMEOUT_SECONDS,
+                }),
+            ),
+            (
+                Some("yes"),
+                None,
+                Some("0"),
+                Some(ConnectionX11ForwardingOptions {
+                    enabled: true,
+                    mode: ConnectionX11ForwardingMode::Untrusted,
+                    untrusted_timeout_seconds: 0,
+                }),
+            ),
+            (Some("yes"), None, Some("18446744073709551615w"), None),
+        ] {
+            let options = SshHostOptions {
+                forward_x11: enabled.map(str::to_string),
+                forward_x11_trusted: trusted.map(str::to_string),
+                forward_x11_timeout: timeout.map(str::to_string),
                 ..SshHostOptions::default()
-            },
-        )];
-
-        let host = resolve_ssh_config_host("workstation", &blocks).unwrap();
-
-        assert!(host.x11_forwarding.enabled);
-        assert_eq!(
-            host.x11_forwarding.mode,
-            ConnectionX11ForwardingMode::Trusted
-        );
-        assert_eq!(host.x11_forwarding.untrusted_timeout_seconds, 5_400);
-    }
-
-    #[test]
-    fn x11_options_default_to_disabled_untrusted_policy() {
-        let host = resolve_ssh_config_host(
-            "workstation",
-            &[block(&["workstation"], SshHostOptions::default())],
-        )
-        .unwrap();
-
-        assert_eq!(
-            host.x11_forwarding,
-            ConnectionX11ForwardingOptions::default()
-        );
-    }
-
-    #[test]
-    fn x11_options_preserve_openssh_connection_lifetime_timeout() {
-        let blocks = vec![block(
-            &["workstation"],
-            SshHostOptions {
-                forward_x11: Some("yes".to_string()),
-                forward_x11_timeout: Some("0".to_string()),
-                ..SshHostOptions::default()
-            },
-        )];
-
-        let host = resolve_ssh_config_host("workstation", &blocks).unwrap();
-
-        assert!(host.x11_forwarding.enabled);
-        assert_eq!(host.x11_forwarding.untrusted_timeout_seconds, 0);
-    }
-
-    #[test]
-    fn x11_timeout_accepts_openssh_zero_and_rejects_overflow() {
-        assert_eq!(parse_ssh_time_seconds("0").unwrap(), 0);
-        assert!(parse_ssh_time_seconds("18446744073709551615w").is_err());
+            };
+            let result =
+                resolve_ssh_config_host("workstation", &[block(&["workstation"], options)]);
+            match expected {
+                Some(expected) => assert_eq!(
+                    result.unwrap().x11_forwarding,
+                    expected,
+                    "timeout {timeout:?}"
+                ),
+                None => assert!(result.is_err(), "overflowing timeout must reject the host"),
+            }
+        }
     }
 
     #[test]

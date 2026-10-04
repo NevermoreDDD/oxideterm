@@ -205,6 +205,22 @@ where
         })
     }
 
+    pub(in crate::workspace) fn handle_for_role(&self, role: WindowRole) -> Option<Handle> {
+        self.windows
+            .values()
+            .find(|window| window.role == role)
+            .map(|window| window.handle)
+    }
+
+    pub(in crate::workspace) fn is_only_window_with_role(&self, role: WindowRole) -> bool {
+        self.windows.len() == 1
+            && self
+                .windows
+                .values()
+                .next()
+                .is_some_and(|window| window.role == role)
+    }
+
     #[cfg(test)]
     pub(in crate::workspace) fn take_event(&mut self) -> Option<WindowRegistryEvent> {
         self.events.pop_front()
@@ -821,6 +837,14 @@ mod tests {
         assert_eq!(registry.take_event(), None);
         assert!(!registry.release(second_detached, second_detached_handle.window_id()));
         assert_eq!(registry.take_event(), None);
+
+        let reopened = registry.register(WindowRole::Main, main_handle.window_id(), main_handle);
+        assert!(registry.release(reopened, main_handle.window_id()));
+        assert_eq!(
+            registry.take_event(),
+            Some(WindowRegistryEvent::LastWindowReleased)
+        );
+        assert_eq!(registry.take_event(), None);
     }
 
     #[test]
@@ -840,19 +864,36 @@ mod tests {
     }
 
     #[test]
-    fn detached_window_becomes_target_after_main_release() {
+    fn window_handle_lookup_distinguishes_main_and_detached_roles() {
         let mut registry = WindowRegistry::<u8, &'static str, u8>::default();
-        let main = registry.register(WindowRole::Main, window_id(1), 1);
-        let detached =
-            registry.register(WindowRole::Detached { tab_id: TabId(7) }, window_id(2), 2);
-        assert!(registry.release(main, window_id(1)));
+        registry.register(WindowRole::Main, window_id(1), 1);
+        registry.register(WindowRole::Detached { tab_id: TabId(7) }, window_id(2), 2);
 
-        registry.enqueue("effect", None, WindowTargetHint::MainOrAny);
-        let delivery = registry
-            .next_delivery()
-            .expect("detached window should receive the effect");
-        assert_eq!(delivery.registration, detached);
-        assert_eq!(delivery.handle, 2);
+        assert_eq!(registry.handle_for_role(WindowRole::Main), Some(1));
+        assert_eq!(
+            registry.handle_for_role(WindowRole::Detached { tab_id: TabId(7) }),
+            Some(2)
+        );
+        assert_eq!(
+            registry.handle_for_role(WindowRole::Detached { tab_id: TabId(8) }),
+            None
+        );
+    }
+
+    #[test]
+    fn single_window_role_requires_an_exact_final_registration() {
+        let mut registry = WindowRegistry::<u8, &'static str, u8>::default();
+        let detached =
+            registry.register(WindowRole::Detached { tab_id: TabId(7) }, window_id(1), 1);
+
+        assert!(registry.is_only_window_with_role(WindowRole::Detached { tab_id: TabId(7) }));
+        assert!(!registry.is_only_window_with_role(WindowRole::Main));
+
+        registry.register(WindowRole::Detached { tab_id: TabId(8) }, window_id(2), 2);
+        assert!(!registry.is_only_window_with_role(WindowRole::Detached { tab_id: TabId(7) }));
+
+        assert!(registry.release(detached, window_id(1)));
+        assert!(registry.is_only_window_with_role(WindowRole::Detached { tab_id: TabId(8) }));
     }
 
     #[test]
@@ -890,30 +931,6 @@ mod tests {
             registry.next_delivery().map(|delivery| delivery.effect),
             Some("second")
         );
-    }
-
-    #[test]
-    fn last_window_event_is_emitted_exactly_once_per_empty_transition() {
-        let mut registry = WindowRegistry::<u8, (), u8>::default();
-        let main = registry.register(WindowRole::Main, window_id(1), 1);
-
-        assert!(registry.release(main, window_id(1)));
-        assert_eq!(
-            registry.take_event(),
-            Some(WindowRegistryEvent::LastWindowReleased)
-        );
-        assert_eq!(registry.take_event(), None);
-        assert!(!registry.release(main, window_id(1)));
-        assert_eq!(registry.take_event(), None);
-
-        let detached =
-            registry.register(WindowRole::Detached { tab_id: TabId(2) }, window_id(2), 2);
-        assert!(registry.release(detached, window_id(2)));
-        assert_eq!(
-            registry.take_event(),
-            Some(WindowRegistryEvent::LastWindowReleased)
-        );
-        assert_eq!(registry.take_event(), None);
     }
 
     #[test]

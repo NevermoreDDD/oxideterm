@@ -1,15 +1,16 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, IntoColor, Pixels, SharedString,
-    TextRun, Window, px, rgb,
+    Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Pixels, SharedString, TextRun,
+    Window, px, rgb,
 };
 use oxideterm_render_policy::EffectiveRenderPolicy;
 use oxideterm_settings::{
     TerminalBackspaceSequence, TerminalDeleteSequence, TerminalSemanticScheme,
 };
 use oxideterm_terminal::{
-    TerminalColor, TerminalCursorShape, TerminalEncoding, TerminalRow, TrzszTransferPolicy,
+    TerminalColor, TerminalCursorShape, TerminalEncoding, TerminalPalette, TerminalRow,
+    TrzszTransferPolicy,
 };
 use oxideterm_terminal_semantic::{
     CompiledSemanticScheme, SemanticClass, SemanticScheme, SemanticSchemeDocument,
@@ -39,8 +40,6 @@ pub(crate) const TERMINAL_COMMAND_MARK_GUTTER_WIDTH: f32 = 0.0;
 const NESTED_SEMANTIC_COLOR_COUNT: u8 = 6;
 const TERMINAL_SEMANTIC_ERROR_LINE_BAND_OPACITY: f32 = 0.11;
 const TERMINAL_SEMANTIC_WARNING_LINE_BAND_OPACITY: f32 = 0.08;
-pub(crate) const OXIDETERM_TERMINAL_BACKGROUND: u32 = 0x0d0f12;
-pub(crate) const OXIDETERM_TERMINAL_FOREGROUND: u32 = 0xe6e8eb;
 pub(crate) const SCROLLBAR_WIDTH: f32 = 10.0;
 pub(crate) const SCROLLBAR_GAP: f32 = 0.0;
 pub(crate) const SCROLLBAR_RESERVED_WIDTH: f32 = SCROLLBAR_WIDTH;
@@ -125,6 +124,8 @@ pub struct TerminalUiPreferences {
     pub serial_control_labels: TerminalSerialControlLabels,
     pub tmux_labels: TerminalTmuxLabels,
     pub terminal_timestamps_enabled: bool,
+    pub control_bar_expand_label: String,
+    pub control_bar_collapse_label: String,
     pub session_log_options: Option<TerminalSessionLogOptions>,
     pub session_log_automatic: bool,
     pub session_log_labels: TerminalSessionLogLabels,
@@ -252,6 +253,8 @@ impl Default for TerminalUiPreferences {
             serial_control_labels: TerminalSerialControlLabels::default(),
             tmux_labels: TerminalTmuxLabels::default(),
             terminal_timestamps_enabled: false,
+            control_bar_expand_label: "Show controls".into(),
+            control_bar_collapse_label: "Hide controls".into(),
             session_log_options: None,
             session_log_automatic: false,
             session_log_labels: TerminalSessionLogLabels::default(),
@@ -381,12 +384,18 @@ pub struct TerminalNotice {
 #[derive(Clone, Debug)]
 pub struct TerminalAutosuggestLabels {
     pub history_source: String,
+    pub matches: String,
+    pub navigation_hint: String,
+    pub dismiss_hint: String,
 }
 
 impl Default for TerminalAutosuggestLabels {
     fn default() -> Self {
         Self {
             history_source: "history".to_string(),
+            matches: "{{count}} matches".into(),
+            navigation_hint: "{{select}} select · {{run}} run · Click fill".into(),
+            dismiss_hint: "{{dismiss}} close · {{remove}} remove".into(),
         }
     }
 }
@@ -441,6 +450,12 @@ pub struct TerminalModemLabels {
     pub ymodem_receive: String,
     pub zmodem_upload: String,
     pub zmodem_receive: String,
+    pub timeout: String,
+    pub protocol_error: String,
+    pub file_error: String,
+    pub file_too_large: String,
+    pub buffer_overflow: String,
+    pub worker_stopped: String,
 }
 
 impl Default for TerminalModemLabels {
@@ -453,6 +468,16 @@ impl Default for TerminalModemLabels {
             ymodem_receive: "YMODEM receive".to_string(),
             zmodem_upload: "ZMODEM upload".to_string(),
             zmodem_receive: "ZMODEM receive".to_string(),
+            timeout: "The peer did not respond in time. Start its transfer program, then retry."
+                .to_string(),
+            protocol_error: "The peer sent invalid or unexpected transfer data.".to_string(),
+            file_error:
+                "Unable to read or write the transfer file. Check permissions and free space."
+                    .to_string(),
+            file_too_large: "The file exceeds this protocol's size limit.".to_string(),
+            buffer_overflow: "The peer sent more data than the transfer buffer can hold."
+                .to_string(),
+            worker_stopped: "The transfer worker stopped unexpectedly. Please retry.".to_string(),
         }
     }
 }
@@ -719,6 +744,12 @@ impl Default for TerminalKittyFileTransmissionLabels {
 
 #[derive(Clone, Debug)]
 pub struct TerminalPasteLabels {
+    pub edit: String,
+    pub edit_title: String,
+    pub strip_fence: String,
+    pub undo: String,
+    pub redo: String,
+    pub editor_menu: oxideterm_gpui_editor::EditorContextMenuLabels,
     pub title_template: String,
     pub more_lines_template: String,
     pub confirm: String,
@@ -729,6 +760,12 @@ pub struct TerminalPasteLabels {
 impl Default for TerminalPasteLabels {
     fn default() -> Self {
         Self {
+            edit: "Edit".into(),
+            edit_title: "Edit before pasting".into(),
+            strip_fence: "Remove code block markers".into(),
+            undo: "Undo".into(),
+            redo: "Redo".into(),
+            editor_menu: oxideterm_gpui_editor::EditorContextMenuLabels::default(),
             title_template: "Multiple lines detected ({{count}} lines)".to_string(),
             more_lines_template: "... {{count}} more lines".to_string(),
             confirm: "Confirm".to_string(),
@@ -782,7 +819,7 @@ pub struct TerminalBackgroundPreferences {
     pub fit: TerminalBackgroundFit,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TerminalBackgroundFit {
     Cover,
     Contain,
@@ -975,6 +1012,36 @@ impl TerminalUiTheme {
             tokens,
         }
     }
+
+    /// Colors the terminal backend resolves for default, ANSI, and color-query slots, so
+    /// emulator output and pane chrome share one theme.
+    pub fn palette(&self) -> TerminalPalette {
+        let terminal = self.tokens.terminal;
+        TerminalPalette::new(
+            terminal_color_from_hex(self.foreground),
+            terminal_color_from_hex(self.background),
+            terminal_color_from_hex(self.header_foreground),
+            [
+                terminal.black,
+                terminal.red,
+                terminal.green,
+                terminal.yellow,
+                terminal.blue,
+                terminal.magenta,
+                terminal.cyan,
+                terminal.white,
+                terminal.bright_black,
+                terminal.bright_red,
+                terminal.bright_green,
+                terminal.bright_yellow,
+                terminal.bright_blue,
+                terminal.bright_magenta,
+                terminal.bright_cyan,
+                terminal.bright_white,
+            ]
+            .map(terminal_color_from_hex),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1050,7 +1117,7 @@ pub(crate) fn fallback_cell_width(window: &mut Window, font: &Font, font_size: P
     let run = TextRun {
         len: sample.len(),
         font: font.clone(),
-        color: rgb(0xe6e8eb).into_color(),
+        color: rgb(0xe6e8eb).into(),
         background_color: None,
         underline: None,
         strikethrough: None,

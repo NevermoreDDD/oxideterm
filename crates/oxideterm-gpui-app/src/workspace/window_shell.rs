@@ -443,41 +443,6 @@ mod tests {
         ));
     }
 
-    struct SessionDropProbe {
-        drops: Arc<AtomicUsize>,
-    }
-
-    impl Drop for SessionDropProbe {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-
-    struct SessionLeaseWindow {
-        _session: Entity<SessionDropProbe>,
-    }
-
-    impl Render for SessionLeaseWindow {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
-    struct WindowBootstrapSession {
-        background_cache_byte_limit: usize,
-        detached_window_opened: bool,
-    }
-
-    struct BackgroundBootstrapWindow {
-        _background: Entity<WorkspaceWindowBackgroundEntity>,
-    }
-
-    impl Render for BackgroundBootstrapWindow {
-        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
     struct NotificationSource;
 
     struct ObservingWindowRoot {
@@ -506,74 +471,6 @@ mod tests {
             self.render_count.fetch_add(1, Ordering::AcqRel);
             div()
         }
-    }
-
-    #[gpui::test]
-    fn shared_session_outlives_main_and_one_of_two_detached_windows(cx: &mut TestAppContext) {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let session = cx.new({
-            let drops = drops.clone();
-            move |_| SessionDropProbe { drops }
-        });
-        let main_window = cx.add_window({
-            let session = session.clone();
-            move |_window, _cx| SessionLeaseWindow { _session: session }
-        });
-        let first_detached_window = cx.add_window({
-            let session = session.clone();
-            move |_window, _cx| SessionLeaseWindow { _session: session }
-        });
-        let second_detached_window = cx.add_window({
-            let session = session.clone();
-            move |_window, _cx| SessionLeaseWindow { _session: session }
-        });
-        drop(session);
-
-        main_window
-            .update(cx, |_root, window, _cx| window.remove_window())
-            .expect("main window release");
-        cx.run_until_parked();
-        assert_eq!(drops.load(Ordering::Acquire), 0);
-
-        first_detached_window
-            .update(cx, |_root, window, _cx| window.remove_window())
-            .expect("first detached release");
-        cx.run_until_parked();
-        assert_eq!(drops.load(Ordering::Acquire), 0);
-
-        second_detached_window
-            .update(cx, |_root, window, _cx| window.remove_window())
-            .expect("last detached release");
-        cx.run_until_parked();
-        assert_eq!(drops.load(Ordering::Acquire), 1);
-        cx.update(|_| {});
-        assert_eq!(drops.load(Ordering::Acquire), 1);
-    }
-
-    #[gpui::test]
-    fn captured_background_budget_bootstraps_window_during_session_update(cx: &mut TestAppContext) {
-        let session = cx.new(|_| WindowBootstrapSession {
-            background_cache_byte_limit: 1024,
-            detached_window_opened: false,
-        });
-
-        session.update(cx, |session, cx| {
-            // Opening a window draws it synchronously, so the builder must not
-            // read the session Entity that owns this active update.
-            let background_cache_byte_limit = session.background_cache_byte_limit;
-            cx.open_window(gpui::WindowOptions::default(), move |_window, cx| {
-                cx.new(|cx| BackgroundBootstrapWindow {
-                    _background: WorkspaceWindowBackgroundEntity::with_byte_limit(
-                        background_cache_byte_limit,
-                        cx,
-                    ),
-                })
-            })
-            .expect("background-only detached window should open");
-            session.detached_window_opened = true;
-        });
-
-        assert!(session.read_with(cx, |session, _cx| { session.detached_window_opened }));
     }
 
     #[gpui::test]

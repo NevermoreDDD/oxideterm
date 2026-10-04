@@ -12,6 +12,11 @@ pub const MARKDOWN_IMAGE_CACHE_ID: &str = "oxideterm-markdown-images";
 /// Options that control markdown rendering behaviour.
 #[derive(Clone, Debug)]
 pub struct MarkdownOptions {
+    pub scroll_sync: Option<crate::scroll_sync::MarkdownScrollSync>,
+    pub(crate) code_source: Option<crate::model::SourceSpan>,
+    pub(crate) disclosures: crate::disclosure::DisclosureState,
+    pub html_details_label: String,
+    pub navigation: Option<crate::navigation::MarkdownNavigation>,
     /// Base font size in pixels for body text.
     /// Heading sizes are derived as multiples of this value.
     pub base_font_size: f32,
@@ -99,6 +104,7 @@ pub struct MarkdownOptions {
 
     /// Localized action label for opening Mermaid diagrams in a larger view.
     pub mermaid_expand_label: String,
+    pub mermaid_loading_label: String,
 }
 
 impl Default for MarkdownOptions {
@@ -116,6 +122,11 @@ impl MarkdownOptions {
     /// Build markdown renderer options from UI metrics.
     pub fn from_metrics(metrics: UiMetrics) -> Self {
         Self {
+            scroll_sync: None,
+            code_source: None,
+            disclosures: Default::default(),
+            html_details_label: "Details".into(),
+            navigation: None,
             base_font_size: metrics.markdown_body_font_size,
             body_font_family: metrics.markdown_body_font_family.into(),
             code_font_family: metrics.markdown_code_font_family.into(),
@@ -152,6 +163,7 @@ impl MarkdownOptions {
             math_stroke_width: 1.5,
             mermaid_error_prefix: "Unsupported Mermaid diagram".to_string(),
             mermaid_expand_label: "EXPAND".to_string(),
+            mermaid_loading_label: "Rendering diagram…".to_string(),
         }
     }
 

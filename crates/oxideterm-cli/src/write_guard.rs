@@ -35,6 +35,18 @@ pub(crate) fn prepare_write(args: &WriteArgs, has_changes: bool) -> CliResult<Wr
         ));
     }
 
+    if oxideterm_cloud_sync::sync_v3::RecoveryJournal::has_pending(
+        &crate::paths::default_settings_path(),
+    )
+    .map_err(|error| crate::error::runtime_error(error, args.json))?
+    {
+        return Err(CliError::new(
+            "cloud_sync_recovery_required",
+            "An interrupted cloud sync needs recovery. Reopen OxideTerm or run cloud-sync sync --yes before editing saved data.",
+            args.json,
+        ));
+    }
+
     let backup = if should_backup(args) {
         Some(create_backup_file(None, args.json)?)
     } else {
@@ -77,17 +89,15 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_does_not_require_confirmation() {
-        let plan = prepare_write(&write_args(true, false, false), true).unwrap();
+    fn preview_needs_no_confirmation_but_real_write_requires_it() {
+        let mut args = write_args(true, false, false);
+        let plan = prepare_write(&args, true).unwrap();
 
         assert!(plan.dry_run);
         assert!(!plan.applied);
         assert!(plan.backup_path.is_none());
-    }
-
-    #[test]
-    fn real_write_requires_confirmation() {
-        let error = prepare_write(&write_args(false, false, false), true).unwrap_err();
+        args.dry_run = false;
+        let error = prepare_write(&args, true).unwrap_err();
 
         assert_eq!(error.code, "confirmation_required");
     }

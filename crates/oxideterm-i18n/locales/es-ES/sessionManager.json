@@ -110,11 +110,13 @@
       "auth_key": "Clave SSH",
       "auth_agent": "Agent",
       "saved_password": "Contraseña guardada",
-      "password_placeholder": "Guardada en el llavero del sistema",
+      "password_placeholder": "Haz clic para ver la contraseña guardada",
       "password_required": "Introduce la contraseña para conectarte.",
       "show_password": "Mostrar contraseña guardada",
       "hide_password": "Ocultar contraseña guardada",
-      "password_load_failed": "No se pudo leer la contraseña guardada. Comprueba el acceso al almacén de credenciales e inténtalo de nuevo.",
+      "password_load_failed": "No se pudo leer el almacén de credenciales. Vuelve a intentarlo o introduce de nuevo la contraseña y guárdala.",
+      "password_not_found": "La contraseña a la que hace referencia esta conexión no está en el almacén de credenciales. Vuelve a introducirla y guárdala.",
+      "password_store_locked": "La bóveda portátil está bloqueada. Reinicia OxideTerm, desbloquéala con tu contraseña del modo portátil y vuelve a intentarlo.",
       "password_hint": "El botón del ojo muestra la contraseña guardada sin modificarla. Edita el valor para reemplazarla o deja el campo vacío para conservarla.",
       "key_path": "Ruta del archivo de clave",
       "browse": "Examinar",
@@ -125,6 +127,9 @@
       "choose_icon": "Cambiar icono",
       "hide_icons": "Ocultar iconos",
       "default_icon": "Icono predeterminado",
+      "auto_icon": "Detectar automáticamente",
+      "custom_icon": "Elegir icono",
+      "auto_icon_hint": "Tras conectar, las sesiones activas muestran el icono del sistema detectado. Si no hay un icono coincidente, se utiliza un icono de servidor genérico.",
       "color": "Color",
       "icon_color": "Color del icono",
       "icon_background_color": "Color de fondo del icono",
@@ -132,7 +137,8 @@
       "cancel": "Cancelar",
       "save": "Guardar",
       "saving": "Guardando...",
-      "passphrase_hint": "Déjalo vacío para conservar la frase de paso guardada si la ruta de la clave no cambia."
+      "passphrase_hint": "Déjalo vacío para conservar la frase de paso guardada si la ruta de la clave no cambia.",
+      "brand_icon_hint": "Los logotipos de distribuciones conservan sus colores y proporciones originales."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "Sesiones guardadas",
       "expand_all": "Expandir todo",
       "collapse_all": "Contraer todo"
+    },
+    "local_terminal_profiles": {
+      "delete": "Eliminar sesión local",
+      "delete_failed": "No se pudo eliminar la sesión local",
+      "confirm_delete": "¿Eliminar la sesión local «{{name}}»? Los terminales activos permanecerán abiertos."
     }
   }
 }

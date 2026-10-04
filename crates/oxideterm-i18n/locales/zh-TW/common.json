@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} 仍在執行（可能位於系統匣），或其檔案正被其他程式使用。請先儲存工作。按「確定」關閉使用中的程式並繼續安裝，按「取消」停止安裝。安裝目錄：{{path}}",
+    "application_close_failed": "無法釋放或確認 {{path}} 中的檔案使用狀態。請從系統匣結束 {{app}}，並關閉正在使用此目錄的其他程式，再按「重試」。按「取消」停止安裝，不取代檔案。"
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Shell 啟動器"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "不支援的 Mermaid 圖",
-    "mermaid_expand": "放大"
+    "mermaid_expand": "放大",
+    "mermaid_loading": "正在繪製圖表…",
+    "html_details": "詳細內容"
   },
   "layout": {
     "empty": {
@@ -204,8 +210,29 @@
     "native_sidebar_empty_title": "外掛系統暫不可用",
     "native_sidebar_empty_description": "開啟外掛標籤頁查看 native 目前狀態。",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "請將同步伺服器升級至支援新版雲端同步協定的版本，然後重新同步。",
+        "password_change_pending": "上次密碼變更尚未完成，請使用上次的新密碼重試。",
+        "change_password": "變更同步密碼",
+        "change_password_description": "使用新密碼建立同步空間，上傳並驗證成功後切換。原本的同步空間會保留。",
+        "password_change_separate_settings": "請先儲存其他設定，再變更同步密碼。",
+        "password_too_short": "密碼至少需要 6 個字元。",
+        "sync": "同步",
+        "cleanup_pending": "清理尚未完成，請再次同步。",
+        "keep": "保留",
+        "preview": "同步預覽",
+        "changes": "變更欄位",
+        "upgrade": "將升級現有雲端資料，原始檔案會保留。",
+        "candidate": "版本",
+        "apply": "套用並同步",
+        "configuration": "設定",
+        "protected": "受保護的內容",
+        "current": "目前裝置",
+        "conflict_hint": "請選擇衝突欄位的版本。未選擇的衝突會保留目前裝置的值。"
+      },
       "panel_title": "Oxide 雲端同步",
       "backend": {
+        "local_file": "本機檔案",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -278,6 +305,7 @@
         "sync_scope": "同步範圍",
         "conflict_recovery": "衝突復原",
         "import_preview": "匯入預覽",
+        "export_preview": "匯出預覽",
         "upload_preview": "上傳預覽",
         "rollback_preview": "回滾預覽",
         "rollback_backups": "回滾備份",
@@ -336,6 +364,7 @@
         "google_drive_permission_warning": "如果 Google 回報 access_denied、admin_policy_enforced、invalid_client 或 Drive API 未啟用，請檢查同意畫面、桌面用戶端類型、API 狀態、管理員政策與測試使用者。"
       },
       "settings": {
+        "sync_method": "同步方式",
         "backend_type": "後端類型",
         "auth_mode": "驗證方式",
         "endpoint": "Endpoint",
@@ -438,6 +467,7 @@
         "summary_line": "{{connections}} 個連線，{{forwards}} 個轉送，{{quickCommands}} 條快捷命令，{{serialProfiles}} 個序列埠設定，{{telnetProfiles}} 個 Telnet 設定，{{pluginSettingsCount}} 項外掛偏好設定，{{sensitiveCredentials}} 個敏感憑證"
       },
       "errors": {
+        "local_forward_requires_connection": "匯出本機檔案時，請同時選取所選轉送規則所屬的連線。",
         "operation_in_progress": "另一個雲端同步操作正在執行，請稍後再試。",
         "missing_endpoint": "請先設定後端 Endpoint，再執行同步。",
         "missing_namespace": "請先設定命名空間或路徑前綴，再執行同步。",
@@ -568,6 +598,7 @@
         "downloading": "下載物件"
       },
       "preview": {
+        "standalone_sftp_profiles": "檔案傳輸連線（{{count}}）",
         "summary_header": "遠端預覽摘要",
         "apply_plan_title": "本次套用計畫",
         "upload_scope_title": "上傳範圍",
@@ -1171,6 +1202,12 @@
     "hint_other": "Zen 模式 — 按 Ctrl+Shift+Z 退出"
   },
   "tabbar": {
+    "drag_to_dock": "拖曳停靠",
+    "workspace": "工作區",
+    "merge_into_horizontal": "併入「{{title}}」（左右分割）",
+    "merge_into_vertical": "併入「{{title}}」（上下分割）",
+    "move_pane_to_tab": "移至新分頁",
+    "move_pane_to_window": "移至新視窗",
     "offline": "離線",
     "cancel_reconnect": "取消重新連線",
     "reconnect": "重新連線",
@@ -1287,5 +1324,13 @@
     "setup_pending": "正在建立可攜金鑰庫...",
     "unlock_submit": "解鎖並繼續",
     "unlock_pending": "正在解鎖可攜資料..."
+  },
+  "local_session": {
+    "directory": "啟動目錄",
+    "inherit_directory": "留空使用設定中的預設目錄",
+    "inherit_shell": "使用設定中的預設 Shell",
+    "shell_unavailable": "此裝置沒有此工作階段儲存的 Shell，請編輯並選擇已安裝的 Shell。",
+    "directory_unavailable": "啟動目錄不存在，請編輯工作階段並選擇有效目錄。",
+    "name_required": "請輸入名稱以儲存本機工作階段。"
   }
 }

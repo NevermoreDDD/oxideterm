@@ -21,10 +21,11 @@ Run checks from the repository root. When a command needs an operating-system-sp
 | Terminal behavior or rendering | `cargo test -p oxideterm-gpui-terminal` and the relevant terminal-model check | Selection, scrolling, alternate screen, resize, and the affected shell or TUI workflow |
 | SSH, SFTP, forwarding, reconnect | The focused crate tests, then `cargo check -p oxideterm-gpui-app` | Close one consumer while another remains active; explicit disconnect; reconnect and failure cleanup |
 | Settings, themes, or locale keys | `python scripts/quality/audit_i18n.py` plus the affected crate check | Inspect every changed locale in the relevant view |
-| macOS framework code | `cargo check -p gpui_macos` and `cargo check -p oxideterm-gpui-app` | Native window, input, cursor, and renderer behavior |
-| Windows framework code | `cargo check -p gpui_windows` and `cargo check -p oxideterm-gpui-app` on Windows | IME, pointer capture, cursor recovery, titlebar, and Direct3D behavior |
+| macOS framework code | `cargo check -p gpui-pre-macos` and `cargo check -p oxideterm-gpui-app` | Native window, input, cursor, and renderer behavior |
+| Windows framework code | `cargo check -p gpui-pre-windows` and `cargo check -p oxideterm-gpui-app` on Windows | IME, pointer capture, cursor recovery, titlebar, and Direct3D behavior |
 | Linux framework code | Relevant Linux crate and application checks | Both affected compositor paths: Wayland and/or X11 |
 | Repository scripts or workflows | The matching script test module | Dispatch only the workflow needed by the change |
+| Git dependencies, Nix package, or flake | `nix build .#oxideterm -L --show-trace` and `nix flake check -L` | Confirm `result/bin/oxideterm` builds and runs |
 
 ## Selecting The Scope
 
@@ -69,3 +70,5 @@ Do not add tests merely to increase coverage. Add a focused regression test when
 ## CI Mapping
 
 The primary CI workflow runs workspace check, formatting, workspace tests, locale auditing, packaging-helper tests, and repository-policy tests. Native platform CI separately checks Windows and macOS GPUI backends and the application. A green Linux workspace job therefore does not establish Windows or macOS native behavior.
+
+The independent [Nix Package workflow](../../.github/workflows/nix-package.yml) runs `nix build .#oxideterm -L --show-trace` and `nix flake check -L` with a 90-minute timeout. It runs automatically when Nix expressions, the flake lock, Cargo manifests, the Cargo lock, or the workflow itself change. Run it manually before a release or when other changes need Nix verification. See the [Nix packaging guide](../../nix/README.md#package-verification) for the trigger paths and manual workflow.

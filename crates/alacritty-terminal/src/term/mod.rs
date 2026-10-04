@@ -91,6 +91,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        const REPORT_COLOR_SCHEME     = 1 << 23;
+        const WIN32_INPUT             = 1 << 24;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -530,8 +532,9 @@ impl<T> Term<T> {
         self.damage.reset(self.columns());
     }
 
+    /// Forces the next damage query to report the full viewport, e.g. after palette changes.
     #[inline]
-    fn mark_fully_damaged(&mut self) {
+    pub fn mark_fully_damaged(&mut self) {
         self.damage.full = true;
     }
 
@@ -1095,6 +1098,15 @@ impl<T> Term<T> {
     }
 }
 
+impl<T: EventListener> Term<T> {
+    /// Only host palette changes notify subscribers; application OSC changes do not.
+    pub fn notify_palette_changed(&mut self) {
+        if self.mode.contains(TermMode::REPORT_COLOR_SCHEME) {
+            self.private_device_status(996);
+        }
+    }
+}
+
 impl<T> Dimensions for Term<T> {
     #[inline]
     fn columns(&self) -> usize {
@@ -1197,7 +1209,6 @@ impl<T: EventListener> Handler for Term<T> {
     fn input_text(&mut self, text: &str) {
         let active_charset = self.grid.cursor.charsets[self.active_charset];
         let supports_batch = text.is_ascii()
-            && active_charset == StandardCharset::Ascii
             && self.mode.contains(TermMode::LINE_WRAP)
             && !self.mode.contains(TermMode::INSERT)
             && !self.grid.cursor.template.flags.intersects(
@@ -1236,15 +1247,30 @@ impl<T: EventListener> Handler for Term<T> {
             }
 
             let template = self.grid.cursor.template.clone();
-            for (cell, byte) in self.grid[line][Column(start)..Column(end)]
-                .iter_mut()
-                .zip(&bytes[processed..processed + write_len])
-            {
-                cell.c = *byte as char;
-                cell.fg = template.fg;
-                cell.bg = template.bg;
-                cell.flags = template.flags;
-                cell.extra.clone_from(&template.extra);
+            let cells = &mut self.grid[line][Column(start)..Column(end)];
+            // Keep charset mapping outside the ordinary ASCII fill loop.
+            if active_charset == StandardCharset::Ascii {
+                for (cell, byte) in cells
+                    .iter_mut()
+                    .zip(&bytes[processed..processed + write_len])
+                {
+                    cell.c = *byte as char;
+                    cell.fg = template.fg;
+                    cell.bg = template.bg;
+                    cell.flags = template.flags;
+                    cell.extra.clone_from(&template.extra);
+                }
+            } else {
+                for (cell, byte) in cells
+                    .iter_mut()
+                    .zip(&bytes[processed..processed + write_len])
+                {
+                    cell.c = active_charset.map(*byte as char);
+                    cell.fg = template.fg;
+                    cell.bg = template.bg;
+                    cell.flags = template.flags;
+                    cell.extra.clone_from(&template.extra);
+                }
             }
 
             processed += write_len;
@@ -1536,6 +1562,13 @@ impl<T: EventListener> Handler for Term<T> {
             },
             _ => debug!("unknown device status query: {arg}"),
         };
+    }
+
+    #[inline]
+    fn private_device_status(&mut self, arg: usize) {
+        if arg == 996 {
+            self.event_proxy.send_event(Event::ColorSchemeRequest);
+        }
     }
 
     #[inline]
@@ -2161,6 +2194,8 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ReportColorScheme => self.mode.insert(TermMode::REPORT_COLOR_SCHEME),
+            NamedPrivateMode::Win32Input => self.mode.insert(TermMode::WIN32_INPUT),
             // Mouse encodings are mutually exclusive.
             NamedPrivateMode::SgrMouse => {
                 self.mode.remove(TermMode::UTF8_MOUSE);
@@ -2220,6 +2255,8 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ReportColorScheme => self.mode.remove(TermMode::REPORT_COLOR_SCHEME),
+            NamedPrivateMode::Win32Input => self.mode.remove(TermMode::WIN32_INPUT),
             NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
             NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
@@ -2275,7 +2312,11 @@ impl<T: EventListener> Handler for Term<T> {
                     self.mode.contains(TermMode::BRACKETED_PASTE).into()
                 },
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
+                NamedPrivateMode::ReportColorScheme => {
+                    self.mode.contains(TermMode::REPORT_COLOR_SCHEME).into()
+                },
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
+                NamedPrivateMode::Win32Input => self.mode.contains(TermMode::WIN32_INPUT).into(),
             },
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
@@ -2711,6 +2752,27 @@ mod tests {
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
 
+    #[test]
+    fn win32_input_mode_negotiates_reports_and_resets() {
+        struct Replies(std::cell::RefCell<Vec<String>>);
+        impl EventListener for Replies {
+            fn send_event(&self, event: Event) {
+                if let Event::PtyWrite(reply) = event {
+                    self.0.borrow_mut().push(reply);
+                }
+            }
+        }
+        let mut term = Term::new(Config::default(), &TermSize::new(80, 24), Replies(Default::default()));
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        parser.advance(&mut term, b"\x1b[?9001$p\x1b[?9001h\x1b[?9001$p");
+        assert!(term.mode().contains(TermMode::WIN32_INPUT));
+        parser.advance(&mut term, b"\x1b[?9001l\x1b[?9001$p");
+        assert!(!term.mode().contains(TermMode::WIN32_INPUT));
+        parser.advance(&mut term, b"\x1b[?9001h\x1bc\x1b[?9001$p");
+        assert!(!term.mode().contains(TermMode::WIN32_INPUT));
+        assert_eq!(*term.event_proxy.0.borrow(), ["\x1b[?9001;2$y", "\x1b[?9001;1$y", "\x1b[?9001;2$y", "\x1b[?9001;2$y"]);
+    }
+
     fn assert_batch_input_matches_scalar(
         size: &TermSize,
         text: &str,
@@ -2798,7 +2860,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_input_resumes_scalar_path_for_complex_terminal_state() {
+    fn batch_input_preserves_complex_terminal_state() {
         let size = TermSize::new(8, 3);
         assert_batch_input_matches_scalar(&size, "ASCII中文e\u{301}", |_| {});
         assert_batch_input_matches_scalar(&size, "jklmnop", |term| {
@@ -2813,6 +2875,24 @@ mod tests {
         assert_batch_input_matches_scalar(&size, "overlap", |term| {
             term.input('界');
         });
+    }
+
+    #[test]
+    fn batch_dec_charset_matches_scalar_mapping_and_wrapping() {
+        let text: String = (0x20u8..=0x7e).map(char::from).collect();
+        for columns in [2, 7, 80] {
+            assert_batch_input_matches_scalar(&TermSize::new(columns, 3), &text, |term| {
+                term.configure_charset(
+                    CharsetIndex::G0,
+                    StandardCharset::SpecialCharacterAndLineDrawing,
+                );
+                term.grid
+                    .cursor
+                    .template
+                    .flags
+                    .insert(Flags::BOLD | Flags::UNDERLINE);
+            });
+        }
     }
 
     #[test]
@@ -2833,8 +2913,7 @@ mod tests {
     #[test]
     fn batch_ascii_lines_match_scalar_without_scrollback() {
         let size = TermSize::new(6, 2);
-        let mut config = Config::default();
-        config.scrolling_history = 0;
+        let config = Config { scrolling_history: 0, ..Config::default() };
         assert_batch_line_input_matches_scalar(
             config,
             &size,

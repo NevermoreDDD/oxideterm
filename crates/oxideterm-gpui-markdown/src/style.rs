@@ -3,12 +3,25 @@
 
 //! Style helpers that map OxideTerm theme tokens to GPUI text / element styling.
 
-use gpui::{AbsoluteLength, Font, FontStyle, FontWeight, Hsla, IntoColor, Rgba, SharedString};
+use gpui::{AbsoluteLength, Font, FontStyle, FontWeight, Hsla, Rgba, SharedString};
 use oxideterm_theme::ThemeTokens;
 
 use crate::options::MarkdownOptions;
 
 const BACKGROUND_SURFACE_CODE_ALPHA: f32 = 0.4; // Match the application-wide image-background surface opacity.
+pub(crate) const BODY_LINE_HEIGHT: f32 = 22.0 / 14.0;
+
+pub(crate) fn block_top_padding(
+    block: &crate::model::Block,
+    index: usize,
+    opts: &MarkdownOptions,
+) -> f32 {
+    if index > 0 && matches!(block.unlocated(), crate::model::Block::Heading { .. }) {
+        opts.block_gap * 0.5
+    } else {
+        0.0
+    }
+}
 
 // ── colour helpers ──────────────────────────────────────────────────────
 
@@ -17,7 +30,7 @@ pub fn hex_to_hsla(hex: u32) -> Hsla {
     let r = ((hex >> 16) & 0xff) as f32 / 255.0;
     let g = ((hex >> 8) & 0xff) as f32 / 255.0;
     let b = (hex & 0xff) as f32 / 255.0;
-    Rgba::new(r, g, b, 1.0).into_color()
+    Rgba { r, g, b, a: 1.0 }.into()
 }
 
 // ── token-derived style values ──────────────────────────────────────────
@@ -48,7 +61,7 @@ pub fn code_block_bg_color(tokens: &ThemeTokens, opts: &MarkdownOptions) -> Hsla
 
 pub fn code_block_border_color(tokens: &ThemeTokens) -> Hsla {
     let mut c = hex_to_hsla(tokens.ui.border);
-    c.alpha = 0.2;
+    c.a = 0.2;
     c
 }
 
@@ -59,20 +72,20 @@ pub fn code_block_header_bg_color(tokens: &ThemeTokens, opts: &MarkdownOptions) 
 fn background_surface_color(color: u32, opts: &MarkdownOptions) -> Hsla {
     let mut color = hex_to_hsla(color);
     if opts.background_surface_active {
-        color.alpha = BACKGROUND_SURFACE_CODE_ALPHA;
+        color.a = BACKGROUND_SURFACE_CODE_ALPHA;
     }
     color
 }
 
 pub fn code_block_header_border_color(tokens: &ThemeTokens) -> Hsla {
     let mut c = hex_to_hsla(tokens.ui.border);
-    c.alpha = 0.05;
+    c.a = 0.05;
     c
 }
 
 pub fn code_action_color(tokens: &ThemeTokens) -> Hsla {
     let mut c = hex_to_hsla(tokens.ui.text_muted);
-    c.alpha = 0.5;
+    c.a = 0.5;
     c
 }
 
@@ -87,7 +100,7 @@ pub fn bg_color(tokens: &ThemeTokens) -> Hsla {
 /// Left-border colour for blockquotes — muted text at reduced opacity.
 pub fn blockquote_border_color(tokens: &ThemeTokens) -> Hsla {
     let mut c = hex_to_hsla(tokens.ui.text_muted);
-    c.alpha = 0.5;
+    c.a = 0.5;
     c
 }
 
@@ -109,7 +122,7 @@ pub fn inline_code_bg_color(tokens: &ThemeTokens, opts: &MarkdownOptions) -> Hsl
 /// Theme-aware background used by safe HTML `<mark>` content.
 pub fn highlight_bg_color(tokens: &ThemeTokens) -> Hsla {
     let mut color = accent_color(tokens);
-    color.alpha = 0.22;
+    color.a = 0.22;
     color
 }
 
@@ -151,7 +164,7 @@ pub fn code_font(opts: &MarkdownOptions) -> Font {
 
 pub fn heading_font(opts: &MarkdownOptions) -> Font {
     Font {
-        weight: FontWeight::BOLD,
+        weight: FontWeight::SEMIBOLD,
         ..body_font(opts)
     }
 }

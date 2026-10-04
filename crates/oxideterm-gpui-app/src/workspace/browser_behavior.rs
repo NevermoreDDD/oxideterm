@@ -434,12 +434,14 @@ pub(crate) fn modal_footer_key_moves_forward(key: &str, shift: bool) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BrowserPointerCaptureOwner {
+    KnowledgeResize,
     SidebarResize,
     EmbeddedSftpSidebarResize,
     AiSidebarResize,
     SftpPaneResize,
     SftpQueueResize,
     TerminalCommandSenderResize,
+    TerminalQuickCommandsResize,
     PaneSplitter,
     SettingsSlider,
     TerminalCastSeekbar,
@@ -463,6 +465,7 @@ struct BrowserPointerCaptureState {
     sftp_pane_resizing: bool,
     sftp_queue_resizing: bool,
     terminal_command_sender_resizing: bool,
+    terminal_quick_commands_resizing: bool,
     pane_splitter_dragging: bool,
     settings_slider_dragging: bool,
     terminal_cast_seekbar_dragging: bool,
@@ -516,12 +519,15 @@ pub(crate) fn pointer_capture_needs_workspace_overlay(owner: BrowserPointerCaptu
     matches!(
         owner,
         BrowserPointerCaptureOwner::SidebarResize
+            | BrowserPointerCaptureOwner::KnowledgeResize
             | BrowserPointerCaptureOwner::EmbeddedSftpSidebarResize
             | BrowserPointerCaptureOwner::AiSidebarResize
             | BrowserPointerCaptureOwner::SftpPaneResize
             | BrowserPointerCaptureOwner::SftpQueueResize
             | BrowserPointerCaptureOwner::TerminalCommandSenderResize
+            | BrowserPointerCaptureOwner::TerminalQuickCommandsResize
             | BrowserPointerCaptureOwner::HostToolsTabScrollbar
+            | BrowserPointerCaptureOwner::TabDrag
     )
 }
 
@@ -530,8 +536,11 @@ impl WorkspaceApp {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<BrowserPointerCaptureOwner> {
+        if self.knowledge_resize_active(cx) {
+            return Some(BrowserPointerCaptureOwner::KnowledgeResize);
+        }
         let host_tools_tab_scrollbar_dragging = self.host_tools_tab_scrollbar_drag_active(cx);
-        let sftp = self.sftp_view.read(cx);
+        let sftp = self.sftp_view().read(cx);
         resolve_browser_pointer_capture_owner(BrowserPointerCaptureState {
             sidebar_resizing: self.sidebar_resizing,
             embedded_sftp_sidebar_resizing: self.embedded_sftp_sidebar_resizing,
@@ -539,6 +548,12 @@ impl WorkspaceApp {
             sftp_pane_resizing: sftp.pane_resize_active(),
             sftp_queue_resizing: sftp.queue_resize_active(),
             terminal_command_sender_resizing: self.terminal_command_sender.read(cx).is_resizing(),
+            terminal_quick_commands_resizing: self
+                .terminal
+                .read(cx)
+                .quick_commands
+                .panel
+                .is_resizing(),
             pane_splitter_dragging: self.split_drag.is_some(),
             settings_slider_dragging: self.settings_slider_drag.is_some(),
             terminal_cast_seekbar_dragging: self.terminal.read(cx).cast_seek_dragging(),
@@ -566,6 +581,8 @@ fn resolve_browser_pointer_capture_owner(
         Some(BrowserPointerCaptureOwner::SftpPaneResize)
     } else if state.sftp_queue_resizing {
         Some(BrowserPointerCaptureOwner::SftpQueueResize)
+    } else if state.terminal_quick_commands_resizing {
+        Some(BrowserPointerCaptureOwner::TerminalQuickCommandsResize)
     } else if state.terminal_command_sender_resizing {
         Some(BrowserPointerCaptureOwner::TerminalCommandSenderResize)
     } else if state.pane_splitter_dragging {
@@ -592,10 +609,9 @@ mod tests {
     use super::{
         BrowserFocusOrigin, BrowserPointerCaptureOwner, BrowserPointerCaptureState, FocusCycle,
         browser_focus_visible, clamp_context_menu_position, clear_browser_highlighted_select_focus,
-        modal_footer_input_key_action, modal_footer_key_action, modal_footer_key_moves_forward,
-        next_required_modal_footer_focus, pointer_capture_needs_workspace_overlay,
-        preserve_or_move_context_selection, resolve_browser_pointer_capture_owner,
-        toggle_browser_highlighted_select_from_pointer,
+        modal_footer_input_key_action, modal_footer_key_action,
+        pointer_capture_needs_workspace_overlay, preserve_or_move_context_selection,
+        resolve_browser_pointer_capture_owner, toggle_browser_highlighted_select_from_pointer,
     };
     use std::collections::HashSet;
 
@@ -642,6 +658,13 @@ mod tests {
                     ..BrowserPointerCaptureState::default()
                 },
                 Some(BrowserPointerCaptureOwner::SidebarResize),
+            ),
+            (
+                BrowserPointerCaptureState {
+                    terminal_quick_commands_resizing: true,
+                    ..BrowserPointerCaptureState::default()
+                },
+                Some(BrowserPointerCaptureOwner::TerminalQuickCommandsResize),
             ),
             (
                 BrowserPointerCaptureState {
@@ -693,7 +716,13 @@ mod tests {
             BrowserPointerCaptureOwner::TerminalCommandSenderResize
         ));
         assert!(pointer_capture_needs_workspace_overlay(
+            BrowserPointerCaptureOwner::TerminalQuickCommandsResize
+        ));
+        assert!(pointer_capture_needs_workspace_overlay(
             BrowserPointerCaptureOwner::HostToolsTabScrollbar
+        ));
+        assert!(pointer_capture_needs_workspace_overlay(
+            BrowserPointerCaptureOwner::TabDrag
         ));
         assert!(!pointer_capture_needs_workspace_overlay(
             BrowserPointerCaptureOwner::TextSelection
@@ -811,63 +840,33 @@ mod tests {
     }
 
     #[test]
-    fn modal_footer_focus_uses_required_fallback_when_no_action_is_rendered() {
-        let actions: [&str; 0] = [];
-
-        assert_eq!(
-            next_required_modal_footer_focus(&actions, Some("stale"), true, "cancel"),
-            "cancel"
-        );
-    }
-
-    #[test]
-    fn modal_footer_key_direction_matches_browser_tab_and_arrow_rules() {
-        assert!(modal_footer_key_moves_forward("tab", false));
-        assert!(modal_footer_key_moves_forward("arrowright", false));
-        assert!(!modal_footer_key_moves_forward("tab", true));
-        assert!(!modal_footer_key_moves_forward("arrowleft", false));
-        assert!(!modal_footer_key_moves_forward("left", false));
-    }
-
-    #[test]
     fn modal_footer_key_action_centralizes_cancel_focus_and_activate() {
-        let actions = ["cancel", "confirm"];
+        use super::ModalFooterKeyAction::{Activate, Cancel, Focus};
 
+        let actions = ["cancel", "confirm", "extra"];
+        for (key, shift, current, expected) in [
+            ("enter", false, None, Some(Activate("cancel"))),
+            ("tab", false, None, Some(Focus("cancel"))),
+            ("escape", false, Some("confirm"), Some(Cancel)),
+            ("tab", false, Some("cancel"), Some(Focus("confirm"))),
+            ("tab", true, Some("cancel"), Some(Focus("extra"))),
+            ("arrowright", false, Some("confirm"), Some(Focus("extra"))),
+            ("arrowleft", false, Some("confirm"), Some(Focus("cancel"))),
+            ("left", false, Some("confirm"), Some(Focus("cancel"))),
+            ("enter", false, Some("confirm"), Some(Activate("confirm"))),
+            ("home", false, Some("confirm"), Some(Focus("cancel"))),
+            ("end", false, Some("cancel"), Some(Focus("extra"))),
+            ("a", false, Some("confirm"), None),
+        ] {
+            assert_eq!(
+                modal_footer_key_action(key, shift, &actions, current, "cancel"),
+                expected,
+                "{key}, shift={shift}, current={current:?}"
+            );
+        }
         assert_eq!(
-            modal_footer_key_action("enter", false, &actions, None, "cancel"),
-            Some(super::ModalFooterKeyAction::Activate("cancel"))
-        );
-        assert_eq!(
-            modal_footer_key_action("tab", false, &actions, None, "cancel"),
-            Some(super::ModalFooterKeyAction::Focus("cancel"))
-        );
-        assert_eq!(
-            modal_footer_key_action("escape", false, &actions, Some("confirm"), "cancel"),
-            Some(super::ModalFooterKeyAction::Cancel)
-        );
-        assert_eq!(
-            modal_footer_key_action("tab", false, &actions, Some("cancel"), "cancel"),
-            Some(super::ModalFooterKeyAction::Focus("confirm"))
-        );
-        assert_eq!(
-            modal_footer_key_action("tab", true, &actions, Some("cancel"), "cancel"),
-            Some(super::ModalFooterKeyAction::Focus("confirm"))
-        );
-        assert_eq!(
-            modal_footer_key_action("enter", false, &actions, Some("confirm"), "cancel"),
-            Some(super::ModalFooterKeyAction::Activate("confirm"))
-        );
-        assert_eq!(
-            modal_footer_key_action("home", false, &actions, Some("confirm"), "cancel"),
-            Some(super::ModalFooterKeyAction::Focus("cancel"))
-        );
-        assert_eq!(
-            modal_footer_key_action("end", false, &actions, Some("cancel"), "cancel"),
-            Some(super::ModalFooterKeyAction::Focus("confirm"))
-        );
-        assert_eq!(
-            modal_footer_key_action("a", false, &actions, Some("confirm"), "cancel"),
-            None
+            modal_footer_key_action("tab", false, &[], Some("stale"), "cancel"),
+            Some(Focus("cancel"))
         );
     }
 

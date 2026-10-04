@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "Search sessions",
+      "placeholder": "Search sessions…",
+      "empty": "No matching sessions"
+    },
+    "sort": {
+      "title": "Sort sessions",
+      "default": "Default order",
+      "name_ascending": "Name: A–Z",
+      "name_descending": "Name: Z–A",
+      "connected_first": "Connected first"
+    },
     "actions": {
       "expand": "Expand Sidebar",
       "collapse": "Collapse Sidebar",
@@ -29,6 +41,7 @@
       "import_tooltip": "Import from .oxide file",
       "export_tooltip": "Export to .oxide file",
       "host_tools": "Host Tools",
+      "knowledge": "Knowledge",
       "host_monitor": "Monitor",
       "gpu": "GPU / NPU",
       "processes": "Processes",
@@ -42,8 +55,8 @@
       "open_session_manager": "Open Session Manager",
       "plugins": "Plugins",
       "activity": "Activity",
-      "event_log": "Event Log",
-      "notifications": "Notifications",
+      "event_log": "Audit",
+      "notifications": "Notifications & Audit",
       "saved_connections": "Saved Connections",
       "forwarding": "Port Forwarding",
       "ports": "Ports",
@@ -62,6 +75,7 @@
       "collapse": "Collapse"
     },
     "active_sessions": "Active Sessions",
+    "active_session_count": "Active sessions: {{count}}",
     "no_sessions": "No Sessions",
     "add_new_connection": "Click + to add a new connection",
     "host_gpu": {
@@ -710,6 +724,7 @@
       "no_sessions": "No Sessions",
       "click_to_add": "Click + to add a new connection",
       "actions": {
+        "open_session": "Open Session",
         "new_terminal": "New Terminal",
         "sftp": "SFTP",
         "port_forwarding": "Port Forwarding",

@@ -83,6 +83,7 @@ const TERMINAL_BEHAVIOR_KEYS: &[&str] = &[
     "unicode",
 ];
 const APPEARANCE_KEYS: &[&str] = &[
+    "theme",
     "sidebarCollapsedDefault",
     "uiDensity",
     "borderRadius",
@@ -202,6 +203,15 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Materializes the released shared theme before snapshot fields are filtered by section.
+pub fn migrate_legacy_theme_selection(settings: &mut Value) {
+    if settings.pointer("/appearance/theme").is_none()
+        && let Some(theme) = settings.pointer("/terminal/theme").cloned()
+    {
+        ensure_object_path(settings, &["appearance"]).insert("theme".to_string(), theme);
+    }
+}
+
 pub fn merge_oxide_settings_snapshot(
     current: &PersistedSettings,
     snapshot_json: &str,
@@ -209,7 +219,7 @@ pub fn merge_oxide_settings_snapshot(
 ) -> Result<PersistedSettings> {
     let parsed: Value =
         serde_json::from_str(snapshot_json).context("failed to parse app settings snapshot")?;
-    let (snapshot_settings, snapshot_sections) =
+    let (mut snapshot_settings, snapshot_sections) =
         if parsed.get("format").and_then(Value::as_str) == Some(OXIDE_SETTINGS_FORMAT) {
             let settings = parsed
                 .get("settings")
@@ -241,6 +251,10 @@ pub fn merge_oxide_settings_snapshot(
                     .collect(),
             )
         };
+
+    // Materialize the released shared theme before current settings fill this key.
+    // Copying sections below still limits it to imports that include appearance.
+    migrate_legacy_theme_selection(&mut snapshot_settings);
 
     let requested = selected_sections
         .cloned()
@@ -391,8 +405,121 @@ fn ensure_object_path<'a>(value: &'a mut Value, path: &[&str]) -> &'a mut Map<St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn note_split_preferences_persist_locally_and_never_enter_snapshots() {
+        use crate::{KnowledgeEditorMode, SettingsStore};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut store = SettingsStore::load_from_path(&path).unwrap();
+        store.settings_mut().window_ui.knowledge_editor.mode = KnowledgeEditorMode::Split;
+        store.settings_mut().window_ui.knowledge_editor.source_ratio = 0.65;
+        store.save().unwrap();
+        let reloaded = SettingsStore::load_from_path(path).unwrap();
+        assert_eq!(
+            reloaded.settings().window_ui.knowledge_editor.mode,
+            KnowledgeEditorMode::Split
+        );
+        assert_eq!(
+            reloaded.settings().window_ui.knowledge_editor.source_ratio,
+            0.65
+        );
+        let sections = super::ALL_OXIDE_SETTINGS_SECTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let exported =
+            super::export_oxide_settings_snapshot_json(reloaded.settings(), Some(&sections), false)
+                .unwrap();
+        let mut snapshot: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        assert!(snapshot["settings"].get("windowUI").is_none());
+        snapshot["settings"]["windowUI"] =
+            serde_json::json!({"knowledgeEditor":{"mode":"source", "sourceRatio":0.25}});
+        let imported = super::merge_oxide_settings_snapshot(
+            reloaded.settings(),
+            &snapshot.to_string(),
+            Some(&sections),
+        )
+        .unwrap();
+        assert_eq!(
+            imported.window_ui.knowledge_editor.mode,
+            KnowledgeEditorMode::Split
+        );
+        assert_eq!(imported.window_ui.knowledge_editor.source_ratio, 0.65);
+    }
     use super::*;
     use crate::{Language, PersistedSettings};
+
+    #[test]
+    fn theme_snapshot_preserves_independent_choices_and_section_boundaries() {
+        let mut settings = PersistedSettings::default();
+        settings.appearance.theme = "github-dark".into();
+        settings.terminal.theme = "monokai".into();
+        let snapshot = export_oxide_settings_snapshot_json(&settings, None, false).unwrap();
+        let value: Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(
+            value.pointer("/settings/appearance/theme"),
+            Some(&json!("github-dark"))
+        );
+        assert_eq!(
+            value.pointer("/settings/terminal/theme"),
+            Some(&json!("monokai"))
+        );
+        for (section, application, terminal) in [
+            ("appearance", "github-dark", "default"),
+            ("terminalAppearance", "default", "monokai"),
+        ] {
+            let selected = HashSet::from([section.to_string()]);
+            let restored = merge_oxide_settings_snapshot(
+                &PersistedSettings::default(),
+                &snapshot,
+                Some(&selected),
+            )
+            .unwrap();
+            assert_eq!(restored.appearance.theme, application, "{section}");
+            assert_eq!(restored.terminal.theme, terminal, "{section}");
+        }
+
+        let mut current = PersistedSettings::default();
+        current.appearance.theme = "solarized-light".into();
+        current.terminal.font_size = 19;
+        // Released backups stored one shared theme, including in sectioned exports.
+        let legacy_settings = json!({"terminal": {"theme": "monokai"}});
+        for legacy in [
+            legacy_settings.clone(),
+            json!({
+                "format": OXIDE_SETTINGS_FORMAT,
+                "sectionIds": ["appearance", "terminalAppearance"],
+                "settings": legacy_settings,
+            }),
+        ] {
+            for (sections, application, terminal) in [
+                (None, "monokai", "monokai"),
+                (Some(vec!["appearance"]), "monokai", "default"),
+                (
+                    Some(vec!["terminalAppearance"]),
+                    "solarized-light",
+                    "monokai",
+                ),
+                (Some(vec!["general"]), "solarized-light", "default"),
+            ] {
+                let selected = sections.map(|sections| {
+                    sections
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<HashSet<_>>()
+                });
+                let restored =
+                    merge_oxide_settings_snapshot(&current, &legacy.to_string(), selected.as_ref())
+                        .unwrap();
+                assert_eq!(
+                    restored.appearance.theme, application,
+                    "{legacy}: {selected:?}"
+                );
+                assert_eq!(restored.terminal.theme, terminal, "{legacy}: {selected:?}");
+                assert_eq!(restored.terminal.font_size, 19);
+            }
+        }
+    }
 
     #[test]
     fn merge_sectioned_snapshot_applies_only_selected_sections() {
@@ -466,12 +593,25 @@ mod tests {
             json!({"id":"grok-provider","type":"xai","apiProtocol":"responses","baseUrl":"https://api.x.ai/v1","models":["grok-4.6"]}),
         ];
         settings.settings_navigation.groups = vec![vec!["terminal".to_string()]];
+        settings.network.upstream_proxy = Some(
+            serde_json::from_value(json!({
+                "protocol": "socks5",
+                "host": "proxy.test",
+                "port": 1080,
+                "auth": {
+                    "type": "password",
+                    "username": "user",
+                    "keychain_id": "device-secret-reference"
+                }
+            }))
+            .expect("proxy settings"),
+        );
         settings.local_terminal.default_cwd = Some("/tmp".to_string());
         settings
             .local_terminal
             .custom_env_vars
             .insert("FOO".to_string(), Value::String("bar".to_string()));
-        let selected = ["ai", "localTerminal", "nativePreferences"]
+        let selected = ["network", "ai", "localTerminal", "nativePreferences"]
             .into_iter()
             .map(str::to_string)
             .collect::<HashSet<_>>();
@@ -479,6 +619,11 @@ mod tests {
         let exported =
             export_oxide_settings_snapshot_json(&settings, Some(&selected), false).expect("export");
         let parsed: Value = serde_json::from_str(&exported).expect("json");
+        assert!(!exported.contains("device-secret-reference"));
+        assert_eq!(
+            parsed["settings"]["network"]["upstreamProxy"]["host"],
+            "proxy.test"
+        );
         let restored = merge_oxide_settings_snapshot(
             &PersistedSettings::default(),
             &exported,
@@ -501,7 +646,7 @@ mod tests {
 
         assert_eq!(
             section_ids,
-            vec!["ai", "localTerminal", "nativePreferences"]
+            vec!["network", "ai", "localTerminal", "nativePreferences"]
         );
         assert!(parsed["settings"].get("ai").is_some());
         assert!(parsed["settings"]["ai"].get("acpAgents").is_some());

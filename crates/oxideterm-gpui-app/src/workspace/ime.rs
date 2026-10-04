@@ -2,8 +2,8 @@ use std::{cell::RefCell, collections::HashMap, fmt, ops::Range, rc::Rc, time::In
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, Entity, FocusHandle,
-    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoColor, IntoElement,
-    Keystroke, LayoutId, MouseButton, Pixels, Point, SharedString, Style, Styled, TextRun, Timer,
+    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement, IntoElement, Keystroke,
+    LayoutId, MouseButton, Pixels, Point, SharedString, Style, Styled, TextRun, Timer,
     UTF16Selection, Window, font, point, px, rgb,
 };
 use oxideterm_editor_core::utf16::{
@@ -15,7 +15,6 @@ use oxideterm_editor_core::utf16::{
     word_range_for_utf16_offset,
 };
 
-use super::WorkspaceApp;
 use super::connection_monitor::HostToolsTextInput;
 use super::file_manager::FileManagerInput;
 use super::forwards::ForwardInput;
@@ -29,7 +28,9 @@ use super::quick_commands::{
 };
 use super::session_manager::{SessionManagerInput, SessionManagerState};
 use super::sftp::SftpInput;
+use super::sidebar::{ai_input_line_index_for_offset, ai_input_visual_lines};
 use super::terminal_git::TerminalGitPanelSection;
+use super::{PaneId, WorkspaceApp};
 use oxideterm_gpui_settings_view::SettingsInput;
 use oxideterm_gpui_ui::{
     tauri_ui_font_family,
@@ -106,7 +107,7 @@ impl TextInputAnchorStore {
         }
     }
 
-    fn bounds(&self, id: TextInputAnchorId) -> Option<Bounds<Pixels>> {
+    pub(super) fn bounds(&self, id: TextInputAnchorId) -> Option<Bounds<Pixels>> {
         self.get(id).map(|anchor| anchor.bounds)
     }
 }
@@ -116,7 +117,12 @@ pub(super) enum WorkspaceImeTarget {
     ReadOnlyText(u64),
     CommandPalette,
     ShortcutsModalSearch,
-    Search,
+    ActiveSessionSearch,
+    AuditSearch,
+    AuditPolicy(super::audit::AuditPolicyInput),
+    KnowledgeSearch,
+    KnowledgeRename,
+    Search(PaneId),
     TerminalCommandSenderCompact,
     TerminalCwdSearch,
     TerminalGitBranchSearch,
@@ -138,7 +144,7 @@ pub(super) enum WorkspaceImeTarget {
     QuickCommand(QuickCommandInput),
     Settings(SettingsInput),
     SessionManager(SessionManagerInput),
-    Forwards(ForwardInput),
+    Forwards(super::TabId, ForwardInput),
     FileManager(FileManagerInput),
     Graphics(GraphicsInput),
     TabRename,
@@ -148,7 +154,7 @@ pub(super) enum WorkspaceImeTarget {
     AiConversationRename,
     AiMessageEdit,
     PluginControl { key: u64, secret: bool },
-    Sftp(SftpInput),
+    Sftp(crate::workspace::sftp::SftpSurfaceId, SftpInput),
     NewConnection(NewConnectionField),
     KeyboardInteractive(usize),
 }
@@ -488,7 +494,13 @@ impl WorkspaceImeTarget {
             Self::ReadOnlyText(id) => id.wrapping_add(50_000),
             Self::CommandPalette => 4,
             Self::ShortcutsModalSearch => 5,
-            Self::Search => 1,
+            Self::ActiveSessionSearch => 22,
+            Self::AuditSearch => 25,
+            Self::AuditPolicy(super::audit::AuditPolicyInput::Retention) => 26,
+            Self::AuditPolicy(super::audit::AuditPolicyInput::Capacity) => 27,
+            Self::KnowledgeSearch => 23,
+            Self::KnowledgeRename => 24,
+            Self::Search(pane_id) => (1_u64 << 63) | pane_id.0,
             Self::TerminalCommandSenderCompact => 2,
             Self::TerminalCwdSearch => 18,
             Self::TerminalGitBranchSearch => 17,
@@ -510,7 +522,7 @@ impl WorkspaceImeTarget {
             Self::QuickCommand(input) => 500 + input.anchor_key(),
             Self::Settings(input) => 1_000 + input.anchor_key(),
             Self::SessionManager(input) => 1_500 + input.anchor_key(),
-            Self::Forwards(input) => 1_700 + input.anchor_key(),
+            Self::Forwards(page, input) => (1_u64 << 61) | (page.0 << 12) | input.anchor_key(),
             Self::FileManager(input) => 1_800 + input.anchor_key(),
             Self::Graphics(input) => 1_875 + input.anchor_key(),
             Self::TabRename => 1_890,
@@ -520,7 +532,14 @@ impl WorkspaceImeTarget {
             Self::AiMessageEdit => 1_898,
             Self::AiConversationRename => 1_899,
             Self::PluginControl { key, .. } => key.wrapping_add(10_000),
-            Self::Sftp(input) => 1_900 + input.anchor_key(),
+            Self::Sftp(surface, input) => {
+                (1_u64 << 62)
+                    | (match surface {
+                        crate::workspace::sftp::SftpSurfaceId::Sidebar => 0,
+                        crate::workspace::sftp::SftpSurfaceId::Tab(id) => id.0,
+                    } << 12)
+                    | input.anchor_key()
+            }
             Self::NewConnection(field) => 2_000 + field as u64,
             Self::KeyboardInteractive(index) => 3_000 + index as u64,
         };
@@ -531,11 +550,20 @@ impl WorkspaceImeTarget {
 pub(super) struct WorkspaceImeElement {
     view: Entity<WorkspaceApp>,
     focus_handle: FocusHandle,
+    window_id: gpui::WindowId,
 }
 
 impl WorkspaceImeElement {
-    pub(super) fn new(view: Entity<WorkspaceApp>, focus_handle: FocusHandle) -> Self {
-        Self { view, focus_handle }
+    pub(super) fn new(
+        view: Entity<WorkspaceApp>,
+        focus_handle: FocusHandle,
+        window_id: gpui::WindowId,
+    ) -> Self {
+        Self {
+            view,
+            focus_handle,
+            window_id,
+        }
     }
 }
 
@@ -593,12 +621,18 @@ impl Element for WorkspaceImeElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if self.view.read(cx).active_ime_target(cx).is_some() {
+        if self
+            .view
+            .read(cx)
+            .active_ime_target_for_window(self.window_id, cx)
+            .is_some()
+        {
             window.handle_input(
                 &self.focus_handle,
                 WorkspaceInputHandler {
                     view: self.view.clone(),
                     fallback_bounds: bounds,
+                    window_id: self.window_id,
                 },
                 cx,
             );
@@ -609,6 +643,15 @@ impl Element for WorkspaceImeElement {
 pub(super) struct WorkspaceInputHandler {
     view: Entity<WorkspaceApp>,
     fallback_bounds: Bounds<Pixels>,
+    window_id: gpui::WindowId,
+}
+
+impl WorkspaceInputHandler {
+    fn active_ime_target(&self, cx: &App) -> Option<WorkspaceImeTarget> {
+        self.view
+            .read(cx)
+            .active_ime_target_for_window(self.window_id, cx)
+    }
 }
 
 pub(super) fn active_ime_should_defer_input_key(
@@ -660,8 +703,8 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<UTF16Selection> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             view.text_for_ime_target(target, cx).map(|text| {
                 let text_len = text.encode_utf16().count();
                 let (range, reversed) =
@@ -688,8 +731,8 @@ impl InputHandler for WorkspaceInputHandler {
     }
 
     fn marked_text_range(&mut self, _window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             let marked = view.marked_text_state_for_target(target, cx)?;
             (!marked.text.is_empty()).then(|| marked.virtual_range())
         })
@@ -702,8 +745,9 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<String> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let text = view.active_ime_text_with_marked_text(cx)?;
+            let text = view.ime_text_with_marked_text_for_target(target, cx)?;
             let end = text.encode_utf16().count();
             let clamped = range_utf16.start.min(end)..range_utf16.end.min(end);
             *adjusted_range = Some(clamped.clone());
@@ -718,8 +762,11 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
+        let Some(target) = self.active_ime_target(cx) else {
+            return;
+        };
         let _ = self.view.update(cx, |view, cx| {
-            view.replace_active_ime_text(replacement_range, text, cx);
+            view.replace_platform_ime_text(target, replacement_range, text, cx);
         });
     }
 
@@ -731,10 +778,10 @@ impl InputHandler for WorkspaceInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
+        let Some(target) = self.active_ime_target(cx) else {
+            return;
+        };
         let _ = self.view.update(cx, |view, cx| {
-            let Some(target) = view.active_ime_target(cx) else {
-                return;
-            };
             if new_text.is_empty() {
                 if view.ime_marked_text.take().is_some() {
                     cx.notify();
@@ -778,15 +825,39 @@ impl InputHandler for WorkspaceInputHandler {
     fn bounds_for_range(
         &mut self,
         range_utf16: Range<usize>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             let bounds = view
                 .text_input_anchors
                 .bounds(target.anchor_id())
                 .unwrap_or(self.fallback_bounds);
+            if target == WorkspaceImeTarget::AiMessageEdit {
+                let text = view.ime_text_with_marked_text_for_target(target, cx)?;
+                let lines = view.ai_editor_visual_lines(target, &text, cx);
+                let index = ai_input_line_index_for_offset(&lines, range_utf16.end);
+                let range = lines[index].utf16_range();
+                let line = utf16_slice(&text, range.clone());
+                let byte = byte_index_for_utf16(&line, range_utf16.end.saturating_sub(range.start));
+                let x = view.shape_ime_text(target, &line, window).x_for_index(byte);
+                let scroll = view
+                    .ai_entity
+                    .read(cx)
+                    .chat_ui()
+                    .editing_message_scroll
+                    .offset()
+                    .y;
+                return Some(Bounds {
+                    origin: point(
+                        bounds.left() + x,
+                        (bounds.top() + scroll + px((index + 1) as f32 * 20.0))
+                            .clamp(bounds.top(), bounds.bottom()),
+                    ),
+                    size: gpui::size(px(view.tokens.metrics.form_caret_width), px(20.0)),
+                });
+            }
             let viewport = match target {
                 WorkspaceImeTarget::QuickCommand(input) => {
                     Some(view.terminal.read(cx).quick_commands.input_viewport(input))
@@ -824,8 +895,8 @@ impl InputHandler for WorkspaceInputHandler {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<usize> {
+        let target = self.active_ime_target(cx)?;
         self.view.update(cx, |view, cx| {
-            let target = view.active_ime_target(cx)?;
             view.ime_index_for_position(target, point, window, cx)
         })
     }
@@ -842,7 +913,9 @@ impl WorkspaceApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(target) = self.active_ime_target(cx) else {
+        let Some(target) =
+            self.active_ime_target_for_window(window.window_handle().window_id(), cx)
+        else {
             return false;
         };
         if self.marked_text_state_for_target(target, cx).is_some()
@@ -885,9 +958,18 @@ impl WorkspaceApp {
     pub(super) fn update_text_input_anchor(
         &mut self,
         anchor: TextInputAnchor,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        let edit_width_changed = anchor.id == WorkspaceImeTarget::AiMessageEdit.anchor_id()
+            && self
+                .text_input_anchors
+                .bounds(anchor.id)
+                .map(|bounds| bounds.size.width)
+                != Some(anchor.bounds.size.width);
         self.text_input_anchors.update(anchor);
+        if edit_width_changed {
+            cx.notify();
+        }
     }
 
     /// Applies the shared pointer, focus, selection, and anchor behavior for a
@@ -969,6 +1051,9 @@ impl WorkspaceApp {
         {
             return Some(WorkspaceImeTarget::Settings(input));
         }
+        if self.knowledge_workspace.read(cx).rename.is_some() {
+            return Some(WorkspaceImeTarget::KnowledgeRename);
+        }
         if self.tab_rename_dialog.is_some() {
             // The blocking rename dialog owns text input ahead of background surfaces.
             return Some(WorkspaceImeTarget::TabRename);
@@ -983,8 +1068,9 @@ impl WorkspaceApp {
 
         if let Some(form) = self.connection_form_state(cx).form.as_ref()
             && form.field_focused
-            && self.new_connection_field_accepts_ime(form.focused_field, cx)
         {
+            // Saved passwords expose an empty draft until edited. Keep that draft on the
+            // shared input path from the first character so text and caret advance together.
             return Some(WorkspaceImeTarget::NewConnection(form.focused_field));
         }
 
@@ -995,25 +1081,85 @@ impl WorkspaceApp {
         }
 
         let settings_tab_visible = self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Settings);
-        if settings_tab_visible {
-            if let Some(input) = self
+        // Knowledge dialogs may be owned by a detached Knowledge or Settings window. The focused
+        // window's WorkspaceImeElement decides which native window receives the shared draft.
+        let knowledge_dialog_visible = self.ai_entity.read(cx).knowledge_create_dialog_open()
+            || self.ai_entity.read(cx).knowledge_document_dialog_open();
+        if settings_tab_visible
+            && let Some(input) = self
                 .settings_workspace
                 .read(cx)
                 .settings_entity_focused_input()
-            {
-                return Some(WorkspaceImeTarget::Settings(input));
-            }
-
+        {
+            return Some(WorkspaceImeTarget::Settings(input));
+        }
+        if settings_tab_visible || knowledge_dialog_visible {
             if let Some(input) = self.ai_entity.read(cx).focused_settings_input() {
                 return Some(WorkspaceImeTarget::Settings(input));
             }
         }
 
-        let legacy_settings_input_visible = settings_tab_visible
+        if (self.selected_ime_target == Some(WorkspaceImeTarget::KnowledgeSearch)
             || self
-                .active_tab(cx)
+                .selected_ime_range
+                .as_ref()
+                .is_some_and(|selection| selection.target == WorkspaceImeTarget::KnowledgeSearch))
+            && self
+                .knowledge_workspace
+                .read(cx)
+                .navigator_search_window
+                .is_some_and(|owner| {
+                    let main = self
+                        .window_registry
+                        .handle_for_role(super::window_registry::WindowRole::Main);
+                    !main.is_some_and(|handle| handle.window_id() == owner)
+                        || self
+                            .keyboard_content_tab(cx)
+                            .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Knowledge)
+                })
+        {
+            return Some(WorkspaceImeTarget::KnowledgeSearch);
+        }
+
+        if self.notification_center.active_view == super::WorkspaceActivityView::EventLog
+            && self.audit.settings_open
+            && self.audit.open_filter.is_none()
+            && let Some(target @ WorkspaceImeTarget::AuditPolicy(_)) = self
+                .selected_ime_range
+                .as_ref()
+                .map(|selection| selection.target)
+                .or(self.selected_ime_target)
+        {
+            return Some(target);
+        }
+        if self.notification_center.active_view == super::WorkspaceActivityView::EventLog
+            && self.audit.open_filter.is_none()
+            && (self.selected_ime_target == Some(WorkspaceImeTarget::AuditSearch)
+                || self
+                    .selected_ime_range
+                    .as_ref()
+                    .is_some_and(|selection| selection.target == WorkspaceImeTarget::AuditSearch))
+        {
+            return Some(WorkspaceImeTarget::AuditSearch);
+        }
+        if self.session_search_open
+            && !self.sidebar_collapsed
+            && !self.session_sort_menu_open
+            && self.effective_sidebar_panel_section() == super::SidebarSection::Sessions
+            && (self.selected_ime_target == Some(WorkspaceImeTarget::ActiveSessionSearch)
+                || self.selected_ime_range.as_ref().is_some_and(|selection| {
+                    selection.target == WorkspaceImeTarget::ActiveSessionSearch
+                }))
+        {
+            return Some(WorkspaceImeTarget::ActiveSessionSearch);
+        }
+
+        let legacy_settings_input_visible = settings_tab_visible
+            || knowledge_dialog_visible
+            || self
+                .keyboard_content_tab(cx)
                 .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::CloudSync);
         if legacy_settings_input_visible && let Some(input) = self.focused_settings_input {
             return Some(WorkspaceImeTarget::Settings(input));
@@ -1037,7 +1183,9 @@ impl WorkspaceApp {
         if let Some(input) = quick_command_manager_input {
             // The workspace manager owns IME independently from the compact
             // terminal launcher, which deliberately keeps `open` false.
-            return Some(WorkspaceImeTarget::QuickCommand(input));
+            // Command text uses an entity editor with its own platform input handler.
+            return (input != QuickCommandInput::CommandText)
+                .then_some(WorkspaceImeTarget::QuickCommand(input));
         }
 
         if self.host_tools_visibility(cx).main_window_is_visible()
@@ -1058,7 +1206,7 @@ impl WorkspaceApp {
             });
         }
 
-        let terminal_tab_visible = self.active_tab(cx).is_some_and(is_terminal_tab);
+        let terminal_tab_visible = self.keyboard_content_tab(cx).is_some_and(is_terminal_tab);
         if terminal_tab_visible {
             if self.terminal.read(cx).broadcast_group_editor().is_some() {
                 return Some(WorkspaceImeTarget::TerminalBroadcastGroupName);
@@ -1104,16 +1252,15 @@ impl WorkspaceApp {
             return Some(WorkspaceImeTarget::SessionManager(input));
         }
 
-        if self
-            .active_tab(cx)
-            .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Forwards)
+        if let Some(page) = self.forwarding.read(cx).page_id()
+            && self.tab_host.read(cx).surface_is_visible(page)
             && let Some(input) = self.forwarding.read(cx).view().focused_input
         {
-            return Some(WorkspaceImeTarget::Forwards(input));
+            return Some(WorkspaceImeTarget::Forwards(page, input));
         }
 
         if self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::FileManager)
             && let Some(input) = self.file_manager.read(cx).focused_input()
         {
@@ -1121,7 +1268,7 @@ impl WorkspaceApp {
         }
 
         if self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Graphics)
             && let Some(input) = self.graphics.read(cx).focused_input()
         {
@@ -1129,11 +1276,11 @@ impl WorkspaceApp {
         }
 
         if self.visible_sftp_remote_id(cx).is_some()
-            && let Some(input) = self.sftp_view.read(cx).focused_input()
+            && let Some(input) = self.sftp_view().read(cx).focused_input()
         {
             // The input owner may be a full SFTP tab or the embedded terminal
             // sidebar; visibility, not the active tab kind, defines ownership.
-            return Some(WorkspaceImeTarget::Sftp(input));
+            return Some(WorkspaceImeTarget::Sftp(self.sftp_surface_id(), input));
         }
 
         let terminal_inline_panel = self.ai_entity.read(cx).terminal_inline_panel();
@@ -1204,7 +1351,96 @@ impl WorkspaceApp {
             return Some(target);
         }
 
-        self.search.visible.then_some(WorkspaceImeTarget::Search)
+        self.focused_search_pane(cx).map(WorkspaceImeTarget::Search)
+    }
+
+    pub(super) fn active_ime_target_for_window(
+        &self,
+        window_id: gpui::WindowId,
+        cx: &App,
+    ) -> Option<WorkspaceImeTarget> {
+        let target = self.active_ime_target(cx)?;
+        if let WorkspaceImeTarget::Forwards(page, _) = target {
+            let owner = self
+                .tab_host
+                .read(cx)
+                .detached_window_handle(page)
+                .or_else(|| {
+                    self.window_registry
+                        .handle_for_role(super::window_registry::WindowRole::Main)
+                });
+            if owner.is_none_or(|handle| handle.window_id() != window_id) {
+                return None;
+            }
+        }
+        if let WorkspaceImeTarget::Sftp(surface, _) = target {
+            if self.sftp_surface_window(surface, cx) != Some(window_id) {
+                return None;
+            }
+        }
+        let knowledge = self.knowledge_workspace.read(cx);
+        let owner = match target {
+            WorkspaceImeTarget::Search(pane_id) => self
+                .tabs(cx)
+                .iter()
+                .find(|tab| {
+                    tab.root_pane
+                        .as_ref()
+                        .is_some_and(|root| root.contains_pane(pane_id))
+                })
+                .and_then(|tab| {
+                    self.tab_host
+                        .read(cx)
+                        .detached_window_handle(tab.id)
+                        .or_else(|| {
+                            self.window_registry
+                                .handle_for_role(super::window_registry::WindowRole::Main)
+                        })
+                })
+                .map(|handle| handle.window_id()),
+            WorkspaceImeTarget::KnowledgeSearch => knowledge.navigator_search_window,
+            WorkspaceImeTarget::KnowledgeRename => {
+                knowledge.rename.as_ref().map(|rename| rename.window_id)
+            }
+            _ => None,
+        };
+        if target == WorkspaceImeTarget::AiInlinePrompt
+            && self.terminal_ai_inline_window(cx) != Some(window_id)
+        {
+            return None;
+        }
+        if matches!(target, WorkspaceImeTarget::Search(_)) && owner != Some(window_id) {
+            return None;
+        }
+        if matches!(
+            target,
+            WorkspaceImeTarget::KnowledgeSearch | WorkspaceImeTarget::KnowledgeRename
+        ) {
+            if owner != Some(window_id) {
+                return None;
+            }
+            let main_window = self
+                .window_registry
+                .handle_for_role(super::window_registry::WindowRole::Main);
+            if main_window.is_some_and(|handle| handle.window_id() == window_id)
+                && !self
+                    .keyboard_content_tab(cx)
+                    .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::Knowledge)
+            {
+                return None;
+            }
+        }
+        if matches!(
+            target,
+            WorkspaceImeTarget::Settings(SettingsInput::KnowledgeDocumentTitle)
+        ) && !self
+            .ai_entity
+            .read(cx)
+            .knowledge_document_dialog_owned_by(window_id)
+        {
+            return None;
+        }
+        Some(target)
     }
 
     pub(super) fn marked_text_for_target(
@@ -1571,6 +1807,7 @@ impl WorkspaceApp {
                     position,
                     px(0.0),
                     window,
+                    cx,
                 ));
             }
             return Some(0);
@@ -1578,7 +1815,7 @@ impl WorkspaceApp {
         if position.x >= right {
             if ime_target_accepts_newline(target) {
                 return Some(self.multiline_ime_index_for_position(
-                    target, &text, bounds, position, width, window,
+                    target, &text, bounds, position, width, window, cx,
                 ));
             }
             return Some(text_len);
@@ -1594,7 +1831,7 @@ impl WorkspaceApp {
         .clamp(px(0.0), width);
         if ime_target_accepts_newline(target) {
             return Some(self.multiline_ime_index_for_position(
-                target, &text, bounds, position, relative_x, window,
+                target, &text, bounds, position, relative_x, window, cx,
             ));
         }
         Some(self.ime_index_for_relative_x(target, &text, relative_x, window))
@@ -1634,22 +1871,36 @@ impl WorkspaceApp {
         position: Point<Pixels>,
         relative_x: Pixels,
         window: &mut Window,
+        cx: &App,
     ) -> usize {
-        let lines = if ime_target_is_read_only(target) {
-            soft_wrapped_line_ranges_utf16(
-                text,
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height),
-            )
+        let lines = if matches!(
+            target,
+            WorkspaceImeTarget::AiChatInput | WorkspaceImeTarget::AiMessageEdit
+        ) {
+            self.ai_editor_visual_lines(target, text, cx)
+                .iter()
+                .map(|line| line.utf16_range())
+                .collect()
         } else {
-            line_ranges_utf16(text)
+            multiline_ime_line_ranges(target, text, bounds, None)
         };
         if lines.is_empty() {
             return 0;
         }
         let line_height = self.ime_target_line_height(target, bounds, lines.len());
+        let scroll_y = if target == WorkspaceImeTarget::AiMessageEdit {
+            self.ai_entity
+                .read(cx)
+                .chat_ui()
+                .editing_message_scroll
+                .offset()
+                .y
+        } else {
+            px(0.0)
+        };
         let relative_y =
-            (position.y - bounds.top() - Self::ime_target_vertical_padding(target)).max(px(0.0));
+            (position.y - bounds.top() - scroll_y - Self::ime_target_vertical_padding(target))
+                .max(px(0.0));
         let line_index =
             ((relative_y / line_height).floor() as usize).min(lines.len().saturating_sub(1));
         let line_range = lines[line_index].clone();
@@ -1689,8 +1940,9 @@ impl WorkspaceApp {
         match target {
             WorkspaceImeTarget::AiChatInput
             | WorkspaceImeTarget::AiConversationRename
+            | WorkspaceImeTarget::KnowledgeSearch
             | WorkspaceImeTarget::AiMessageEdit
-            | WorkspaceImeTarget::Sftp(_)
+            | WorkspaceImeTarget::Sftp(_, _)
             | WorkspaceImeTarget::ReadOnlyText(_) => {
                 // These targets report an anchor around the painted text itself.
                 // Applying the shared form-control padding again makes hit testing
@@ -1752,11 +2004,6 @@ impl WorkspaceApp {
         position_x - centered_text_left
     }
 
-    fn active_ime_text_with_marked_text(&self, cx: &App) -> Option<String> {
-        let target = self.active_ime_target(cx)?;
-        self.ime_text_with_marked_text_for_target(target, cx)
-    }
-
     /// Builds the virtual text buffer seen by the platform while an IME
     /// composition temporarily replaces the target's selected range.
     pub(super) fn ime_text_with_marked_text_for_target(
@@ -1815,20 +2062,6 @@ impl WorkspaceApp {
         platform_range
     }
 
-    fn new_connection_field_accepts_ime(&self, field: NewConnectionField, cx: &App) -> bool {
-        if field == NewConnectionField::Password
-            && self.saved_connection_form_uses_unloaded_secret(cx)
-            && self
-                .connection_form_state(cx)
-                .form
-                .as_ref()
-                .is_some_and(|form| !form.password_loaded)
-        {
-            return false;
-        }
-        true
-    }
-
     fn ime_index_for_relative_x(
         &self,
         target: WorkspaceImeTarget,
@@ -1881,15 +2114,25 @@ impl WorkspaceApp {
         let run = TextRun {
             len: shared.len(),
             font,
-            color: rgb(self.tokens.ui.text).into_color(),
+            color: rgb(self.tokens.ui.text).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
             letter_spacing: None,
         };
+        let text_size = if matches!(
+            target,
+            WorkspaceImeTarget::AiChatInput | WorkspaceImeTarget::AiMessageEdit
+        ) {
+            13.0
+        } else if target == WorkspaceImeTarget::ActiveSessionSearch {
+            self.tokens.metrics.sidebar_title_font_size
+        } else {
+            self.tokens.metrics.ui_text_sm
+        };
         window
             .text_system()
-            .shape_line(shared, px(self.tokens.metrics.ui_text_sm), &[run], None)
+            .shape_line(shared, px(text_size), &[run], None)
     }
 
     fn ime_target_font_family(&self, target: WorkspaceImeTarget) -> SharedString {
@@ -1928,7 +2171,26 @@ impl WorkspaceApp {
                 Some(self.command_palette.read(cx).query().to_string())
             }
             WorkspaceImeTarget::ShortcutsModalSearch => Some(self.shortcuts_modal.query.clone()),
-            WorkspaceImeTarget::Search => Some(self.search.query.clone()),
+            WorkspaceImeTarget::ActiveSessionSearch => Some(self.session_search_query.clone()),
+            WorkspaceImeTarget::AuditSearch => Some(self.audit.search.clone()),
+            WorkspaceImeTarget::AuditPolicy(input) => Some(self.audit_policy_input_value(input)),
+            WorkspaceImeTarget::KnowledgeSearch => Some(
+                self.knowledge_workspace
+                    .read(cx)
+                    .navigator_query
+                    .to_string(),
+            ),
+            WorkspaceImeTarget::KnowledgeRename => self
+                .knowledge_workspace
+                .read(cx)
+                .rename
+                .as_ref()
+                .map(|rename| rename.name.clone()),
+            WorkspaceImeTarget::Search(pane_id) => self
+                .search
+                .panes
+                .get(&pane_id)
+                .map(|search| search.query.clone()),
             WorkspaceImeTarget::TerminalCommandSenderCompact => self
                 .terminal_command_sender
                 .read(cx)
@@ -2062,7 +2324,11 @@ impl WorkspaceApp {
             WorkspaceImeTarget::SessionManager(input) => {
                 session_manager_ime_text(self.session_manager.read(cx), input)
             }
-            WorkspaceImeTarget::Forwards(input) => {
+            WorkspaceImeTarget::Forwards(page, input) => {
+                if !self.forwarding.read(cx).has_page(page) {
+                    return None;
+                }
+                let _scope = self.enter_forwarding_page(page, cx);
                 if self.forwarding.read(cx).view().focused_input == Some(input) {
                     Some(self.forward_input_value(input, cx).to_string())
                 } else {
@@ -2141,9 +2407,13 @@ impl WorkspaceApp {
                         .map(|value| ime_text_snapshot(target, value))
                 })
                 .flatten(),
-            WorkspaceImeTarget::Sftp(input) => {
-                if self.sftp_view.read(cx).focused_input() == Some(input) {
-                    Some(self.sftp_view.read(cx).input_value(input).to_string())
+            WorkspaceImeTarget::Sftp(surface, input) => {
+                if !self.has_sftp_surface(surface) {
+                    return None;
+                }
+                let _scope = self.enter_sftp_surface(surface);
+                if self.sftp_view().read(cx).focused_input() == Some(input) {
+                    Some(self.sftp_view().read(cx).input_value(input).to_string())
                 } else {
                     None
                 }
@@ -2161,15 +2431,13 @@ impl WorkspaceApp {
         }
     }
 
-    fn replace_active_ime_text(
+    fn replace_platform_ime_text(
         &mut self,
+        target: WorkspaceImeTarget,
         replacement_range: Option<Range<usize>>,
         text: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(target) = self.active_ime_target(cx) else {
-            return;
-        };
         if platform_text_commit_is_duplicate(&mut self.pending_platform_text_commit, target, text) {
             self.ime_marked_text = None;
             return;
@@ -2281,11 +2549,16 @@ impl WorkspaceApp {
             WorkspaceImeTarget::FileManager(FileManagerInput::Path) => {
                 self.file_manager.read(cx).path_completion.is_visible()
             }
-            WorkspaceImeTarget::Sftp(SftpInput::LocalPath) => {
-                self.sftp_view.read(cx).local_path_completion.is_visible()
+            WorkspaceImeTarget::Sftp(surface, SftpInput::LocalPath) => {
+                let _scope = self.enter_sftp_surface(surface);
+                self.sftp_view().read(cx).local_path_completion.is_visible()
             }
-            WorkspaceImeTarget::Sftp(SftpInput::RemotePath) => {
-                self.sftp_view.read(cx).remote_path_completion.is_visible()
+            WorkspaceImeTarget::Sftp(surface, SftpInput::RemotePath) => {
+                let _scope = self.enter_sftp_surface(surface);
+                self.sftp_view()
+                    .read(cx)
+                    .remote_path_completion
+                    .is_visible()
             }
             _ => false,
         };
@@ -2327,7 +2600,7 @@ impl WorkspaceApp {
             return false;
         };
         let Some(next) =
-            self.text_input_navigation_destination(target, &text, &selection, keystroke)
+            self.text_input_navigation_destination(target, &text, &selection, keystroke, cx)
         else {
             return false;
         };
@@ -2376,11 +2649,18 @@ impl WorkspaceApp {
         if !ime_target_accepts_newline(target) {
             return false;
         }
-        if matches!(
-            target,
-            WorkspaceImeTarget::AiChatInput | WorkspaceImeTarget::AiMessageEdit
-        ) && !keystroke.modifiers.shift
-        {
+        if target == WorkspaceImeTarget::AiChatInput {
+            use super::sidebar::{AiChatPromptKeyAction, ai_chat_prompt_key_action};
+            if ai_chat_prompt_key_action(
+                keystroke,
+                &self.settings_store.settings().keybindings.overrides,
+                self.marked_text_for_target(target, cx).is_some(),
+                !self.ai_chat_autocomplete_items(cx).is_empty(),
+            ) != Some(AiChatPromptKeyAction::Newline)
+            {
+                return false;
+            }
+        } else if target == WorkspaceImeTarget::AiMessageEdit && !keystroke.modifiers.shift {
             return false;
         }
         let Some(replacement_range) = self.ime_selection_range_for_target(target, cx) else {
@@ -2551,12 +2831,27 @@ impl WorkspaceApp {
         text: &str,
         selection: &WorkspaceImeSelection,
         keystroke: &Keystroke,
+        cx: &App,
     ) -> Option<usize> {
         let text_len = text.encode_utf16().count();
         let key = keystroke.key.as_str();
         let focus = selection_focus(selection);
         let has_selection = selection.range.start < selection.range.end;
         let is_multiline = ime_target_accepts_newline(target);
+        if target == WorkspaceImeTarget::AiMessageEdit
+            && !keystroke.modifiers.control
+            && !keystroke.modifiers.alt
+            && !keystroke.modifiers.platform
+            && matches!(key, "up" | "arrowup" | "down" | "arrowdown")
+        {
+            let lines = self.ai_editor_visual_lines(target, text, cx);
+            return Some(ai_edit_vertical_destination(
+                text,
+                &lines,
+                focus,
+                matches!(key, "down" | "arrowdown"),
+            ));
+        }
         let destination = match key {
             "a" if keystroke.modifiers.control => {
                 if is_multiline {
@@ -2715,15 +3010,55 @@ impl WorkspaceApp {
                 self.show_active_input_caret(cx);
                 cx.notify();
             }
+            WorkspaceImeTarget::KnowledgeSearch => {
+                self.knowledge_workspace.update(cx, |state, _| {
+                    let mut query = state.navigator_query.to_string();
+                    replace_utf16(&mut query, replacement_range, text);
+                    state.navigator_query = query.into();
+                });
+                self.queue_knowledge_search(cx);
+                self.show_active_input_caret(cx);
+                cx.notify();
+            }
+            WorkspaceImeTarget::KnowledgeRename => {
+                self.knowledge_workspace.update(cx, |state, _| {
+                    if state.metadata_task.is_none()
+                        && let Some(rename) = state.rename.as_mut()
+                    {
+                        replace_utf16(&mut rename.name, replacement_range, text);
+                    }
+                });
+                self.show_active_input_caret(cx);
+                cx.notify();
+            }
+            WorkspaceImeTarget::AuditSearch => {
+                replace_utf16(&mut self.audit.search, replacement_range, text);
+                self.show_active_input_caret(cx);
+                cx.notify();
+            }
+            WorkspaceImeTarget::AuditPolicy(input) => {
+                self.replace_audit_policy_input(input, replacement_range, text, cx);
+            }
+            WorkspaceImeTarget::ActiveSessionSearch => {
+                replace_utf16(&mut self.session_search_query, replacement_range, text);
+                self.show_active_input_caret(cx);
+                cx.notify();
+            }
             WorkspaceImeTarget::ShortcutsModalSearch => {
+                if self.shortcuts_modal.presence.phase()
+                    == oxideterm_gpui_ui::motion::ExitPhase::Exiting
+                {
+                    return;
+                }
                 replace_utf16(&mut self.shortcuts_modal.query, replacement_range, text);
                 self.shortcuts_modal.scroll_handle = gpui::UniformListScrollHandle::new();
                 self.show_active_input_caret(cx);
                 cx.notify();
             }
-            WorkspaceImeTarget::Search => {
-                replace_utf16(&mut self.search.query, replacement_range, text);
-                self.update_search_query(cx);
+            WorkspaceImeTarget::Search(pane_id) => {
+                if self.search.replace_query(pane_id, replacement_range, text) {
+                    self.update_search_query_for_pane(pane_id, true, cx);
+                }
             }
             WorkspaceImeTarget::TerminalCommandSenderCompact => {
                 let mut draft = Zeroizing::new(
@@ -2924,7 +3259,11 @@ impl WorkspaceApp {
                     self.clear_session_selection_for_invisible_rows(cx);
                 }
             }
-            WorkspaceImeTarget::Forwards(input) => {
+            WorkspaceImeTarget::Forwards(page, input) => {
+                if !self.forwarding.read(cx).has_page(page) {
+                    return;
+                }
+                let _scope = self.enter_forwarding_page(page, cx);
                 if self.forwarding.read(cx).view().focused_input == Some(input) {
                     self.forwarding.update(cx, |forwarding, _cx| {
                         forwarding.replace_input_text(input, replacement_range, text);
@@ -3027,9 +3366,13 @@ impl WorkspaceApp {
                     cx.notify();
                 }
             }
-            WorkspaceImeTarget::Sftp(input) => {
-                if self.sftp_view.read(cx).focused_input() == Some(input) {
-                    self.sftp_view.update(cx, |sftp, _cx| {
+            WorkspaceImeTarget::Sftp(surface, input) => {
+                if !self.has_sftp_surface(surface) {
+                    return;
+                }
+                let _scope = self.enter_sftp_surface(surface);
+                if self.sftp_view().read(cx).focused_input() == Some(input) {
+                    self.sftp_view().update(cx, |sftp, _cx| {
                         replace_utf16(sftp.input_value_mut(input), replacement_range, text);
                     });
                     if matches!(input, SftpInput::LocalPath | SftpInput::RemotePath) {
@@ -3107,6 +3450,7 @@ fn new_connection_field_value(
 ) -> Option<&str> {
     Some(match field {
         NewConnectionField::Name => &form.name,
+        NewConnectionField::LocalCwd => &form.local_cwd,
         NewConnectionField::Host => &form.host,
         NewConnectionField::Port => &form.port,
         NewConnectionField::Username => &form.username,
@@ -3209,6 +3553,7 @@ fn connection_field_value_mut(
 ) -> &mut String {
     match field {
         NewConnectionField::Name => &mut form.name,
+        NewConnectionField::LocalCwd => &mut form.local_cwd,
         NewConnectionField::Host => &mut form.host,
         NewConnectionField::Port => &mut form.port,
         NewConnectionField::Username => &mut form.username,
@@ -3497,6 +3842,56 @@ fn selection_anchor(selection: &WorkspaceImeSelection) -> usize {
     }
 }
 
+fn ai_edit_vertical_destination(
+    text: &str,
+    lines: &[super::sidebar::AiInputVisualLine<'_>],
+    focus: usize,
+    down: bool,
+) -> usize {
+    let index = ai_input_line_index_for_offset(lines, focus);
+    let current = lines[index].utf16_range();
+    let next_index = if down {
+        index + 1
+    } else {
+        let Some(previous) = index.checked_sub(1) else {
+            return 0;
+        };
+        previous
+    };
+    let Some(next) = lines.get(next_index).map(|line| line.utf16_range()) else {
+        return text.encode_utf16().count();
+    };
+    let offset = next.start
+        + focus
+            .saturating_sub(current.start)
+            .min(next.end - next.start);
+    utf16_offset_for_byte_index(text, byte_index_for_utf16(text, offset))
+}
+
+fn multiline_ime_line_ranges(
+    target: WorkspaceImeTarget,
+    text: &str,
+    bounds: Bounds<Pixels>,
+    ai_wrap_columns: Option<usize>,
+) -> Vec<Range<usize>> {
+    if target == WorkspaceImeTarget::AiChatInput {
+        // Mouse hit testing must use the same soft wraps as the painted chat draft.
+        return ai_input_visual_lines(text, ai_wrap_columns.expect("AI input wrap width"))
+            .into_iter()
+            .map(|line| line.utf16_range())
+            .collect();
+    }
+    if ime_target_is_read_only(target) {
+        soft_wrapped_line_ranges_utf16(
+            text,
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+        )
+    } else {
+        line_ranges_utf16(text)
+    }
+}
+
 fn soft_wrapped_line_ranges_utf16(
     value: &str,
     max_width_px: f32,
@@ -3637,28 +4032,72 @@ fn path_completion_owns_vertical_navigation(
         && matches!(
             target,
             WorkspaceImeTarget::FileManager(FileManagerInput::Path)
-                | WorkspaceImeTarget::Sftp(SftpInput::LocalPath)
-                | WorkspaceImeTarget::Sftp(SftpInput::RemotePath)
+                | WorkspaceImeTarget::Sftp(_, SftpInput::LocalPath)
+                | WorkspaceImeTarget::Sftp(_, SftpInput::RemotePath)
         )
 }
 
 #[cfg(test)]
 mod tests {
+    use oxideterm_workspace::PaneId;
+
+    #[test]
+    fn terminal_search_inputs_have_distinct_pane_selection_and_geometry() {
+        let first = super::WorkspaceImeTarget::Search(PaneId(1));
+        let second = super::WorkspaceImeTarget::Search(PaneId(2));
+        assert_ne!(first, second);
+        assert_ne!(first.anchor_id(), second.anchor_id());
+        assert_ne!(
+            first.anchor_id(),
+            super::WorkspaceImeTarget::CommandPalette.anchor_id()
+        );
+    }
     use gpui::{Keystroke, Modifiers};
-    use zeroize::{Zeroize, Zeroizing};
+    use zeroize::Zeroizing;
 
     use super::{
         CopyShortcutOwner, FileManagerInput, HostToolsPlainTextImeFrame, HostToolsTextInput,
         NewConnectionField, PendingPlatformTextCommit, QuickCommandInput, SettingsInput, SftpInput,
         TextInputAnchorStore, WorkspaceCaretState, WorkspaceCaretVisibility,
         WorkspaceImeMarkedText, WorkspaceImeTarget, active_ime_should_defer_input_key,
-        collapsed_copy_shortcut_is_owned_by_target, copy_shortcut_owner_for_target,
-        effective_platform_text_replacement_range, ime_target_is_secret, ime_text_snapshot,
-        keystroke_platform_text, keystroke_uses_text_edit_modifier,
+        copy_shortcut_owner_for_target, effective_platform_text_replacement_range,
+        ime_target_is_secret, ime_text_snapshot, keystroke_platform_text,
+        keystroke_uses_text_edit_modifier, multiline_ime_line_ranges,
         normalize_clipboard_text_for_ime_target, path_completion_owns_vertical_navigation,
         platform_text_commit_is_duplicate, secret_ime_proxy, soft_wrapped_line_ranges_utf16,
         utf16_offset_for_char_index, workspace_ime_target_for_plain_host_tools_input,
     };
+
+    #[test]
+    fn ai_chat_hit_testing_uses_soft_wrapped_visual_lines() {
+        let bounds = gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            size: gpui::size(gpui::px(120.0), gpui::px(60.0)),
+        };
+        let text = "abcdefghij😀klmn\nZ";
+        assert_eq!(
+            multiline_ime_line_ranges(WorkspaceImeTarget::AiChatInput, text, bounds, Some(12)),
+            vec![0..12, 12..16, 17..18],
+        );
+    }
+
+    #[test]
+    fn history_editor_vertical_navigation_follows_soft_rows() {
+        let text = "abcdefghij😀klmn\nZ";
+        let lines = super::ai_input_visual_lines(text, 12);
+        for (focus, down, expected) in [
+            (2, true, 14),
+            (10, true, 16),
+            (14, false, 2),
+            (12, false, 0),
+            (17, true, 18),
+        ] {
+            assert_eq!(
+                super::ai_edit_vertical_destination(text, &lines, focus, down),
+                expected
+            );
+        }
+    }
 
     fn key(key: &str, key_char: Option<&str>, modifiers: Modifiers) -> Keystroke {
         Keystroke {
@@ -3669,7 +4108,7 @@ mod tests {
     }
 
     #[test]
-    fn caret_state_pauses_settings_blink_until_scroll_deadline() {
+    fn caret_state_pauses_scrolled_settings_and_resets_when_visible_owner_changes() {
         let now = std::time::Instant::now();
         let visibility = WorkspaceCaretVisibility::default();
         let mut caret = WorkspaceCaretState::new(visibility.clone());
@@ -3684,20 +4123,12 @@ mod tests {
         assert!(visibility.visible());
         assert!(caret.advance_tick(now + std::time::Duration::from_millis(700)));
         assert!(!visibility.visible());
-    }
 
-    #[test]
-    fn caret_state_resets_phase_and_pause_when_visible_owner_changes() {
-        let now = std::time::Instant::now();
-        let visibility = WorkspaceCaretVisibility::default();
-        let mut caret = WorkspaceCaretState::new(visibility.clone());
-        let settings_target = WorkspaceImeTarget::Settings(SettingsInput::KeybindingSearch);
-        caret.sync_active_target(Some(settings_target));
         caret.pause_settings_caret(now + std::time::Duration::from_secs(1));
         caret.advance_tick(now + std::time::Duration::from_secs(1));
         assert!(!visibility.visible());
 
-        assert!(caret.sync_active_target(Some(WorkspaceImeTarget::Search)));
+        assert!(caret.sync_active_target(Some(WorkspaceImeTarget::Search(PaneId(1)))));
         assert!(visibility.visible());
         assert_eq!(
             caret.next_tick_delay(now),
@@ -3846,6 +4277,16 @@ mod tests {
             WorkspaceImeTarget::CommandPalette,
             "a",
         ));
+        assert!(!platform_text_commit_is_duplicate(
+            &mut pending,
+            WorkspaceImeTarget::ShortcutsModalSearch,
+            "a",
+        ));
+        assert!(!platform_text_commit_is_duplicate(
+            &mut pending,
+            WorkspaceImeTarget::CommandPalette,
+            "b",
+        ));
         assert!(platform_text_commit_is_duplicate(
             &mut pending,
             WorkspaceImeTarget::CommandPalette,
@@ -3864,28 +4305,6 @@ mod tests {
             WorkspaceImeTarget::CommandPalette,
             "a",
         ));
-    }
-
-    #[test]
-    fn platform_text_commit_does_not_dedupe_other_targets_or_text() {
-        let mut pending = Some(PendingPlatformTextCommit {
-            target: WorkspaceImeTarget::CommandPalette,
-            text: Zeroizing::new("a".to_string()),
-            generation: 1,
-            consumed: true,
-        });
-
-        assert!(!platform_text_commit_is_duplicate(
-            &mut pending,
-            WorkspaceImeTarget::ShortcutsModalSearch,
-            "a",
-        ));
-        assert!(!platform_text_commit_is_duplicate(
-            &mut pending,
-            WorkspaceImeTarget::CommandPalette,
-            "b",
-        ));
-        assert!(pending.is_some());
     }
 
     #[test]
@@ -3979,48 +4398,39 @@ mod tests {
             );
         }
         assert_eq!(
-            ime_text_snapshot(WorkspaceImeTarget::Search, secret),
+            ime_text_snapshot(WorkspaceImeTarget::Search(PaneId(1)), secret),
             secret
         );
     }
 
     #[test]
-    fn managed_private_key_clipboard_normalization_preserves_pem_lines() {
-        let normalized = normalize_clipboard_text_for_ime_target(
-            WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePrivateKey),
-            "-----BEGIN TEST KEY-----\r\nfake-material\r-----END TEST KEY-----",
-        );
-
-        assert_eq!(
-            normalized.as_str(),
-            "-----BEGIN TEST KEY-----\nfake-material\n-----END TEST KEY-----"
-        );
-    }
-
-    #[test]
-    fn quick_command_clipboard_normalization_preserves_command_lines() {
-        let normalized = normalize_clipboard_text_for_ime_target(
-            WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText),
-            "first\r\nsecond\rthird",
-        );
-
-        assert_eq!(normalized.as_str(), "first\nsecond\nthird");
-    }
-
-    #[test]
-    fn single_line_secret_clipboard_normalization_flattens_line_breaks() {
-        let normalized = normalize_clipboard_text_for_ime_target(
-            WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePassphrase),
-            "fake\r\npassphrase",
-        );
-
-        assert_eq!(normalized.as_str(), "fake passphrase");
+    fn clipboard_normalization_preserves_multiline_inputs_and_flattens_secret_fields() {
+        for (target, text, expected) in [
+            (
+                WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePrivateKey),
+                "-----BEGIN TEST KEY-----\r\nfake-material\r-----END TEST KEY-----",
+                "-----BEGIN TEST KEY-----\nfake-material\n-----END TEST KEY-----",
+            ),
+            (
+                WorkspaceImeTarget::QuickCommand(QuickCommandInput::CommandText),
+                "first\r\nsecond\rthird",
+                "first\nsecond\nthird",
+            ),
+            (
+                WorkspaceImeTarget::Settings(SettingsInput::ManagedKeyPastePassphrase),
+                "fake\r\npassphrase",
+                "fake passphrase",
+            ),
+        ] {
+            let normalized = normalize_clipboard_text_for_ime_target(target, text);
+            assert_eq!(normalized.as_str(), expected, "{target:?}");
+        }
     }
 
     #[test]
     fn platform_commit_and_marked_text_debug_are_redacted() {
         let secret = "debug-secret";
-        let mut pending = PendingPlatformTextCommit {
+        let pending = PendingPlatformTextCommit {
             target: WorkspaceImeTarget::Settings(SettingsInput::AiProviderApiKey(0)),
             text: Zeroizing::new(secret.to_string()),
             generation: 9,
@@ -4036,13 +4446,10 @@ mod tests {
         assert!(!format!("{marked:?}").contains(secret));
         assert!(format!("{pending:?}").contains("<redacted>"));
         assert!(format!("{marked:?}").contains("<redacted>"));
-
-        pending.text.zeroize();
-        assert!(pending.text.is_empty());
     }
 
     #[test]
-    fn marked_text_replacement_and_release_clear_owned_secret() {
+    fn marked_text_replacement_reuses_owned_secret_allocation() {
         let mut marked = WorkspaceImeMarkedText {
             target: WorkspaceImeTarget::KeyboardInteractive(0),
             replacement_range: 0..0,
@@ -4055,17 +4462,20 @@ mod tests {
         assert_eq!(marked.replacement_range, 2..4);
         assert_eq!(marked.text.as_str(), "新值");
         assert_eq!(marked.text.as_ptr(), allocation);
-
-        marked.text.zeroize();
-        assert!(marked.text.is_empty());
     }
 
     #[test]
     fn visible_path_completion_owns_unmodified_vertical_navigation() {
         for target in [
             WorkspaceImeTarget::FileManager(FileManagerInput::Path),
-            WorkspaceImeTarget::Sftp(SftpInput::LocalPath),
-            WorkspaceImeTarget::Sftp(SftpInput::RemotePath),
+            WorkspaceImeTarget::Sftp(
+                crate::workspace::sftp::SftpSurfaceId::Sidebar,
+                SftpInput::LocalPath,
+            ),
+            WorkspaceImeTarget::Sftp(
+                crate::workspace::sftp::SftpSurfaceId::Sidebar,
+                SftpInput::RemotePath,
+            ),
         ] {
             assert!(path_completion_owns_vertical_navigation(
                 target, "arrowup", true, false,
@@ -4081,26 +4491,19 @@ mod tests {
             ));
         }
         assert!(!path_completion_owns_vertical_navigation(
-            WorkspaceImeTarget::Search,
+            WorkspaceImeTarget::Search(PaneId(1)),
             "arrowdown",
             true,
             false,
         ));
         assert!(!path_completion_owns_vertical_navigation(
-            WorkspaceImeTarget::Sftp(SftpInput::RemotePath),
+            WorkspaceImeTarget::Sftp(
+                crate::workspace::sftp::SftpSurfaceId::Sidebar,
+                SftpInput::RemotePath
+            ),
             "left",
             true,
             false,
-        ));
-    }
-
-    #[test]
-    fn collapsed_read_only_copy_falls_through_to_next_owner() {
-        assert!(!collapsed_copy_shortcut_is_owned_by_target(
-            WorkspaceImeTarget::ReadOnlyText(42)
-        ));
-        assert!(collapsed_copy_shortcut_is_owned_by_target(
-            WorkspaceImeTarget::Search
         ));
     }
 
@@ -4111,7 +4514,7 @@ mod tests {
             CopyShortcutOwner::SelectedRange(2..5)
         );
         assert_eq!(
-            copy_shortcut_owner_for_target(WorkspaceImeTarget::Search, Some(&(3..3))),
+            copy_shortcut_owner_for_target(WorkspaceImeTarget::Search(PaneId(1)), Some(&(3..3))),
             CopyShortcutOwner::FocusedEditableInput
         );
         assert_eq!(

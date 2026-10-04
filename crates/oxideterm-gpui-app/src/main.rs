@@ -168,6 +168,7 @@ fn main() {
             .external_connection_uris_enabled
             .then_some(startup_launch)
             .flatten()
+            .map(Into::into)
     });
     let _log_guard = match logging::init_file_logging(
         &startup_settings,
@@ -207,7 +208,7 @@ fn main() {
             && !launches.is_empty()
             && let Err(error) = open_primary_window(
                 cx,
-                Some(launches.remove(0)),
+                Some(launches.remove(0).into()),
                 desktop_presence_menu_from_settings(),
                 Some(url_event_receiver.clone()),
                 SettingsStore::load_default()
@@ -271,7 +272,7 @@ fn main() {
         cx.on_action(quit);
         cx.bind_keys(platform::app_key_bindings(&startup_settings));
         keybindings::install_context_keybindings(&startup_settings.keybindings.overrides, cx);
-        cx.set_menus(platform::app_menus(&I18n::default()));
+        cx.set_menus(platform::app_menus(&startup_settings));
 
         let desktop_presence_menu = desktop_presence_menu(&I18n::new(locale_from_settings(
             startup_settings.general.language,
@@ -329,7 +330,7 @@ fn confirm_update_after_initial_workspace() -> std::io::Result<()> {
 
 fn open_main_workspace_window(
     cx: &mut App,
-    native_connection_launch: Option<oxideterm_ssh_launch::NativeConnectionLaunch>,
+    native_connection_launch: Option<oxideterm_ssh_launch::NativeConnectionHandoff>,
     desktop_presence_menu: oxideterm_desktop_presence::DesktopPresenceMenu,
     single_instance_rx: Option<single_instance::SingleInstanceReceiver>,
     window_ui: WindowUiState,
@@ -365,11 +366,21 @@ fn open_main_workspace_window(
             });
             if let Some(launch) = native_connection_launch
                 && let Err(error) = session.update(cx, |session, cx| {
-                    session.open_native_connection_launch(launch, window, cx)
+                    session.open_native_connection_handoff(launch, window, cx)
                 })
             {
                 eprintln!("failed to open native connection launch: {error}");
             }
+            let close_session = session.clone();
+            oxideterm_desktop_presence::install_main_window_close_guard(
+                window,
+                cx,
+                move |_window, cx| {
+                    close_session.update(cx, |workspace, cx| {
+                        !workspace.guard_dirty_knowledge_app_quit(cx)
+                    })
+                },
+            );
             cx.new(|cx| WorkspaceWindowShell::new(session, window, cx))
         },
     )
@@ -378,7 +389,7 @@ fn open_main_workspace_window(
 
 fn open_primary_window(
     cx: &mut App,
-    native_connection_launch: Option<oxideterm_ssh_launch::NativeConnectionLaunch>,
+    native_connection_launch: Option<oxideterm_ssh_launch::NativeConnectionHandoff>,
     desktop_presence_menu: oxideterm_desktop_presence::DesktopPresenceMenu,
     single_instance_rx: Option<single_instance::SingleInstanceReceiver>,
     settings: oxideterm_settings::PersistedSettings,

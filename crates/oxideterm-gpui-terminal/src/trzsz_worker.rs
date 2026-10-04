@@ -34,6 +34,8 @@ pub(crate) struct TrzszWorkerJob {
     pub(crate) policy: TrzszTransferPolicy,
     pub(crate) event_tx: Sender<TrzszWorkerEvent>,
     pub(crate) terminal_columns: usize,
+    pub(crate) audit: Option<oxideterm_audit::AuditOperation>,
+    pub(crate) connection_lost: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) enum TrzszWorkerEvent {
@@ -69,6 +71,50 @@ pub(crate) fn run_trzsz_worker_job(mut job: TrzszWorkerJob) -> Result<(), TrzszE
     if cleanup.cleanup_errors > 0 {
         let _ = job.event_tx.send(TrzszWorkerEvent::PartialCleanup);
     }
+    if let Some(mut audit) = job.audit.take() {
+        let selection = match &job.selection {
+            TrzszPromptSelection::Upload(paths) => format!(
+                "local={}; selected={}",
+                paths.first().map(String::as_str).unwrap_or("unavailable"),
+                paths.len()
+            ),
+            TrzszPromptSelection::DownloadRoot(root) => format!("local_root={root}"),
+            TrzszPromptSelection::Cancelled => "selection=cancelled".to_string(),
+        };
+        audit.summary(&format!(
+            "protocol=trzsz; direction={:?}; {selection}; completed_files={}; cleanup_errors={}",
+            job.request.direction,
+            job.transfer.completed_files(),
+            cleanup.cleanup_errors
+        ));
+        let outcome = if job
+            .connection_lost
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            oxideterm_audit::AuditOutcome::Interrupted
+        } else {
+            match &result {
+                Ok(()) if cleanup.cleanup_errors > 0 => oxideterm_audit::AuditOutcome::Partial,
+                Ok(()) => oxideterm_audit::AuditOutcome::Succeeded,
+                Err(error) if is_cancelled_transfer(error) => {
+                    oxideterm_audit::AuditOutcome::Cancelled
+                }
+                Err(_)
+                    if job.transfer.completed_files() > 0 || job.transfer.payload_bytes() > 0 =>
+                {
+                    oxideterm_audit::AuditOutcome::Partial
+                }
+                Err(_) => oxideterm_audit::AuditOutcome::Failed,
+            }
+        };
+        audit.finish(
+            outcome,
+            oxideterm_audit::AuditEvidence::Protocol,
+            None,
+            Some(job.transfer.payload_bytes()),
+        );
+    }
+
     result
 }
 
@@ -875,4 +921,99 @@ fn format_saved_files(file_names: &[String], dest_path: &str) -> String {
     let mut lines = vec![message];
     lines.extend(file_names.iter().cloned());
     lines.join("\r\n- ")
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    #[test]
+    fn download_honors_overwrite_and_preserves_original_on_checksum_failure() {
+        // Independent zlib/base64 wire fixtures carry "new firmware" and its MD5.
+        // Exercise the native worker and real filesystem, including collision naming.
+        let digest = "eJz7mrM4z1vTanbjxWerGta4CwIASEoIIg==";
+        for (config, checksum, overwrite) in [
+            (
+                "eJyrVioszUwtUbIqKSpN1VEqycxNzS8Fcg1rAX86CUE=",
+                digest,
+                false,
+            ),
+            (
+                "eJyrVioszUwtUbIqKSpN1VEqycxNzS8Fcg11lPLLUovKizJLUpWs0hJzilNrAWBcD90=",
+                digest,
+                false,
+            ),
+            (
+                "eJyrVioszUwtUbIqKSpN1VEqycxNzS8Fcg11lPLLUovKizJLUiGStQBRIA+S",
+                digest,
+                true,
+            ),
+            (
+                "eJyrVioszUwtUbIqKSpN1VEqycxNzS8Fcg11lPLLUovKizJLUiGStQBRIA+S",
+                "eJxjYEAFAAAQAAE=",
+                true,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("firmware.bin");
+            std::fs::write(&target, b"old firmware").unwrap();
+            let mut transfer = TrzszTransfer::new(|_| {}, false, 1024);
+            transfer.add_received_data(format!(
+                "#CFG:{config}\n#NUM:1\n#NAME:eJxLyyzKLU8sStVLyswDAB/CBMU=\n#SIZE:12\n#DATA:eJzLSy1XSMssyi1PLEoFAB51BMg=\n#MD5:{checksum}\n"
+            ).as_bytes());
+            let (event_tx, _events) = std::sync::mpsc::channel();
+            let result = run_trzsz_worker_job(TrzszWorkerJob {
+                transfer,
+                request: TrzszPromptRequest {
+                    direction: TrzszTransferDirection::Download,
+                    selection: TrzszTransferSelection::File,
+                    remote_is_windows: false,
+                },
+                selection: TrzszPromptSelection::DownloadRoot(
+                    directory.path().to_string_lossy().into_owned(),
+                ),
+                owner_id: "download-regression".into(),
+                state: TrzszState::new(),
+                policy: TrzszTransferPolicy::default(),
+                event_tx,
+                terminal_columns: 80,
+                audit: None,
+                connection_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+            if checksum == digest {
+                result.unwrap();
+            } else {
+                assert!(
+                    matches!(result, Err(TrzszError::InvalidState(ref message)) if message == "Check MD5 failed")
+                );
+            }
+            let mut files: Vec<_> = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect();
+            files.sort();
+            let expected = if checksum != digest {
+                vec![("firmware.bin".to_string(), b"old firmware".to_vec())]
+            } else if overwrite {
+                vec![("firmware.bin".to_string(), b"new firmware".to_vec())]
+            } else {
+                vec![
+                    ("firmware.bin".to_string(), b"old firmware".to_vec()),
+                    ("firmware.bin.0".to_string(), b"new firmware".to_vec()),
+                ]
+            };
+            assert_eq!(
+                files,
+                expected,
+                "overwrite={overwrite}, checksum_valid={}",
+                checksum == digest
+            );
+        }
+    }
 }

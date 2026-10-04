@@ -12,6 +12,7 @@ fn auth_binding<'a>(
         SavedAuth::Password {
             keychain_id,
             plaintext_password,
+            ..
         } => (keychain_id.as_deref(), plaintext_password.as_ref()),
         SavedAuth::Key {
             passphrase_keychain_id,
@@ -76,8 +77,38 @@ impl ConnectionStore {
         global_proxy: Option<&'a SavedUpstreamProxyConfig>,
     ) -> Vec<CredentialBinding<'a>> {
         let mut bindings = Vec::new();
+        for credential in &self.data.totp_credentials {
+            bindings.push(CredentialBinding {
+                target: CredentialTarget {
+                    owner: CredentialOwner::Totp(credential.id.clone()),
+                    slot: CredentialSlot::Primary,
+                    identity: credential.secret_revision.clone(),
+                },
+                reference: (!credential.secret_reference.is_empty())
+                    .then_some(credential.secret_reference.as_str()),
+                plaintext: None,
+            });
+        }
         for profile in &self.data.connections {
             let owner = CredentialOwner::Connection(profile.id.clone());
+            bindings.extend(auth_binding(
+                owner.clone(),
+                CredentialSlot::Primary,
+                &profile.host,
+                profile.port,
+                &profile.username,
+                &profile.auth,
+            ));
+            for (index, hop) in profile.proxy_chain.iter().enumerate() {
+                bindings.extend(auth_binding(
+                    owner.clone(),
+                    CredentialSlot::Hop(index),
+                    &hop.host,
+                    hop.port,
+                    &hop.username,
+                    &hop.auth,
+                ));
+            }
             if let SavedUpstreamProxyPolicy::Custom { proxy } = &profile.upstream_proxy {
                 bindings.extend(proxy_binding(owner, CredentialSlot::UpstreamProxy, proxy));
             }
@@ -183,6 +214,36 @@ impl ConnectionStore {
                 plaintext: None,
             });
         }
+        for profile in &self.data.telnet_profiles {
+            if let SavedUpstreamProxyPolicy::Custom { proxy } = &profile.upstream_proxy {
+                bindings.extend(proxy_binding(
+                    CredentialOwner::Telnet(profile.id.clone()),
+                    CredentialSlot::UpstreamProxy,
+                    proxy,
+                ));
+            }
+        }
+        for profile in &self.data.ftp_profiles {
+            let owner = CredentialOwner::Ftp(profile.id.clone());
+            bindings.push(CredentialBinding {
+                target: CredentialTarget {
+                    owner: owner.clone(),
+                    slot: CredentialSlot::Primary,
+                    identity: sha256_hex(&(
+                        &profile.host,
+                        profile.port,
+                        &profile.username,
+                        profile.security,
+                    ))
+                    .expect("serializable FTP identity"),
+                },
+                reference: profile.password_keychain_id.as_deref(),
+                plaintext: None,
+            });
+            if let SavedUpstreamProxyPolicy::Custom { proxy } = &profile.upstream_proxy {
+                bindings.extend(proxy_binding(owner, CredentialSlot::UpstreamProxy, proxy));
+            }
+        }
         if let Some(proxy) = global_proxy {
             bindings.extend(proxy_binding(
                 CredentialOwner::GlobalProxy,
@@ -198,9 +259,32 @@ impl ConnectionStore {
         selection: &CredentialSyncSelection,
         global_proxy: Option<&SavedUpstreamProxyConfig>,
     ) -> Result<Vec<EncryptedPortableSecret>> {
+        self.export_sync_credentials_inner(selection, global_proxy, false)
+    }
+
+    pub fn export_sync_credentials(
+        &self,
+        selection: &CredentialSyncSelection,
+        global_proxy: Option<&SavedUpstreamProxyConfig>,
+    ) -> Result<Vec<EncryptedPortableSecret>> {
+        self.export_sync_credentials_inner(selection, global_proxy, true)
+    }
+
+    fn export_sync_credentials_inner(
+        &self,
+        selection: &CredentialSyncSelection,
+        global_proxy: Option<&SavedUpstreamProxyConfig>,
+        include_ssh: bool,
+    ) -> Result<Vec<EncryptedPortableSecret>> {
         let mut result = Vec::new();
         for binding in self.credential_bindings(global_proxy) {
-            if !selection.contains(&binding.target.owner) {
+            if !include_ssh
+                && matches!(binding.target.owner, CredentialOwner::Connection(_))
+                && binding.target.slot != CredentialSlot::UpstreamProxy
+            {
+                continue;
+            }
+            if !self.credential_selected(selection, &binding.target.owner) {
                 continue;
             }
             let secret = if let Some(reference) = binding.reference {

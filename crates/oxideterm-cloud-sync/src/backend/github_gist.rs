@@ -4,6 +4,7 @@
 //! GitHub Gist provider request construction, authentication, parsing, and errors.
 
 use super::*;
+mod publications;
 
 const DEFAULT_GIT_API_ENDPOINT: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
@@ -245,8 +246,10 @@ impl CloudSyncBackend {
             return Ok(None);
         };
         let content = match file.get("content").and_then(Value::as_str) {
-            Some(content) => content.to_string(),
-            None => {
+            Some(content) if file.get("truncated").and_then(Value::as_bool) != Some(true) => {
+                content.to_string()
+            }
+            _ => {
                 let raw_url = file
                     .get("raw_url")
                     .and_then(Value::as_str)
@@ -362,7 +365,7 @@ impl CloudSyncBackend {
                 status
             );
         }
-        Ok(response.text().await?)
+        response.text().await
     }
 
     pub(super) async fn download_gist_snapshot_object(
@@ -410,6 +413,9 @@ fn gist_namespace(config: &CloudSyncSettings) -> String {
 }
 
 fn gist_object_filename(config: &CloudSyncSettings, relative_path: &str) -> String {
+    if let Some(path) = relative_path.strip_prefix("sync-v3/") {
+        return format!("{}{}", gist_v3_prefix(config), path.replace('/', "--"));
+    }
     let prefix = gist_filename_prefix(config);
     let path = trim_slashes(relative_path);
     let readable = gist_safe_filename_component(
@@ -424,6 +430,10 @@ fn gist_object_filename(config: &CloudSyncSettings, relative_path: &str) -> Stri
         readable,
         digest_hex(path.as_bytes())
     )
+}
+
+fn gist_v3_prefix(config: &CloudSyncSettings) -> String {
+    format!("oxide-v3-{}--", digest_hex(config.namespace.as_bytes()))
 }
 
 fn gist_filename_prefix(config: &CloudSyncSettings) -> String {
@@ -479,8 +489,7 @@ fn parse_gist_id(config: &CloudSyncSettings) -> Result<String> {
         let path = trim_slashes(url.path());
         let id = path
             .split('/')
-            .filter(|part| !part.is_empty())
-            .next_back()
+            .rfind(|part| !part.is_empty())
             .unwrap_or_default()
             .trim_end_matches(".git")
             .to_string();
@@ -634,7 +643,7 @@ mod tests {
 
         assert_eq!(
             gist_object_filename(&first, "latest.json"),
-            gist_object_filename(&first, "latest.json")
+            "oxideterm-team-default-latest.json-b8308695435769ec1730cee70510131863d6e7c6e246c2db04ef0c03ae76cb97.b64"
         );
         assert_ne!(
             gist_object_filename(&first, "latest.json"),
@@ -643,11 +652,12 @@ mod tests {
     }
 
     #[test]
-    fn gist_content_roundtrips_binary_bytes() {
+    fn gist_content_uses_versioned_base64_for_binary_bytes() {
         let bytes = vec![0, 1, 2, b'O', b'X', b'I', b'D', b'E', 255];
-        let encoded = encode_gist_object_content(&bytes);
+        let encoded = "OXIDETERM-GIST-BLOB-V1\nAAECT1hJREX/";
 
-        assert_eq!(decode_gist_object_content(&encoded).unwrap(), bytes);
+        assert_eq!(encode_gist_object_content(&bytes), encoded);
+        assert_eq!(decode_gist_object_content(encoded).unwrap(), bytes);
     }
 
     #[test]

@@ -502,6 +502,11 @@ impl WorkspaceApp {
                     .ssh_nodes
                     .get(&node_id)
                     .map(|node| node.readiness.clone());
+                if matches!(state, NodeReadiness::Error | NodeReadiness::Disconnected)
+                    && let Some(node) = self.ssh_nodes.get_mut(&node_id)
+                {
+                    node.pending_auth_save_target = None;
+                }
                 if let Some(node) = self.ssh_nodes.get_mut(&node_id) {
                     node.readiness = state.clone();
                 }
@@ -790,6 +795,7 @@ impl WorkspaceApp {
                 ssh_channel_strategy,
                 terminal_ids: Vec::new(),
                 readiness: snapshot.readiness,
+                pending_auth_save_target: None,
             },
         );
         true
@@ -962,6 +968,11 @@ impl WorkspaceApp {
                 )
             });
             if let Some(replaced_pane_id) = replaced {
+                self.terminal.update(cx, |terminal, _| {
+                    terminal
+                        .sync_groups_mut()
+                        .remount(replaced_pane_id, new_pane_id);
+                });
                 self.remount_public_mcp_terminal_session(old_session_id, new_session_id, cx);
                 if let Some(pane) = self.remove_terminal_pane(&replaced_pane_id, cx) {
                     let _ = pane.update(cx, |pane, _cx| pane.shutdown());

@@ -7,6 +7,7 @@ struct JumpServerRenderSnapshot {
     port: String,
     username: String,
     auth_tab: SshAuthTab,
+    empty_password: bool,
     key_path: String,
     managed_key_id: String,
     cert_path: String,
@@ -27,6 +28,7 @@ impl JumpServerRenderSnapshot {
             port: hop.port.clone(),
             username: hop.username.clone(),
             auth_tab: hop.auth_tab,
+            empty_password: hop.empty_password,
             key_path: hop.key_path.clone(),
             managed_key_id: hop.managed_key_id.clone(),
             cert_path: hop.cert_path.clone(),
@@ -77,6 +79,51 @@ impl WorkspaceApp {
 
         let mut popup = select_overlay_popup_with_max_height(&self.tokens, width, max_height);
         match select_id {
+            NewConnectionSelect::Totp | NewConnectionSelect::JumpTotp => {
+                let current = self
+                    .connection_form_state(cx)
+                    .form
+                    .as_ref()
+                    .and_then(|form| {
+                        if select_id == NewConnectionSelect::JumpTotp {
+                            form.jump_server_form
+                                .as_ref()
+                                .and_then(|hop| hop.totp_credential_id.clone())
+                        } else {
+                            form.totp_credential_id.clone()
+                        }
+                    });
+                let choices = std::iter::once((None, self.i18n.t("settings_view.totp.none")))
+                    .chain(
+                        self.connection_store
+                            .totp_credentials()
+                            .iter()
+                            .map(|entry| (Some(entry.id.clone()), entry.name.clone())),
+                    );
+                for (id, label) in choices {
+                    popup = popup.child(select_option_action(
+                        select_option(&self.tokens, label, id == current),
+                        false,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.close_new_connection_select(cx);
+                            this.update_connection_form_state(cx, |state| {
+                                if let Some(form) = &mut state.form {
+                                    if select_id == NewConnectionSelect::JumpTotp {
+                                        if let Some(hop) = &mut form.jump_server_form {
+                                            hop.totp_credential_id = id.clone();
+                                        }
+                                    } else {
+                                        form.totp_credential_id = id.clone();
+                                    }
+                                }
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ));
+                }
+            }
             NewConnectionSelect::Group => {
                 let current_group = self
                     .connection_form_state(cx)
@@ -743,8 +790,27 @@ impl WorkspaceApp {
                     .form
                     .as_ref()
                     .and_then(|form| form.local_shell_id.as_deref());
-                let resolved_shell = self.resolved_local_shell(selected_shell_id);
-                let resolved_shell_id = resolved_shell.as_ref().map(|shell| shell.id.as_str());
+                let resolved_shell_id = selected_shell_id;
+                popup = popup.child(select_option_action(
+                    select_option(
+                        &self.tokens,
+                        self.i18n.t("local_session.inherit_shell"),
+                        selected_shell_id.is_none(),
+                    ),
+                    false,
+                    false,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_new_connection_select(cx);
+                        this.update_connection_form_state(cx, |state| {
+                            if let Some(form) = state.form.as_mut() {
+                                form.local_shell_id = None;
+                                form.error = None;
+                            }
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ));
                 let default_shell_id = self
                     .settings_store
                     .settings()
@@ -754,7 +820,7 @@ impl WorkspaceApp {
                 let default_label = self.i18n.t("settings_view.local_terminal.default");
 
                 // The modal uses the same select surface as the other connection
-                // fields, while the selected shell still controls only this launch.
+                // fields; the empty selection inherits application defaults.
                 for shell in
                     self.effective_local_shells_for_settings(self.settings_store.settings())
                 {
@@ -1127,6 +1193,7 @@ impl WorkspaceApp {
                                 true,
                                 cx,
                             ))
+                            .child(self.render_connection_totp_select(true, cx))
                             .when(jump_form.auth_tab == SshAuthTab::DefaultKey, |content| {
                                 content.child(self.render_connection_hint(
                                     self.i18n.t("ssh.form.default_key_desc"),
@@ -1190,12 +1257,27 @@ impl WorkspaceApp {
                                     ))
                             })
                             .when(jump_form.auth_tab == SshAuthTab::Password, |content| {
-                                content.child(self.render_connection_secret_field(
-                                    self.i18n.t("ssh.form.password"),
-                                    String::new(),
-                                    NewConnectionField::JumpPassword,
-                                    cx,
-                                ))
+                                content
+                                    .child(self.render_connection_secret_field(
+                                        self.i18n.t("ssh.form.password"),
+                                        String::new(),
+                                        NewConnectionField::JumpPassword,
+                                        cx,
+                                    ))
+                                    .child(self.render_connection_checkbox(
+                                        self.i18n.t("ssh.form.use_empty_password"),
+                                        jump_form.empty_password,
+                                        |form| {
+                                            if let Some(jump) = form.jump_server_form.as_mut() {
+                                                jump.empty_password = !jump.empty_password;
+                                                if jump.empty_password {
+                                                    jump.password.zeroize();
+                                                }
+                                            }
+                                            form.field_focused = false;
+                                        },
+                                        cx,
+                                    ))
                             })
                             .when(jump_form.auth_tab == SshAuthTab::Agent, |content| {
                                 content

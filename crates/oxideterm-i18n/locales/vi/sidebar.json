@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "Tìm phiên",
+      "placeholder": "Tìm phiên…",
+      "empty": "Không có phiên phù hợp"
+    },
+    "sort": {
+      "title": "Sắp xếp phiên",
+      "default": "Thứ tự mặc định",
+      "name_ascending": "Tên: A–Z",
+      "name_descending": "Tên: Z–A",
+      "connected_first": "Ưu tiên đã kết nối"
+    },
     "actions": {
       "expand": "Mở rộng thanh bên",
       "collapse": "Thu gọn thanh bên",
@@ -29,6 +41,7 @@
       "import_tooltip": "Nhập từ file .oxide",
       "export_tooltip": "Xuất sang file .oxide",
       "host_tools": "Công cụ máy chủ",
+      "knowledge": "Cơ sở tri thức",
       "host_monitor": "Giám sát",
       "gpu": "GPU / NPU",
       "processes": "Tiến trình",
@@ -42,8 +55,8 @@
       "open_session_manager": "Mở quản lý phiên",
       "plugins": "Plugin",
       "activity": "Hoạt động",
-      "event_log": "Nhật ký sự kiện",
-      "notifications": "Thông báo",
+      "event_log": "Kiểm toán",
+      "notifications": "Thông báo và kiểm toán",
       "saved_connections": "Kết nối đã lưu",
       "forwarding": "Chuyển tiếp cổng",
       "ports": "Cổng",
@@ -62,6 +75,7 @@
       "collapse": "Thu gọn"
     },
     "active_sessions": "Phiên hoạt động",
+    "active_session_count": "Phiên đang hoạt động: {{count}}",
     "no_sessions": "Không có phiên",
     "add_new_connection": "Nhấn + để thêm kết nối",
     "host_gpu": {
@@ -710,6 +724,7 @@
       "no_sessions": "Không có phiên",
       "click_to_add": "Nhấn + để thêm kết nối",
       "actions": {
+        "open_session": "Mở phiên",
         "new_terminal": "Terminal mới",
         "sftp": "SFTP",
         "disconnect": "Ngắt kết nối",

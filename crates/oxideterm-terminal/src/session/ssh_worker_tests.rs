@@ -1,4 +1,5 @@
 use super::*;
+use crate::TerminalColor;
 use oxideterm_modem_transfer::ModemIo;
 use russh::{ChannelId, server};
 #[path = "../../tests/support/ssh_peer.rs"]
@@ -128,6 +129,105 @@ fn ssh_parses_and_sends_replies_without_ui_drains() {
 }
 
 #[test]
+fn ssh_palette_changes_rebuild_rows_and_answer_color_queries() {
+    let mut fixture = Fixture::new();
+    // Leave the cursor on the next row; the cursor row is always reported as damaged.
+    fixture.send(b"\x1b[41mAB\x1b[0m\r\n");
+    wait_until(|| fixture.terminal.buffer_text().contains("AB"));
+    // Consume pending damage so only the palette change can invalidate the settled rows.
+    let settled = fixture
+        .terminal
+        .snapshot_incremental(&fixture.terminal.snapshot());
+    let settled = fixture.terminal.snapshot_incremental(&settled);
+    assert_eq!(
+        settled.lines[0].cells[0].bg,
+        crate::color::OXIDETERM_DARK_THEME.ansi[1]
+    );
+
+    let mut ansi = crate::color::OXIDETERM_DARK_THEME.ansi;
+    ansi[1] = TerminalColor::rgb(0xdc, 0x32, 0x2f);
+    let light = TerminalPalette::new(
+        TerminalColor::rgb(0x65, 0x7b, 0x83),
+        TerminalColor::rgb(0xfd, 0xf6, 0xe3),
+        TerminalColor::rgb(0x58, 0x6e, 0x75),
+        ansi,
+    );
+    fixture.barrier();
+    fixture.terminal.read_pending();
+    let activity = fixture.terminal.activity_receiver();
+    while fixture.runtime.block_on(async {
+        tokio::time::timeout(Duration::from_millis(2), activity.notified())
+            .await
+            .unwrap_or(false)
+    }) {}
+    fixture.terminal.set_palette(light);
+    assert!(fixture.runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), activity.notified())
+            .await
+            .expect("palette application did not wake the UI")
+    }));
+    assert!(fixture.terminal.read_pending());
+    let themed = fixture.terminal.snapshot_incremental(&settled);
+    let row = &themed.lines[0].cells;
+    assert_eq!(
+        (row[0].bg, row[1].bg, row[2].bg),
+        (
+            TerminalColor::rgb(0xdc, 0x32, 0x2f),
+            TerminalColor::rgb(0xdc, 0x32, 0x2f),
+            TerminalColor::rgb(0xfd, 0xf6, 0xe3),
+        )
+    );
+
+    fixture.send(b"\x1b]11;?\x07");
+    assert_eq!(
+        fixture
+            .input
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .0,
+        b"\x1b]11;rgb:fdfd/f6f6/e3e3\x07"
+    );
+}
+
+#[test]
+fn ssh_color_scheme_reports_follow_theme_changes_only_while_subscribed() {
+    let mut fixture = Fixture::new();
+    let input = fixture.input.clone();
+    let expect_reply = |expected: &[u8]| {
+        let mut actual = Vec::new();
+        while actual.len() < expected.len() {
+            actual.extend(input.recv_timeout(Duration::from_secs(5)).unwrap().0);
+        }
+        assert_eq!(actual, expected);
+    };
+    fixture.send(b"\x1b[?2031$p\x1b[?996n");
+    expect_reply(b"\x1b[?2031;2$y\x1b[?997;1n");
+
+    fixture.send(b"\x1b[?2031h\x1b[?2031$p");
+    expect_reply(b"\x1b[?2031;1$y");
+    let mut light = crate::color::OXIDETERM_DARK_THEME;
+    light.background = TerminalColor::rgb(0xfd, 0xf6, 0xe3);
+    fixture.terminal.set_palette(light);
+    expect_reply(b"\x1b[?997;2n");
+
+    fixture
+        .terminal
+        .set_palette(crate::color::OXIDETERM_DARK_THEME);
+    expect_reply(b"\x1b[?997;1n");
+    // An application-owned OSC change must not masquerade as a host theme change.
+    fixture.send(b"\x1b]11;#ffffff\x07\x1b[?996n\x1b[5n");
+    expect_reply(b"\x1b[?997;1n\x1b[0n");
+    fixture.send(b"\x1b[?2031l\x1b[?2031$p");
+    expect_reply(b"\x1b[?2031;2$y");
+    fixture.terminal.set_palette(light);
+    fixture.barrier();
+    fixture.send(b"\x1b[5n");
+    expect_reply(b"\x1b[0n");
+    fixture.send(b"\x1b[?2031h\x1bc\x1b[?2031$p");
+    expect_reply(b"\x1b[?2031;2$y");
+}
+
+#[test]
 fn ssh_control_boundary_preserves_recording_encoding_resize_and_clear_order() {
     let mut fixture = Fixture::new();
     fixture.terminal.set_output_events_enabled(true);
@@ -210,12 +310,214 @@ fn ssh_stalled_ui_bounds_events_and_close_unblocks_the_producer() {
         bytes < EVENT_BYTES + 16 * 1024,
         "one bounded parse turn may cross the delivery watermark"
     );
+    // A pending output-ordered operation must not prevent Ctrl-C.
+    fixture.terminal.clear_buffer();
+    fixture.terminal.write_input(b"\x03").unwrap();
+    assert_eq!(
+        fixture
+            .input
+            .recv_timeout(Duration::from_secs(3))
+            .expect("paused output blocked input")
+            .0,
+        b"\x03"
+    );
     let started = Instant::now();
     fixture.terminal.shutdown();
     assert!(started.elapsed() < Duration::from_millis(100));
     wait_until(|| fixture.terminal.shared.finished.load(Ordering::Acquire));
     assert!(fixture.terminal.take_events().is_empty());
     producer.abort();
+}
+
+#[test]
+fn ssh_recording_pressure_preserves_output_and_services_input_and_close() {
+    let _pressure_guard = crate::recording_test_support::RECORDING_PRESSURE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    use crate::recording_test_support::{AuditTestKeys, PausedFiles};
+    use oxideterm_audit::{
+        AuditContext, AuditPolicy, AuditService, AuditSource, AuditStore, RecordingState,
+        StoredRecordingFrameKind,
+    };
+    use std::sync::mpsc;
+
+    let corpus = Arc::new(
+        (0..600_000)
+            .map(|index| format!("{index:08}:0123456789abcdef0123456789abcdef\r\n"))
+            .collect::<String>(),
+    );
+    for cancel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("audit.db");
+        let (entered, waiting) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let service = AuditService::with_recording_files(
+            database.clone(),
+            AuditTestKeys,
+            Arc::new(PausedFiles {
+                first: AtomicBool::new(false),
+                entered,
+                resume: Mutex::new(resumed),
+            }),
+        )
+        .unwrap();
+        let client = service.client();
+        let runtime = Runtime::new().unwrap();
+        runtime
+            .block_on(client.set_policy(AuditPolicy {
+                enabled: true,
+                record_output: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        let context = AuditContext::new(client.clone(), AuditSource::User)
+            .session("ssh", "recording-fixture")
+            .consumer();
+        let mut fixture = Fixture::with_backend(
+            |config| {
+                SshPtySession::new_with_audit(
+                    config,
+                    Some(context),
+                    80,
+                    24,
+                    Default::default(),
+                    TerminalEncoding::Utf8,
+                    100,
+                )
+            },
+            |terminal| wait_until(|| terminal.shared.finished.load(Ordering::Acquire)),
+        );
+        let session_id = fixture
+            .terminal
+            .shared
+            .core
+            .lock()
+            .handle
+            .as_ref()
+            .unwrap()
+            .session_id
+            .clone();
+        fixture.send(b"before resize\r\n");
+        wait_until(|| fixture.terminal.buffer_text().contains("before resize"));
+        fixture
+            .terminal
+            .resize_with_cell_size(TerminalResize::new(100, 30, 8, 16))
+            .unwrap();
+        fixture.barrier();
+        let peer = fixture.peer.clone();
+        let channel = fixture.channel;
+        let source = corpus.clone();
+        let producer = fixture.runtime.spawn(async move {
+            for bytes in source.as_bytes().chunks(16 * 1024) {
+                if peer.data(channel, bytes.to_vec()).await.is_err() {
+                    return;
+                }
+            }
+            let _ = peer.eof(channel).await;
+        });
+        waiting
+            .recv_timeout(Duration::from_secs(10))
+            .expect("recording did not reach file I/O");
+        wait_until(|| {
+            !fixture
+                .terminal
+                .shared
+                .core
+                .lock()
+                .parser_state
+                .flush_recording()
+        });
+        let sequence = fixture.terminal.shared.core.lock().consumed_sequence;
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            fixture.terminal.shared.core.lock().consumed_sequence,
+            sequence
+        );
+        assert!(
+            fixture.terminal.lifecycle().is_running(),
+            "EOF completed before recorded output drained"
+        );
+        fixture.terminal.clear_buffer();
+        fixture.terminal.write_input(b"\x03").unwrap();
+        assert_eq!(
+            fixture
+                .input
+                .recv_timeout(Duration::from_secs(3))
+                .expect("recording pressure blocked SSH input")
+                .0,
+            b"\x03"
+        );
+        if cancel {
+            fixture.terminal.shutdown();
+            wait_until(|| fixture.terminal.shared.finished.load(Ordering::Acquire));
+            producer.abort();
+        }
+        resume.send(()).unwrap();
+        if !cancel {
+            fixture.runtime.block_on(producer).unwrap();
+            wait_until(|| !fixture.terminal.lifecycle().is_running());
+        }
+        wait_until(|| {
+            runtime
+                .block_on(client.list_recordings(None, 10))
+                .unwrap()
+                .recordings
+                .first()
+                .is_some_and(|recording| recording.state != RecordingState::InProgress)
+        });
+        drop(fixture);
+        drop(service);
+        let store = AuditStore::open(&database, &AuditTestKeys).unwrap();
+        let recording = store
+            .list_recordings(None, 10)
+            .unwrap()
+            .recordings
+            .remove(0);
+        assert_eq!(
+            recording.state,
+            if cancel {
+                RecordingState::Interrupted
+            } else {
+                RecordingState::Finished
+            }
+        );
+        let mut actual = Vec::new();
+        let mut resizes = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store
+                .read_recording_page(&recording.id, cursor, None, 16)
+                .unwrap();
+            for frame in page.chunks.iter().flat_map(|chunk| &chunk.frames) {
+                match &frame.kind {
+                    StoredRecordingFrameKind::Output(bytes) => actual.extend_from_slice(bytes),
+                    StoredRecordingFrameKind::Resize { columns, rows } => {
+                        resizes.push((actual.len(), *columns, *rows))
+                    }
+                    StoredRecordingFrameKind::Gap { .. } => {
+                        panic!("retryable SSH recording lost output")
+                    }
+                }
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        let mut expected = b"before resize\r\n".to_vec();
+        expected.extend_from_slice(corpus.as_bytes());
+        expected.extend_from_slice(format!("\r\n[ssh session {session_id} closed]\r\n").as_bytes());
+        assert_eq!(
+            resizes,
+            vec![(0, 80, 24), (b"before resize\r\n".len(), 100, 30)]
+        );
+        if cancel {
+            assert!(actual.len() > b"before resize\r\n".len() && actual.len() < expected.len());
+            assert_eq!(actual, expected[..actual.len()]);
+        } else {
+            assert_eq!(actual, expected);
+        }
+    }
 }
 
 #[test]
@@ -269,7 +571,7 @@ fn ssh_busy_snapshot_retries_after_the_final_output_without_another_packet() {
 }
 
 #[test]
-fn closing_ssh_parser_leaves_an_existing_forward_consumer_usable() {
+fn stalled_and_closed_ssh_parser_leaves_an_existing_forward_consumer_usable() {
     for injected_runtime in [true, false] {
         let mut fixture = Fixture::with_backend(
             |mut config| {
@@ -293,12 +595,60 @@ fn closing_ssh_parser_leaves_an_existing_forward_consumer_usable() {
             .registry
             .acquire_consumer_for_connection(connection.connection_id(), consumer.clone())
             .unwrap();
+        let _runtime_guard = fixture.runtime.enter();
         let mut stream = fixture
             .runtime
             .block_on(retained.open_direct_tcpip("echo.test", 9000, "127.0.0.1", 0))
             .unwrap();
+        fixture.terminal.set_output_events_enabled(true);
+        fixture.barrier();
+        fixture.terminal.take_events();
+        let peer = fixture.peer.clone();
+        let channel = fixture.channel;
+        let producer = fixture.runtime.spawn(async move {
+            for _ in 0..8192 {
+                if peer.data(channel, vec![b'x'; 4096]).await.is_err() {
+                    break;
+                }
+            }
+        });
+        wait_until(|| fixture.terminal.shared.event_bytes.load(Ordering::Acquire) >= EVENT_BYTES);
+        let during_pressure = fixture.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                stream.write_all(b"forward under pressure").await.unwrap();
+                let mut reply = [0; 22];
+                stream.read_exact(&mut reply).await.unwrap();
+                reply
+            })
+            .await
+        });
+        #[cfg(target_os = "macos")]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("shared-channel.txt");
+            std::fs::write(&path, b"SFTP remains readable while the terminal is paused").unwrap();
+            let bytes = fixture.runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    let sftp = connection.acquire_sftp().await.unwrap();
+                    sftp.lock()
+                        .await
+                        .read_file_bytes(path.to_str().unwrap())
+                        .await
+                        .unwrap()
+                })
+                .await
+                .expect("stalled terminal blocked the SFTP subsystem")
+            });
+            assert_eq!(bytes, b"SFTP remains readable while the terminal is paused");
+            fixture.runtime.block_on(connection.clear_sftp());
+        }
+        producer.abort();
         fixture.terminal.shutdown();
         wait_until(|| fixture.terminal.shared.finished.load(Ordering::Acquire));
+        assert_eq!(
+            during_pressure.expect("stalled terminal blocked a shared forwarding channel"),
+            *b"forward under pressure"
+        );
         fixture.runtime.block_on(async {
             stream.write_all(b"forward survives").await.unwrap();
             let mut reply = [0; 16];
@@ -656,6 +1006,8 @@ fn ssh_close_during_authentication_releases_the_startup_consumer() {
             .iter()
             .any(|info| !info.consumers.is_empty())
     });
+    assert!(terminal.lifecycle().is_running());
+    assert!(!terminal.is_interactive());
     terminal.shutdown();
     wait_until(|| terminal.shared.finished.load(Ordering::Acquire));
     assert!(
@@ -694,6 +1046,18 @@ fn ssh_deferred_shell_starts_after_layout_and_closes_without_stale_events() {
     assert_eq!(
         peer.input.recv_timeout(Duration::from_secs(5)).unwrap().0,
         b"after-layout\r"
+    );
+    terminal.set_focused(false).unwrap();
+    terminal.set_focused(true).unwrap();
+    terminal
+        .resize_with_cell_size(TerminalResize::new(120, 40, 8, 16))
+        .unwrap();
+    // A later input is an ordered barrier: focus/layout changes must not replay
+    // the startup command before this input reaches the same SSH channel.
+    terminal.write_text("manual-input").unwrap();
+    assert_eq!(
+        peer.input.recv_timeout(Duration::from_secs(5)).unwrap().0,
+        b"manual-input"
     );
     terminal.shutdown();
     wait_until(|| terminal.shared.finished.load(Ordering::Acquire));

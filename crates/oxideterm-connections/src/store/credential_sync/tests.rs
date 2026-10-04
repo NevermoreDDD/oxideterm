@@ -7,6 +7,154 @@ fn store() -> ConnectionStore {
     .unwrap()
 }
 
+#[test]
+fn ftp_credentials_follow_selection_and_endpoint_identity() {
+    let mut source = store();
+    let profile = source
+        .upsert_ftp_profile(SaveFtpProfileRequest {
+            profile: FtpProfile::new(
+                "Files".into(),
+                "files.test".into(),
+                "backup".into(),
+                FtpSecurity::ExplicitTls,
+            ),
+            password: Some(SecretString::from("ftp-sync-secret")),
+            clear_password: false,
+        })
+        .unwrap();
+    let selection = CredentialSyncSelection {
+        ftp_ids: BTreeSet::from([profile.id.clone()]),
+        ..Default::default()
+    };
+    let secrets = source.export_profile_credentials(&selection, None).unwrap();
+    let metadata = source.export_ftp_profiles_snapshot().unwrap();
+    let mut target = store();
+    target
+        .apply_ftp_profiles_snapshot(metadata.clone())
+        .unwrap();
+    let mut prepared = target
+        .prepare_profile_credentials(&secrets, &CredentialSyncSelection::default(), &mut None)
+        .unwrap();
+    target.commit_profile_credentials(&mut prepared).unwrap();
+    assert!(target.get_ftp_password(&profile.id).unwrap().is_none());
+    let mut prepared = target
+        .prepare_profile_credentials(&secrets, &selection, &mut None)
+        .unwrap();
+    target.save().unwrap();
+    target.commit_profile_credentials(&mut prepared).unwrap();
+    assert_eq!(
+        target.get_ftp_password(&profile.id).unwrap().unwrap(),
+        "ftp-sync-secret"
+    );
+    let mut altered = store();
+    altered.apply_ftp_profiles_snapshot(metadata).unwrap();
+    altered.data.ftp_profiles[0].security = FtpSecurity::Plain;
+    let mut prepared = altered
+        .prepare_profile_credentials(&secrets, &selection, &mut None)
+        .unwrap();
+    altered.commit_profile_credentials(&mut prepared).unwrap();
+    assert!(altered.get_ftp_password(&profile.id).unwrap().is_none());
+}
+
+#[test]
+fn telnet_proxy_preserves_legacy_direct_routes_and_restores_selected_credentials() {
+    let mut legacy = serde_json::to_value(TelnetProfile::new("router", "router.test", 23)).unwrap();
+    legacy.as_object_mut().unwrap().remove("upstream_proxy");
+    let restored: TelnetProfile = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.upstream_proxy, SavedUpstreamProxyPolicy::Direct);
+
+    let mut source = store();
+    let mut request = SaveTelnetProfileRequest {
+        name: "router".into(),
+        host: "router.test".into(),
+        port: 23,
+        upstream_proxy: Some(SavedUpstreamProxyPolicy::Custom {
+            proxy: SavedUpstreamProxyConfig {
+                protocol: SavedUpstreamProxyProtocol::Socks5,
+                host: "proxy.test".into(),
+                port: 1080,
+                remote_dns: true,
+                no_proxy: "*.internal".into(),
+                auth: SavedUpstreamProxyAuth::Password {
+                    username: "proxy-user".into(),
+                    keychain_id: None,
+                    plaintext_password: Some(SecretString::from("telnet-proxy-secret")),
+                },
+            },
+        }),
+        ..Default::default()
+    };
+    let saved = source.upsert_telnet_profile(request.clone()).unwrap();
+    let SavedUpstreamProxyPolicy::Custom { proxy } = &saved.upstream_proxy else {
+        panic!("proxy missing")
+    };
+    assert_eq!(
+        source
+            .get_saved_upstream_proxy_password(&proxy.auth)
+            .unwrap(),
+        "telnet-proxy-secret"
+    );
+    assert!(
+        !fs::read_to_string(source.path())
+            .unwrap()
+            .contains("telnet-proxy-secret")
+    );
+    request.id = Some(saved.id.clone());
+    request.upstream_proxy = None;
+    assert_eq!(
+        source
+            .upsert_telnet_profile(request)
+            .unwrap()
+            .upstream_proxy,
+        saved.upstream_proxy
+    );
+
+    let selection = CredentialSyncSelection {
+        telnet_ids: BTreeSet::from([saved.id.clone()]),
+        ..Default::default()
+    };
+    let snapshot = source.export_telnet_profiles_snapshot().unwrap();
+    let json = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(
+        json["records"][0]["upstream_proxy"]["proxy"]["auth"],
+        serde_json::json!({"type":"password", "username":"proxy-user"})
+    );
+    let secrets = source.export_profile_credentials(&selection, None).unwrap();
+    let mut target = store();
+    target
+        .apply_telnet_profiles_snapshot(snapshot.clone())
+        .unwrap();
+    let mut prepared = target
+        .prepare_profile_credentials(&secrets, &selection, &mut None)
+        .unwrap();
+    target.save().unwrap();
+    target.commit_profile_credentials(&mut prepared).unwrap();
+    // Metadata-only updates must retain this device's restored credential reference.
+    target.apply_telnet_profiles_snapshot(snapshot).unwrap();
+    let SavedUpstreamProxyPolicy::Custom { proxy } = &target.telnet_profiles()[0].upstream_proxy
+    else {
+        panic!("restored proxy missing")
+    };
+    assert_eq!(
+        (&proxy.host, proxy.port, proxy.remote_dns, &proxy.no_proxy),
+        (
+            &"proxy.test".to_string(),
+            1080,
+            true,
+            &"*.internal".to_string()
+        )
+    );
+    assert_eq!(
+        target
+            .get_saved_upstream_proxy_password(&proxy.auth)
+            .unwrap(),
+        "telnet-proxy-secret"
+    );
+    let auth = proxy.auth.clone();
+    target.delete_telnet_profile(&saved.id).unwrap();
+    assert!(target.get_saved_upstream_proxy_password(&auth).is_err());
+}
+
 fn password_auth(store: &ConnectionStore, value: &str) -> SavedAuth {
     let reference = Uuid::new_v4().to_string();
     store
@@ -14,6 +162,8 @@ fn password_auth(store: &ConnectionStore, value: &str) -> SavedAuth {
         .store(&reference, &SecretString::from(value))
         .unwrap();
     SavedAuth::Password {
+        empty_password: false,
+
         keychain_id: Some(reference),
         plaintext_password: None,
     }
@@ -134,9 +284,28 @@ fn profile_credentials_round_trip_without_device_references_in_metadata() {
     target.commit_profile_credentials(&mut prepared).unwrap();
     let restored = target.export_profile_credentials(&selection, None).unwrap();
     for before in &secrets {
-        let after = restored.iter().find(|s| s.id == before.id).unwrap();
+        let after = restored
+            .iter()
+            .find(|secret| secret.id == before.id)
+            .unwrap();
         assert_eq!(after.secret, before.secret);
     }
+    let mut restored_values = restored
+        .iter()
+        .map(|secret| secret.secret.as_str())
+        .collect::<Vec<_>>();
+    restored_values.sort_unstable();
+    assert_eq!(
+        restored_values,
+        [
+            "mosh-secret",
+            "rdp-secret",
+            "secondary-secret",
+            "sftp-proxy-secret",
+            "sftp-secret",
+            "vnc-secret",
+        ]
+    );
     let saved = fs::read_to_string(target.path()).unwrap();
     assert!(!saved.contains("rdp-secret"));
     assert_ne!(
@@ -186,20 +355,42 @@ fn selected_owners_and_target_identity_bound_credential_restore() {
 #[test]
 fn absent_password_preserves_local_value_but_explicit_clear_propagates() {
     let mut source = store();
-    let selection = fixture(&mut source);
+    let profile = source
+        .upsert_remote_desktop_profile(SaveRemoteDesktopProfileRequest {
+            name: "desktop".into(),
+            protocol: RemoteDesktopProtocol::Rdp,
+            host: "desktop.test".into(),
+            port: 3389,
+            username: Some("desktop-user".into()),
+            credential: Some(SecretString::from("rdp-secret")),
+            ..Default::default()
+        })
+        .unwrap();
+    let selection = CredentialSyncSelection {
+        remote_desktop_ids: BTreeSet::from([profile.id.clone()]),
+        ..Default::default()
+    };
     let mut target = store();
-    copy_metadata(&source, &mut target);
+    target
+        .apply_remote_desktop_profiles_snapshot(
+            source.export_remote_desktop_profiles_snapshot().unwrap(),
+        )
+        .unwrap();
     let secrets = source.export_profile_credentials(&selection, None).unwrap();
     let mut prepared = target
         .prepare_profile_credentials(&secrets, &selection, &mut None)
         .unwrap();
     target.save().unwrap();
     target.commit_profile_credentials(&mut prepared).unwrap();
-    let id = source.data.remote_desktop_profiles[0].id.clone();
+    let id = profile.id;
     let revision = source.profile_credentials_revision().unwrap();
     source.delete_remote_desktop_credential(&id).unwrap();
     assert_ne!(source.profile_credentials_revision().unwrap(), revision);
-    copy_metadata(&source, &mut target);
+    target
+        .apply_remote_desktop_profiles_snapshot(
+            source.export_remote_desktop_profiles_snapshot().unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         target.get_remote_desktop_credential(&id).unwrap().unwrap(),
         "rdp-secret"
@@ -257,10 +448,18 @@ fn global_proxy_restore_uses_new_local_slot_and_clear_is_explicit() {
     let reference = source
         .save_global_upstream_proxy_password(&SecretString::from("global-secret"))
         .unwrap();
-    let mut source_proxy = proxy(&source, "unused-fixture-secret");
-    if let SavedUpstreamProxyAuth::Password { keychain_id, .. } = &mut source_proxy.auth {
-        *keychain_id = Some(reference);
-    }
+    let mut source_proxy = SavedUpstreamProxyConfig {
+        protocol: SavedUpstreamProxyProtocol::Socks5,
+        host: "proxy.test".into(),
+        port: 1080,
+        auth: SavedUpstreamProxyAuth::Password {
+            username: "proxy-user".into(),
+            keychain_id: Some(reference),
+            plaintext_password: None,
+        },
+        remote_dns: true,
+        no_proxy: String::new(),
+    };
     let selection = CredentialSyncSelection {
         global_proxy: true,
         ..Default::default()
@@ -332,6 +531,7 @@ fn sftp_key_passphrase_and_mosh_hop_password_survive_encrypted_archive() {
     source.data.mosh_profiles[0]
         .proxy_chain
         .push(SavedProxyHop {
+            totp_credential_id: None,
             host: "jump.test".into(),
             port: 22,
             username: "jump-user".into(),

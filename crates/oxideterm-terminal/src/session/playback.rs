@@ -8,6 +8,7 @@ struct PlaybackTerminalSession {
     graphics_options: GraphicsOptions,
     graphics_ingress: GraphicsIngress,
     graphics: TerminalGraphicsState,
+    palette: TerminalPalette,
     graphics_alt_screen_active: bool,
     shell_integration: TerminalShellIntegration,
     scrollback_lines: usize,
@@ -42,6 +43,7 @@ impl PlaybackTerminalSession {
             graphics_options: graphics_options.clone(),
             graphics_ingress: GraphicsIngress::new(graphics_options),
             graphics: TerminalGraphicsState::default(),
+            palette: TerminalPalette::default(),
             graphics_alt_screen_active: false,
             shell_integration: TerminalShellIntegration::default(),
             scrollback_lines,
@@ -124,7 +126,7 @@ impl PlaybackTerminalSession {
                 AlacEvent::ClipboardLoad(_format, callback) => {
                     self.pending_events
                         .push(TerminalEvent::ClipboardLoad(Arc::new(move |text| {
-                            callback(text.into())
+                            callback(text)
                         })));
                 }
                 AlacEvent::PtyWrite(_) => {}
@@ -139,6 +141,20 @@ impl PlaybackTerminalSession {
         search_matches_from_term(&term, self.size.cols, query)
     }
 
+}
+
+#[cfg(test)]
+mod recording_capture_tests {
+    use super::*;
+
+    #[test]
+    fn playback_renders_without_creating_a_live_audit_session() {
+        let mut playback = TerminalSession::recording_playback(20, 4, GraphicsOptions::default(), 100);
+        assert!(playback.audit_context().is_none());
+        playback.feed_recording_output(b"replayed output");
+        assert!(playback.buffer_text().contains("replayed output"));
+        assert!(playback.audit_context().is_none());
+    }
 }
 
 impl TerminalSessionBackend for PlaybackTerminalSession {
@@ -202,6 +218,15 @@ impl TerminalSessionBackend for PlaybackTerminalSession {
         Ok(())
     }
 
+    fn set_palette(&mut self, palette: TerminalPalette) {
+        if self.palette == palette {
+            return;
+        }
+        self.palette = palette;
+        // Unchanged rows still hold colors resolved from the old palette.
+        self.term.lock().mark_fully_damaged();
+    }
+
     fn set_encoding(&mut self, _encoding: TerminalEncoding) {}
 
     fn feed_recording_output(&mut self, bytes: &[u8]) {
@@ -252,6 +277,7 @@ impl TerminalSessionBackend for PlaybackTerminalSession {
             &mut self.term.lock(),
             self.size,
             &self.graphics,
+            &self.palette,
             delta,
             previous,
         )
@@ -316,12 +342,12 @@ impl TerminalSessionBackend for PlaybackTerminalSession {
 
     fn snapshot(&self) -> TerminalSnapshot {
         let term = self.term.lock();
-        snapshot_from_term(&term, self.size, &self.graphics)
+        snapshot_from_term(&term, self.size, &self.graphics, &self.palette)
     }
 
     fn snapshot_incremental(&self, previous: &TerminalSnapshot) -> TerminalSnapshot {
         let mut term = self.term.lock();
-        incremental_snapshot_from_term(&mut term, self.size, &self.graphics, previous)
+        incremental_snapshot_from_term(&mut term, self.size, &self.graphics, &self.palette, previous)
     }
 
     fn snapshot_with_display_offset(
@@ -330,7 +356,7 @@ impl TerminalSessionBackend for PlaybackTerminalSession {
         rows: usize,
     ) -> TerminalSnapshot {
         let term = self.term.lock();
-        snapshot_from_term_with_display_offset(&term, self.size, &self.graphics, display_offset, rows)
+        snapshot_from_term_with_display_offset(&term, self.size, &self.graphics, &self.palette, display_offset, rows)
     }
 
     fn terminate_active_task(&mut self) -> Result<()> {

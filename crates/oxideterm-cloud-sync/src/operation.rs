@@ -274,16 +274,22 @@ impl StructuredPreview {
 }
 
 mod apply;
+mod local_file;
 mod merge;
 mod objects;
 mod preview;
 pub(crate) mod selection;
 mod service;
+mod synchronize;
+mod upgrade;
 mod upload;
 mod upload_plan;
 
 pub use merge::*;
 use selection::*;
+pub use synchronize::{
+    AppliedSync, PreparedSync, SyncConflictPreview, SyncOutcome, SyncPlanSummary,
+};
 
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,23 @@
 use super::*;
 
+fn knowledge_audit(target: &str, action: &str) -> oxideterm_audit::AuditOperation {
+    let context = oxideterm_audit::AuditContext::current_request()
+        .or_else(oxideterm_audit::AuditContext::current)
+        .map(|mut context| {
+            if context.source == oxideterm_audit::AuditSource::Application {
+                context.source = oxideterm_audit::AuditSource::User;
+            }
+            context.target = Some(oxideterm_audit::redact(target));
+            context
+        });
+    oxideterm_audit::AuditOperation::in_context(
+        context.as_ref(),
+        oxideterm_audit::AuditCategory::File,
+        action,
+        None,
+    )
+}
+
 pub(in crate::workspace) enum KnowledgeExternalSyncOutcome {
     NoEdit,
     NoChanges,
@@ -18,8 +36,13 @@ pub(in crate::workspace) struct KnowledgePageState {
     pub(super) new_document_dialog_open: bool,
     pub(super) embedding_config_expanded: bool,
     pub(super) new_collection_name: String,
+    pub(super) new_collection_connection_id: Option<String>,
+    pub(super) new_document_collection_id: Option<String>,
+    pub(super) new_document_owner_window_id: Option<gpui::WindowId>,
+    pub(super) new_document_open_in_workspace: bool,
     pub(super) new_document_title: String,
     pub(super) new_document_format: String,
+    pub(super) new_document_error: Option<String>,
     pub(super) import_progress: Option<(usize, usize)>,
     pub(super) embedding_progress: Option<(usize, usize)>,
     pub(super) delete_confirm: Option<oxideterm_settings_model::KnowledgeDeleteConfirm>,
@@ -40,8 +63,13 @@ impl Default for KnowledgePageState {
             new_document_dialog_open: false,
             embedding_config_expanded: false,
             new_collection_name: String::new(),
+            new_collection_connection_id: None,
+            new_document_collection_id: None,
+            new_document_owner_window_id: None,
+            new_document_open_in_workspace: false,
             new_document_title: String::new(),
             new_document_format: "markdown".to_string(),
+            new_document_error: None,
             import_progress: None,
             embedding_progress: None,
             delete_confirm: None,
@@ -128,12 +156,55 @@ impl AiWorkspaceEntity {
         &self.knowledge_page.new_collection_name
     }
 
+    pub(in crate::workspace) fn knowledge_new_collection_connection_id(&self) -> Option<&str> {
+        self.knowledge_page.new_collection_connection_id.as_deref()
+    }
+
     pub(in crate::workspace) fn knowledge_new_document_title(&self) -> &str {
         &self.knowledge_page.new_document_title
     }
 
     pub(in crate::workspace) fn knowledge_new_document_format(&self) -> &str {
         &self.knowledge_page.new_document_format
+    }
+
+    pub(in crate::workspace) fn knowledge_new_document_error(&self) -> Option<&str> {
+        self.knowledge_page.new_document_error.as_deref()
+    }
+
+    pub(in crate::workspace) fn knowledge_document_dialog_owned_by(
+        &self,
+        window_id: gpui::WindowId,
+    ) -> bool {
+        self.knowledge_page.new_document_dialog_open
+            && self.knowledge_page.new_document_owner_window_id == Some(window_id)
+    }
+
+    pub(in crate::workspace) fn transfer_knowledge_document_dialog_owner(
+        &mut self,
+        source_window_id: gpui::WindowId,
+        destination_window_id: gpui::WindowId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.knowledge_document_dialog_owned_by(source_window_id) {
+            return false;
+        }
+        self.knowledge_page.new_document_owner_window_id = Some(destination_window_id);
+        self.emit_knowledge_page_changed(cx);
+        true
+    }
+
+    pub(in crate::workspace) fn dismiss_knowledge_document_dialog_for_window(
+        &mut self,
+        window_id: gpui::WindowId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.knowledge_document_dialog_owned_by(window_id) {
+            return false;
+        }
+        self.clear_knowledge_document_dialog();
+        self.emit_knowledge_page_changed(cx);
+        true
     }
 
     pub(in crate::workspace) fn knowledge_import_progress(&self) -> Option<(usize, usize)> {
@@ -179,6 +250,13 @@ impl AiWorkspaceEntity {
 
     pub(in crate::workspace) fn set_knowledge_document_format(&mut self, format: String) {
         self.knowledge_page.new_document_format = format;
+    }
+
+    pub(in crate::workspace) fn set_knowledge_collection_connection_id(
+        &mut self,
+        connection_id: Option<String>,
+    ) {
+        self.knowledge_page.new_collection_connection_id = connection_id;
     }
 
     pub(in crate::workspace) fn toggle_knowledge_embedding_config(&mut self) {
@@ -269,14 +347,32 @@ impl AiWorkspaceEntity {
         if self.knowledge_page.create_presence.finish_exit(generation) {
             self.knowledge_page.create_dialog_open = false;
             self.knowledge_page.new_collection_name.clear();
+            self.knowledge_page.new_collection_connection_id = None;
             self.knowledge_page.create_presence.reopen();
             self.knowledge_page.create_exit_task = None;
         }
     }
 
-    pub(in crate::workspace) fn open_knowledge_document_dialog(&mut self) {
+    pub(in crate::workspace) fn open_knowledge_document_dialog(
+        &mut self,
+        collection_id: String,
+        owner_window_id: gpui::WindowId,
+        open_in_workspace: bool,
+    ) {
+        if self.knowledge_page.new_document_dialog_open {
+            // One shared draft cannot safely be moved to another window while
+            // it is visible. Keep the existing owner and draft intact.
+            return;
+        }
         self.knowledge_page.document_exit_task = None;
         self.knowledge_page.document_presence.reopen();
+        // Bind creation to the section that opened the dialog so a concurrent navigator refresh
+        // cannot redirect the new document into a different collection.
+        self.knowledge_page.selected_collection_id = Some(collection_id.clone());
+        self.knowledge_page.new_document_collection_id = Some(collection_id);
+        self.knowledge_page.new_document_owner_window_id = Some(owner_window_id);
+        self.knowledge_page.new_document_open_in_workspace = open_in_workspace;
+        self.knowledge_page.new_document_error = None;
         self.knowledge_page.new_document_dialog_open = true;
     }
 
@@ -310,10 +406,21 @@ impl AiWorkspaceEntity {
             .document_presence
             .finish_exit(generation)
         {
-            self.knowledge_page.new_document_dialog_open = false;
-            self.knowledge_page.new_document_title.clear();
-            self.knowledge_page.document_presence.reopen();
-            self.knowledge_page.document_exit_task = None;
+            self.clear_knowledge_document_dialog();
+        }
+    }
+
+    fn clear_knowledge_document_dialog(&mut self) {
+        self.knowledge_page.new_document_dialog_open = false;
+        self.knowledge_page.new_document_collection_id = None;
+        self.knowledge_page.new_document_owner_window_id = None;
+        self.knowledge_page.new_document_open_in_workspace = false;
+        self.knowledge_page.new_document_title.clear();
+        self.knowledge_page.new_document_error = None;
+        self.knowledge_page.document_presence.reopen();
+        self.knowledge_page.document_exit_task = None;
+        if self.focused_settings_input == Some(SettingsInput::KnowledgeDocumentTitle) {
+            self.clear_focused_settings_input();
         }
     }
 
@@ -326,20 +433,36 @@ impl AiWorkspaceEntity {
             return false;
         }
         let store = self.rag_store();
+        let scope = match self.knowledge_page.new_collection_connection_id.clone() {
+            Some(connection_id) => oxideterm_ai::RagDocScopeRequest::Connection { connection_id },
+            None => oxideterm_ai::RagDocScopeRequest::Global,
+        };
+        let mut audit = knowledge_audit("new_collection", "knowledge_collection_create");
         match oxideterm_ai::rag_create_collection(
             &store,
-            oxideterm_ai::RagCreateCollectionRequest {
-                name,
-                scope: oxideterm_ai::RagDocScopeRequest::Global,
-            },
+            oxideterm_ai::RagCreateCollectionRequest { name, scope },
         ) {
             Ok(collection) => {
+                audit.summary(&collection.id);
+                audit.finish(
+                    oxideterm_audit::AuditOutcome::Succeeded,
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
                 self.select_knowledge_collection(collection.id);
                 self.knowledge_page.new_collection_name.clear();
+                self.knowledge_page.new_collection_connection_id = None;
                 self.knowledge_page.error = None;
                 true
             }
             Err(_) => {
+                audit.finish(
+                    oxideterm_audit::AuditOutcome::Failed,
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
                 self.knowledge_page.error = Some(error_message);
                 false
             }
@@ -349,23 +472,17 @@ impl AiWorkspaceEntity {
     pub(in crate::workspace) fn create_blank_knowledge_document(
         &mut self,
         error_message: String,
-    ) -> Option<String> {
+    ) -> Option<(oxideterm_ai::RagDocumentResponse, bool)> {
         let store = self.rag_store();
-        let collection_id = self
-            .knowledge_page
-            .selected_collection_id
-            .clone()
-            .or_else(|| {
-                oxideterm_ai::rag_list_collections(&store, None)
-                    .ok()
-                    .and_then(|collections| {
-                        collections.first().map(|collection| collection.id.clone())
-                    })
-            })?;
+        let Some(collection_id) = self.knowledge_page.new_document_collection_id.clone() else {
+            self.knowledge_page.new_document_error = Some(error_message);
+            return None;
+        };
         let title = self.knowledge_page.new_document_title.trim().to_string();
         if title.is_empty() {
             return None;
         }
+        let mut audit = knowledge_audit(&collection_id, "knowledge_document_create");
         match oxideterm_ai::rag_create_blank_document(
             &store,
             oxideterm_ai::RagCreateBlankDocumentRequest {
@@ -375,12 +492,25 @@ impl AiWorkspaceEntity {
             },
         ) {
             Ok(document) => {
+                audit.summary(&document.id);
+                audit.finish(
+                    oxideterm_audit::AuditOutcome::Succeeded,
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
                 self.knowledge_page.new_document_title.clear();
-                self.knowledge_page.error = None;
-                Some(document.id)
+                self.knowledge_page.new_document_error = None;
+                Some((document, self.knowledge_page.new_document_open_in_workspace))
             }
             Err(_) => {
-                self.knowledge_page.error = Some(error_message);
+                audit.finish(
+                    oxideterm_audit::AuditOutcome::Failed,
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
+                self.knowledge_page.new_document_error = Some(error_message);
                 None
             }
         }
@@ -391,10 +521,23 @@ impl AiWorkspaceEntity {
         collection_id: &str,
         error_message: String,
     ) -> bool {
+        let audit = knowledge_audit(collection_id, "knowledge_collection_delete");
         if oxideterm_ai::rag_delete_collection(&self.rag_store(), collection_id).is_err() {
+            audit.finish(
+                oxideterm_audit::AuditOutcome::Failed,
+                oxideterm_audit::AuditEvidence::Protocol,
+                None,
+                None,
+            );
             self.knowledge_page.error = Some(error_message);
             return false;
         }
+        audit.finish(
+            oxideterm_audit::AuditOutcome::Succeeded,
+            oxideterm_audit::AuditEvidence::Protocol,
+            None,
+            None,
+        );
         if self.knowledge_page.selected_collection_id.as_deref() == Some(collection_id) {
             self.knowledge_page.selected_collection_id = None;
         }
@@ -408,10 +551,23 @@ impl AiWorkspaceEntity {
         document_id: &str,
         error_message: String,
     ) -> bool {
+        let audit = knowledge_audit(document_id, "knowledge_document_delete");
         if oxideterm_ai::rag_remove_document(&self.rag_store(), document_id).is_err() {
+            audit.finish(
+                oxideterm_audit::AuditOutcome::Failed,
+                oxideterm_audit::AuditEvidence::Protocol,
+                None,
+                None,
+            );
             self.knowledge_page.error = Some(error_message);
             return false;
         }
+        audit.finish(
+            oxideterm_audit::AuditOutcome::Succeeded,
+            oxideterm_audit::AuditEvidence::Protocol,
+            None,
+            None,
+        );
         if self
             .knowledge_page
             .external_edit
@@ -561,6 +717,8 @@ impl AiWorkspaceEntity {
             return false;
         }
         let store = self.rag_store();
+        let audit_context = oxideterm_audit::AuditContext::current_request()
+            .or_else(oxideterm_audit::AuditContext::current);
         let task = cx.spawn(async move |entity, cx| {
             let Some(paths) = paths.await.filter(|paths| !paths.is_empty()) else {
                 let _ = entity.update(cx, |entity, _cx| {
@@ -569,17 +727,32 @@ impl AiWorkspaceEntity {
                 return;
             };
             let total = paths.len();
+            let mut audit = audit_context.as_ref().map(|context| {
+                let mut context = context.clone();
+                if context.source == oxideterm_audit::AuditSource::Application {
+                    context.source = oxideterm_audit::AuditSource::User;
+                }
+                context.target = Some(oxideterm_audit::redact(&collection_id));
+                context.operation(
+                    oxideterm_audit::AuditCategory::File,
+                    "knowledge_import",
+                    None,
+                )
+            });
             let _ = entity.update(cx, |entity, cx| {
                 entity.knowledge_page.import_progress = Some((0, total));
                 entity.knowledge_page.error = None;
                 entity.emit_knowledge_page_changed(cx);
             });
             let mut failed = false;
+            let mut imported = 0usize;
             for (index, path) in paths.iter().enumerate() {
                 if oxideterm_settings_model::import_knowledge_file(&store, &collection_id, path)
                     .is_err()
                 {
                     failed = true;
+                } else {
+                    imported += 1;
                 }
                 let current = index + 1;
                 let _ = entity.update(cx, |entity, cx| {
@@ -589,6 +762,25 @@ impl AiWorkspaceEntity {
                 if failed {
                     break;
                 }
+            }
+            if let Some(audit) = audit.as_mut() {
+                audit.summary(&format!("files={imported}/{total}"));
+            }
+            if let Some(audit) = audit {
+                audit.finish(
+                    if failed {
+                        if imported > 0 {
+                            oxideterm_audit::AuditOutcome::Partial
+                        } else {
+                            oxideterm_audit::AuditOutcome::Failed
+                        }
+                    } else {
+                        oxideterm_audit::AuditOutcome::Succeeded
+                    },
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
             }
             let _ = entity.update(cx, |entity, cx| {
                 entity.knowledge_page.import_progress = None;
@@ -616,6 +808,7 @@ impl AiWorkspaceEntity {
         if self.knowledge_embedding_task.is_some() {
             return false;
         }
+        self.knowledge_page.error = None;
         let store = self.rag_store();
         let key_store = self.key_store.clone();
         let provider_id = provider.id.clone();

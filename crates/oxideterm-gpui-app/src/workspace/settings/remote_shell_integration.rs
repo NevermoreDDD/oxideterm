@@ -434,9 +434,6 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn active_ssh_terminal_node_id(&self, cx: &App) -> Option<NodeId> {
         let tab = self.active_tab(cx)?;
-        if tab.kind != TabKind::SshTerminal {
-            return None;
-        }
         let pane_id = tab.active_pane_id?;
         let session_id = tab.root_pane.as_ref()?.session_id_for_pane(pane_id)?;
         self.workspace_runtime
@@ -927,25 +924,15 @@ mod tests {
     }
 
     #[test]
-    fn terminal_gate_has_one_owner_per_node() {
+    fn terminal_gate_cancellation_rejects_old_results_and_allows_another_owner() {
         let mut state = RemoteShellIntegrationRuntimeState::default();
         state.configure(RemoteShellIntegrationMode::Ask, true);
         let node_id = NodeId("shared-node".to_string());
 
-        assert!(state.begin_terminal_gate(&node_id).is_some());
-        assert!(state.begin_terminal_gate(&node_id).is_none());
-        state.cancel_node(&node_id);
-        assert!(state.begin_terminal_gate(&node_id).is_some());
-    }
-
-    #[test]
-    fn cancelled_node_rejects_late_content_free_failures() {
-        let mut state = RemoteShellIntegrationRuntimeState::default();
-        state.configure(RemoteShellIntegrationMode::Ask, true);
-        let node_id = NodeId("cancelled-node".to_string());
         let gate_generation = state
             .begin_terminal_gate(&node_id)
             .expect("the first gate should start");
+        assert!(state.begin_terminal_gate(&node_id).is_none());
         state.cancel_node(&node_id);
 
         assert!(matches!(
@@ -956,5 +943,6 @@ mod tests {
             !state.card_snapshot(Some(&node_id)).error,
             "a cancelled completion must not reintroduce an error projection"
         );
+        assert!(state.begin_terminal_gate(&node_id).is_some());
     }
 }

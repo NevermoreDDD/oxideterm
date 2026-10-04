@@ -26,7 +26,9 @@ pub(super) enum SessionManagerDisplayItem {
     Connection(ConnectionInfo),
     SshConfig(SessionManagerSshConfigDisplayItem),
     Serial(SerialProfile),
+    LocalTerminal(LocalTerminalProfile),
     Telnet(TelnetProfile),
+    Ftp(oxideterm_connections::FtpProfile),
     Mosh(MoshProfile),
     StandaloneSftp(oxideterm_connections::StandaloneSftpProfile),
     RemoteDesktop(RemoteDesktopProfile),
@@ -59,7 +61,9 @@ pub(super) enum SessionManagerOpenTarget {
     Connection(String),
     SshConfig(String),
     Serial(String),
+    LocalTerminal(String),
     Telnet(String),
+    Ftp(String),
     Mosh(String),
     StandaloneSftp(String),
     RemoteDesktop(String),
@@ -119,7 +123,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => &connection.id,
             Self::SshConfig(host) => &host.alias,
             Self::Serial(profile) => &profile.id,
+            Self::LocalTerminal(profile) => &profile.id,
             Self::Telnet(profile) => &profile.id,
+            Self::Ftp(profile) => &profile.id,
             Self::Mosh(profile) => &profile.id,
             Self::StandaloneSftp(profile) => &profile.id,
             Self::RemoteDesktop(profile) => &profile.id,
@@ -135,9 +141,13 @@ impl SessionManagerDisplayItem {
             Self::Serial(profile) => {
                 Some(SessionManagerSelectionTarget::Serial(profile.id.clone()))
             }
+            Self::LocalTerminal(profile) => Some(SessionManagerSelectionTarget::LocalTerminal(
+                profile.id.clone(),
+            )),
             Self::Telnet(profile) => {
                 Some(SessionManagerSelectionTarget::Telnet(profile.id.clone()))
             }
+            Self::Ftp(profile) => Some(SessionManagerSelectionTarget::Ftp(profile.id.clone())),
             Self::Mosh(profile) => Some(SessionManagerSelectionTarget::Mosh(profile.id.clone())),
             Self::StandaloneSftp(profile) => Some(SessionManagerSelectionTarget::StandaloneSftp(
                 profile.id.clone(),
@@ -158,9 +168,13 @@ impl SessionManagerDisplayItem {
             Self::Serial(profile) => {
                 Some(SessionManagerRowActionTarget::Serial(profile.id.clone()))
             }
+            Self::LocalTerminal(profile) => Some(SessionManagerRowActionTarget::LocalTerminal(
+                profile.id.clone(),
+            )),
             Self::Telnet(profile) => {
                 Some(SessionManagerRowActionTarget::Telnet(profile.id.clone()))
             }
+            Self::Ftp(profile) => Some(SessionManagerRowActionTarget::Ftp(profile.id.clone())),
             Self::Mosh(profile) => Some(SessionManagerRowActionTarget::Mosh(profile.id.clone())),
             Self::StandaloneSftp(profile) => Some(SessionManagerRowActionTarget::StandaloneSftp(
                 profile.id.clone(),
@@ -179,7 +193,11 @@ impl SessionManagerDisplayItem {
             }
             Self::SshConfig(host) => SessionManagerOpenTarget::SshConfig(host.alias.clone()),
             Self::Serial(profile) => SessionManagerOpenTarget::Serial(profile.id.clone()),
+            Self::LocalTerminal(profile) => {
+                SessionManagerOpenTarget::LocalTerminal(profile.id.clone())
+            }
             Self::Telnet(profile) => SessionManagerOpenTarget::Telnet(profile.id.clone()),
+            Self::Ftp(profile) => SessionManagerOpenTarget::Ftp(profile.id.clone()),
             Self::Mosh(profile) => SessionManagerOpenTarget::Mosh(profile.id.clone()),
             Self::StandaloneSftp(profile) => {
                 SessionManagerOpenTarget::StandaloneSftp(profile.id.clone())
@@ -195,7 +213,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => &connection.name,
             Self::SshConfig(host) => &host.alias,
             Self::Serial(profile) => &profile.name,
+            Self::LocalTerminal(profile) => &profile.name,
             Self::Telnet(profile) => &profile.name,
+            Self::Ftp(profile) => &profile.name,
             Self::Mosh(profile) => &profile.name,
             Self::StandaloneSftp(profile) => &profile.name,
             Self::RemoteDesktop(profile) => &profile.name,
@@ -207,7 +227,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => connection.group.as_deref(),
             Self::SshConfig(_) => None,
             Self::Serial(profile) => profile.group.as_deref(),
+            Self::LocalTerminal(profile) => profile.group.as_deref(),
             Self::Telnet(profile) => profile.group.as_deref(),
+            Self::Ftp(profile) => profile.group.as_deref(),
             Self::Mosh(profile) => profile.group.as_deref(),
             Self::StandaloneSftp(profile) => profile.group.as_deref(),
             Self::RemoteDesktop(profile) => profile.group.as_deref(),
@@ -219,7 +241,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => connection.last_used_at.clone(),
             Self::SshConfig(_) => None,
             Self::Serial(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
+            Self::LocalTerminal(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
             Self::Telnet(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
+            Self::Ftp(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
             Self::Mosh(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
             Self::StandaloneSftp(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
             Self::RemoteDesktop(profile) => profile.last_used_at.map(|time| time.to_rfc3339()),
@@ -231,7 +255,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => &connection.host,
             Self::SshConfig(host) => host.hostname.as_deref().unwrap_or(&host.alias),
             Self::Serial(profile) => &profile.port_path,
+            Self::LocalTerminal(profile) => profile.cwd.as_deref().unwrap_or_default(),
             Self::Telnet(profile) => &profile.host,
+            Self::Ftp(profile) => &profile.host,
             Self::Mosh(profile) => &profile.host,
             Self::StandaloneSftp(profile) => &profile.host,
             Self::RemoteDesktop(profile) => &profile.host,
@@ -243,7 +269,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => u32::from(connection.port),
             Self::SshConfig(host) => u32::from(host.port.unwrap_or(22)),
             Self::Serial(profile) => profile.baud_rate,
+            Self::LocalTerminal(_) => 0,
             Self::Telnet(profile) => u32::from(profile.port),
+            Self::Ftp(profile) => u32::from(profile.port),
             Self::Mosh(profile) => u32::from(profile.ssh_port),
             Self::StandaloneSftp(profile) => u32::from(profile.port),
             Self::RemoteDesktop(profile) => u32::from(profile.port),
@@ -255,6 +283,8 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => &connection.username,
             Self::SshConfig(host) => host.user.as_deref().unwrap_or_default(),
             Self::Serial(_) | Self::Telnet(_) => "",
+            Self::LocalTerminal(_) => "",
+            Self::Ftp(profile) => &profile.username,
             Self::Mosh(profile) => &profile.username,
             Self::StandaloneSftp(profile) => &profile.username,
             Self::RemoteDesktop(profile) => profile.username.as_deref().unwrap_or_default(),
@@ -266,7 +296,9 @@ impl SessionManagerDisplayItem {
             Self::Connection(connection) => auth_label(connection.auth_type).to_lowercase(),
             Self::SshConfig(_) => "ssh config".to_string(),
             Self::Serial(_) => "serial".to_string(),
+            Self::LocalTerminal(_) => "local".to_string(),
             Self::Telnet(_) => "telnet".to_string(),
+            Self::Ftp(_) => "ftp".to_string(),
             Self::Mosh(_) => "mosh".to_string(),
             Self::StandaloneSftp(profile) => auth_label(profile.auth.auth_type()).to_lowercase(),
             Self::RemoteDesktop(profile) => profile.protocol.provider_id().to_string(),
@@ -297,7 +329,9 @@ impl SessionManagerDisplayItem {
                 ),
             },
             Self::Serial(profile) => format!("{} · {}", profile.port_path, profile.baud_rate),
+            Self::LocalTerminal(profile) => profile.cwd.clone().unwrap_or_default(),
             Self::Telnet(profile) => format!("{}:{}", profile.host, profile.port),
+            Self::Ftp(profile) => format!("{}:{}", profile.host, profile.port),
             Self::Mosh(profile) => {
                 format!("{}@{}:{}", profile.username, profile.host, profile.ssh_port)
             }
@@ -330,7 +364,21 @@ impl SessionManagerDisplayItem {
                 profile.baud_rate,
                 profile.group.as_deref().unwrap_or_default()
             ),
+            Self::LocalTerminal(profile) => format!(
+                "{}\n{}\n{}\n{}",
+                profile.name,
+                profile.cwd.as_deref().unwrap_or_default(),
+                profile.shell_id.as_deref().unwrap_or_default(),
+                profile.group.as_deref().unwrap_or_default()
+            ),
             Self::Telnet(profile) => format!(
+                "{}\n{}\n{}\n{}",
+                profile.name,
+                profile.host,
+                profile.port,
+                profile.group.as_deref().unwrap_or_default()
+            ),
+            Self::Ftp(profile) => format!(
                 "{}\n{}\n{}\n{}",
                 profile.name,
                 profile.host,
@@ -363,26 +411,32 @@ impl SessionManagerDisplayItem {
         }
     }
 
-    pub(super) fn icon(&self) -> LucideIcon {
+    pub(super) fn icon(&self) -> session_icons::SessionIcon {
         match self {
             Self::Connection(connection) => {
                 session_icons::session_icon_from_id(connection.icon.as_deref())
-                    .unwrap_or(LucideIcon::Server)
+                    .unwrap_or(LucideIcon::Server.into())
             }
-            Self::SshConfig(_) => LucideIcon::FileTerminal,
+            Self::SshConfig(_) => LucideIcon::FileTerminal.into(),
             Self::Serial(profile) => session_icons::session_icon_from_id(profile.icon.as_deref())
-                .unwrap_or(LucideIcon::Radio),
+                .unwrap_or(LucideIcon::Radio.into()),
+            Self::LocalTerminal(profile) => {
+                session_icons::session_icon_from_id(profile.icon.as_deref())
+                    .unwrap_or(LucideIcon::Terminal.into())
+            }
             Self::Telnet(profile) => session_icons::session_icon_from_id(profile.icon.as_deref())
-                .unwrap_or(LucideIcon::Terminal),
+                .unwrap_or(LucideIcon::Terminal.into()),
+            Self::Ftp(profile) => session_icons::session_icon_from_id(profile.icon.as_deref())
+                .unwrap_or(LucideIcon::FolderSync.into()),
             Self::Mosh(profile) => session_icons::session_icon_from_id(profile.icon.as_deref())
-                .unwrap_or(LucideIcon::Wifi),
+                .unwrap_or(LucideIcon::Wifi.into()),
             Self::StandaloneSftp(profile) => {
                 session_icons::session_icon_from_id(profile.icon.as_deref())
-                    .unwrap_or(LucideIcon::FolderSync)
+                    .unwrap_or(LucideIcon::FolderSync.into())
             }
             Self::RemoteDesktop(profile) => {
                 session_icons::session_icon_from_id(profile.icon.as_deref())
-                    .unwrap_or(LucideIcon::Monitor)
+                    .unwrap_or(LucideIcon::Monitor.into())
             }
         }
     }
@@ -391,7 +445,9 @@ impl SessionManagerDisplayItem {
         match self {
             Self::Connection(connection) => connection.color.as_deref(),
             Self::Serial(profile) => profile.color.as_deref(),
+            Self::LocalTerminal(profile) => profile.color.as_deref(),
             Self::Telnet(profile) => profile.color.as_deref(),
+            Self::Ftp(profile) => profile.color.as_deref(),
             Self::Mosh(profile) => profile.color.as_deref(),
             Self::StandaloneSftp(profile) => profile.color.as_deref(),
             Self::RemoteDesktop(profile) => profile.color.as_deref(),
@@ -403,7 +459,9 @@ impl SessionManagerDisplayItem {
         match self {
             Self::Connection(connection) => connection.icon_background_color.as_deref(),
             Self::Serial(profile) => profile.icon_background_color.as_deref(),
+            Self::LocalTerminal(profile) => profile.icon_background_color.as_deref(),
             Self::Telnet(profile) => profile.icon_background_color.as_deref(),
+            Self::Ftp(profile) => profile.icon_background_color.as_deref(),
             Self::Mosh(profile) => profile.icon_background_color.as_deref(),
             Self::StandaloneSftp(profile) => profile.icon_background_color.as_deref(),
             Self::RemoteDesktop(profile) => profile.icon_background_color.as_deref(),
@@ -420,9 +478,11 @@ impl WorkspaceApp {
                 .padding(oxideterm_gpui_ui::SurfacePadding::None)
                 .has_background_image(has_background),
         );
-        // Compact shortcuts and full session cards share project chrome while
-        // retaining the radius that communicates their different hierarchy.
-        surface.rounded(px(radius))
+        surface
+            .rounded(px(radius))
+            .shadow_none()
+            .border_color(self.workspace_chrome_divider())
+            .bg(theme_bg(self.tokens.ui.bg, has_background))
     }
 
     pub(super) fn session_manager_display_items(&self, cx: &App) -> Vec<SessionManagerDisplayItem> {
@@ -446,10 +506,24 @@ impl WorkspaceApp {
             )
             .chain(
                 self.connection_store
+                    .local_terminal_profiles()
+                    .iter()
+                    .cloned()
+                    .map(SessionManagerDisplayItem::LocalTerminal),
+            )
+            .chain(
+                self.connection_store
                     .telnet_profiles()
                     .iter()
                     .cloned()
                     .map(SessionManagerDisplayItem::Telnet),
+            )
+            .chain(
+                self.connection_store
+                    .ftp_profiles()
+                    .iter()
+                    .cloned()
+                    .map(SessionManagerDisplayItem::Ftp),
             )
             .chain(
                 self.connection_store
@@ -495,28 +569,9 @@ impl WorkspaceApp {
         cx: &App,
     ) {
         let manager = self.session_manager.read(cx);
-        let field = manager.sort_field;
-        let direction = manager.sort_direction;
         // Sort once at the display-model boundary so grid/list/tree cannot
         // drift apart and reintroduce view-specific ordering bugs.
-        items.sort_by(|left, right| {
-            let ordering = match field {
-                SessionSortField::Name => compare_lower(left.name(), right.name()),
-                SessionSortField::Host => compare_lower(left.host(), right.host()),
-                SessionSortField::Port => left.port_sort_key().cmp(&right.port_sort_key()),
-                SessionSortField::Username => compare_lower(left.username(), right.username()),
-                SessionSortField::AuthType => left.auth_sort_key().cmp(&right.auth_sort_key()),
-                SessionSortField::Group => compare_option_lower(left.group(), right.group()),
-                SessionSortField::LastUsed => left.last_used().cmp(&right.last_used()),
-            }
-            .then_with(|| compare_lower(left.name(), right.name()))
-            .then_with(|| left.id().cmp(right.id()));
-
-            match direction {
-                SortDirection::Asc => ordering,
-                SortDirection::Desc => ordering.reverse(),
-            }
-        });
+        sort_session_manager_items(items, manager.sort_field, manager.sort_direction);
     }
 
     fn session_manager_grid_columns(&self, window: &Window, cx: &App) -> (usize, usize) {
@@ -852,12 +907,11 @@ impl WorkspaceApp {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba((theme.accent << 8) | MANAGER_RECENT_ACCENT_BG_ALPHA))
-                    .child(Self::render_lucide_icon(
-                        item.icon(),
-                        MANAGER_RECENT_ICON_GLYPH_SIZE,
-                        rgb(theme.accent),
-                    )),
+                    .bg(rgba((theme.accent << 8) | 0x1a))
+                    .child(
+                        item.icon()
+                            .render(MANAGER_RECENT_ICON_GLYPH_SIZE, rgb(theme.accent)),
+                    ),
             )
             .child(
                 div()
@@ -953,6 +1007,10 @@ impl WorkspaceApp {
                 .contains(target)
         });
         self.session_manager_card_surface(self.tokens.radii.lg, has_background)
+            .when(is_selected, |card| {
+                card.bg(rgba((theme.accent << 8) | 0x12))
+            })
+            .hover(|card| card.bg(theme_row_hover_bg(theme.bg_hover, has_background)))
             .min_w(px(260.0))
             .flex_grow_1()
             .flex_basis(px(320.0))
@@ -1401,7 +1459,7 @@ impl WorkspaceApp {
             .w_full()
             .min_w(px(0.0))
             .border_b_1()
-            .border_color(theme_border_half(theme.border, has_background))
+            .border_color(self.workspace_chrome_divider())
             .px_3()
             .py_2()
             .pl(px(depth as f32 * 24.0 + 12.0))
@@ -1554,7 +1612,7 @@ impl WorkspaceApp {
                 let targets = if is_selected {
                     selected_targets.iter().cloned().collect::<Vec<_>>()
                 } else {
-                    vec![target.clone()]
+                    vec![target]
                 };
                 let label = if targets.len() > 1 {
                     selected_count_label(&self.i18n, targets.len())
@@ -1641,13 +1699,25 @@ impl WorkspaceApp {
             .w_full()
             .min_w(px(0.0))
             .border_b_1()
-            .border_color(theme_border_half(theme.border, has_background))
+            .border_color(self.workspace_chrome_divider())
             .px_3()
             .py_2()
             .pl(px(depth as f32 * 24.0 + 12.0))
             .flex()
             .items_center()
             .gap(px(self.tokens.spacing.three))
+            .relative()
+            .when(is_selected, |row| {
+                row.bg(rgba((theme.accent << 8) | 0x12)).child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.0))
+                        .bg(rgb(theme.accent)),
+                )
+            })
             .hover(|row| row.bg(theme_row_hover_bg(theme.bg_hover, has_background)))
             .on_mouse_down(
                 MouseButton::Left,
@@ -1717,7 +1787,9 @@ impl WorkspaceApp {
             | SessionManagerDisplayItem::RemoteDesktop(_) => (0x0ea5e933, 0x7dd3fc),
             SessionManagerDisplayItem::SshConfig(_) => (0x8b5cf633, 0xc4b5fd),
             SessionManagerDisplayItem::Serial(_) => (0xf59e0b33, 0xfcd34d),
+            SessionManagerDisplayItem::LocalTerminal(_) => (0xf59e0b33, 0xfcd34d),
             SessionManagerDisplayItem::Telnet(_) => (0x22c55e33, 0x86efac),
+            SessionManagerDisplayItem::Ftp(_) => (0x22c55e33, 0x86efac),
             SessionManagerDisplayItem::Mosh(_) => (0x3b82f633, 0x93c5fd),
             SessionManagerDisplayItem::StandaloneSftp(_) => (0x14b8a633, 0x5eead4),
         };
@@ -1742,7 +1814,7 @@ impl WorkspaceApp {
             .items_center()
             .justify_center()
             .bg(bg)
-            .child(Self::render_lucide_icon(item.icon(), 20.0, fg))
+            .child(item.icon().render(20.0, fg))
             .when(
                 matches!(item, SessionManagerDisplayItem::Connection(_)),
                 |icon| icon.border_1().border_color(rgba((text << 8) | 0x1a)),
@@ -1897,7 +1969,7 @@ impl WorkspaceApp {
                         cx,
                     ))
             }
-            SessionManagerDisplayItem::Telnet(profile) => {
+            SessionManagerDisplayItem::LocalTerminal(profile) => {
                 let open_id = profile.id.clone();
                 let edit_id = profile.id.clone();
                 let menu_id = profile.id.clone();
@@ -1915,7 +1987,7 @@ impl WorkspaceApp {
                         rgb(self.tokens.ui.accent),
                         has_background,
                         move |this, _event, window, cx| {
-                            this.open_saved_telnet_profile(&open_id, window, cx);
+                            this.open_saved_local_terminal_profile(&open_id, window, cx);
                             cx.stop_propagation();
                         },
                         cx,
@@ -1927,7 +1999,7 @@ impl WorkspaceApp {
                         rgb(self.tokens.ui.text),
                         has_background,
                         move |this, _event, window, cx| {
-                            this.open_saved_telnet_profile_editor(&edit_id, window, cx);
+                            this.open_saved_local_terminal_profile_editor(&edit_id, window, cx);
                             cx.stop_propagation();
                         },
                         cx,
@@ -1940,7 +2012,73 @@ impl WorkspaceApp {
                         has_background,
                         move |this, event, _window, cx| {
                             this.open_session_manager_row_action_menu(
-                                SessionManagerRowActionTarget::Telnet(menu_id.clone()),
+                                SessionManagerRowActionTarget::LocalTerminal(menu_id.clone()),
+                                f32::from(event.position.x),
+                                f32::from(event.position.y),
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        },
+                        cx,
+                    ))
+            }
+            SessionManagerDisplayItem::Telnet(_) | SessionManagerDisplayItem::Ftp(_) => {
+                let ftp = matches!(item, SessionManagerDisplayItem::Ftp(_));
+                let open_id = item.id().to_owned();
+                let edit_id = open_id.clone();
+                let menu_id = open_id.clone();
+                div()
+                    .w(px(MANAGER_ROW_ACTIONS_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(MANAGER_ROW_ACTION_GAP))
+                    .child(self.render_row_icon_button(
+                        LucideIcon::Play,
+                        MANAGER_ROW_ACTION_BUTTON,
+                        MANAGER_ROW_ACTION_ICON_SIZE,
+                        rgb(self.tokens.ui.accent),
+                        has_background,
+                        move |this, _event, window, cx| {
+                            if ftp {
+                                this.open_saved_ftp_profile(&open_id, window, cx);
+                            } else {
+                                this.open_saved_telnet_profile(&open_id, window, cx);
+                            }
+                            cx.stop_propagation();
+                        },
+                        cx,
+                    ))
+                    .child(self.render_row_icon_button(
+                        LucideIcon::Pencil,
+                        MANAGER_ROW_ACTION_BUTTON,
+                        MANAGER_ROW_ACTION_ICON_SIZE,
+                        rgb(self.tokens.ui.text),
+                        has_background,
+                        move |this, _event, window, cx| {
+                            if ftp {
+                                this.open_saved_ftp_profile_editor(&edit_id, window, cx);
+                            } else {
+                                this.open_saved_telnet_profile_editor(&edit_id, window, cx);
+                            }
+                            cx.stop_propagation();
+                        },
+                        cx,
+                    ))
+                    .child(self.render_row_icon_button(
+                        LucideIcon::MoreVertical,
+                        MANAGER_ROW_ACTION_BUTTON,
+                        MANAGER_ROW_ACTION_ICON_SIZE,
+                        rgb(self.tokens.ui.text),
+                        has_background,
+                        move |this, event, _window, cx| {
+                            this.open_session_manager_row_action_menu(
+                                if ftp {
+                                    SessionManagerRowActionTarget::Ftp(menu_id.clone())
+                                } else {
+                                    SessionManagerRowActionTarget::Telnet(menu_id.clone())
+                                },
                                 f32::from(event.position.x),
                                 f32::from(event.position.y),
                                 cx,
@@ -2125,7 +2263,9 @@ impl WorkspaceApp {
                 MANAGER_ROW_ACTION_MENU_CONNECTION_HEIGHT
             }
             SessionManagerRowActionTarget::Serial(_)
+            | SessionManagerRowActionTarget::LocalTerminal(_)
             | SessionManagerRowActionTarget::Telnet(_)
+            | SessionManagerRowActionTarget::Ftp(_)
             | SessionManagerRowActionTarget::Mosh(_)
             | SessionManagerRowActionTarget::StandaloneSftp(_)
             | SessionManagerRowActionTarget::RemoteDesktop(_) => {
@@ -2349,7 +2489,7 @@ impl WorkspaceApp {
                 .child(dropdown_menu_separator(&self.tokens));
         }
 
-        if let SessionManagerRowActionTarget::Telnet(id) = &menu.target {
+        if let SessionManagerRowActionTarget::LocalTerminal(id) = &menu.target {
             let edit_id = id.clone();
             popup = popup
                 .child(self.render_session_manager_menu_action(
@@ -2364,7 +2504,37 @@ impl WorkspaceApp {
                     false,
                     has_background,
                     move |this, _event, window, cx| {
-                        this.open_saved_telnet_profile_editor(&edit_id, window, cx);
+                        this.open_saved_local_terminal_profile_editor(&edit_id, window, cx);
+                        cx.stop_propagation();
+                    },
+                    cx,
+                ))
+                .child(dropdown_menu_separator(&self.tokens));
+        }
+
+        if let SessionManagerRowActionTarget::Telnet(id) | SessionManagerRowActionTarget::Ftp(id) =
+            &menu.target
+        {
+            let ftp = matches!(&menu.target, SessionManagerRowActionTarget::Ftp(_));
+            let edit_id = id.clone();
+            popup = popup
+                .child(self.render_session_manager_menu_action(
+                    dropdown_menu_item(
+                        &self.tokens,
+                        self.i18n.t("sessionManager.actions.edit"),
+                        DropdownMenuItemKind::Plain,
+                        false,
+                        false,
+                    ),
+                    false,
+                    false,
+                    has_background,
+                    move |this, _event, window, cx| {
+                        if ftp {
+                            this.open_saved_ftp_profile_editor(&edit_id, window, cx);
+                        } else {
+                            this.open_saved_telnet_profile_editor(&edit_id, window, cx);
+                        }
                         cx.stop_propagation();
                     },
                     cx,
@@ -2373,12 +2543,19 @@ impl WorkspaceApp {
         }
 
         let delete_action = match &menu.target {
+            SessionManagerRowActionTarget::Ftp(id) => {
+                Some((id.clone(), self.i18n.t("sessionManager.actions.delete")))
+            }
             SessionManagerRowActionTarget::Connection(id) => {
                 Some((id.clone(), self.i18n.t("sessionManager.actions.delete")))
             }
             SessionManagerRowActionTarget::Serial(id) => Some((
                 id.clone(),
                 self.i18n.t("sessionManager.serial_profiles.delete"),
+            )),
+            SessionManagerRowActionTarget::LocalTerminal(id) => Some((
+                id.clone(),
+                self.i18n.t("sessionManager.local_terminal_profiles.delete"),
             )),
             SessionManagerRowActionTarget::Telnet(id) => Some((
                 id.clone(),
@@ -2404,7 +2581,7 @@ impl WorkspaceApp {
             SessionManagerRowActionTarget::GroupRoot => None,
         };
         if let Some((delete_id, delete_label)) = delete_action {
-            let delete_target = menu.target.clone();
+            let delete_target = menu.target;
             popup = popup.child(
                 self.render_session_manager_menu_action(
                     dropdown_menu_item(
@@ -2420,11 +2597,17 @@ impl WorkspaceApp {
                     has_background,
                     move |this, _event, _window, cx| {
                         match &delete_target {
+                            SessionManagerRowActionTarget::Ftp(_) => {
+                                this.request_delete_ftp_profile(&delete_id, cx)
+                            }
                             SessionManagerRowActionTarget::Connection(_) => {
                                 this.request_delete_connection(&delete_id, cx)
                             }
                             SessionManagerRowActionTarget::Serial(_) => {
                                 this.request_delete_serial_profile(&delete_id, cx)
+                            }
+                            SessionManagerRowActionTarget::LocalTerminal(_) => {
+                                this.request_delete_local_terminal_profile(&delete_id, cx)
                             }
                             SessionManagerRowActionTarget::Telnet(_) => {
                                 this.request_delete_telnet_profile(&delete_id, cx)
@@ -2521,6 +2704,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match target {
+            SessionManagerOpenTarget::Ftp(id) => self.open_saved_ftp_profile(&id, window, cx),
             SessionManagerOpenTarget::Connection(connection_id) => {
                 self.open_saved_connection(&connection_id, window, cx)
             }
@@ -2529,6 +2713,9 @@ impl WorkspaceApp {
             }
             SessionManagerOpenTarget::Serial(profile_id) => {
                 self.open_saved_serial_profile(&profile_id, window, cx)
+            }
+            SessionManagerOpenTarget::LocalTerminal(profile_id) => {
+                self.open_saved_local_terminal_profile(&profile_id, window, cx)
             }
             SessionManagerOpenTarget::Telnet(profile_id) => {
                 self.open_saved_telnet_profile(&profile_id, window, cx)
@@ -2546,12 +2733,43 @@ impl WorkspaceApp {
     }
 }
 
-pub(super) fn compare_lower(left: &str, right: &str) -> std::cmp::Ordering {
-    left.to_lowercase().cmp(&right.to_lowercase())
-}
-
-pub(super) fn compare_option_lower(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
-    compare_lower(left.unwrap_or_default(), right.unwrap_or_default())
+pub(super) fn sort_session_manager_items(
+    items: &mut [SessionManagerDisplayItem],
+    field: SessionSortField,
+    direction: SortDirection,
+) {
+    fn sort<K: Ord>(
+        items: &mut [SessionManagerDisplayItem],
+        direction: SortDirection,
+        primary_key: impl Fn(&SessionManagerDisplayItem) -> K,
+    ) {
+        // Cache normalized text for this sort only; display settings and item
+        // edits remain visible immediately without persistent invalidation state.
+        let key = |item: &SessionManagerDisplayItem| {
+            (
+                primary_key(item),
+                item.name().to_lowercase(),
+                item.id().to_owned(),
+            )
+        };
+        match direction {
+            SortDirection::Asc => items.sort_by_cached_key(key),
+            SortDirection::Desc => items.sort_by_cached_key(|item| std::cmp::Reverse(key(item))),
+        }
+    }
+    match field {
+        SessionSortField::Name => sort(items, direction, |_| ()),
+        SessionSortField::Host => sort(items, direction, |item| item.host().to_lowercase()),
+        SessionSortField::Port => sort(items, direction, SessionManagerDisplayItem::port_sort_key),
+        SessionSortField::Username => sort(items, direction, |item| item.username().to_lowercase()),
+        SessionSortField::AuthType => {
+            sort(items, direction, SessionManagerDisplayItem::auth_sort_key)
+        }
+        SessionSortField::Group => sort(items, direction, |item| {
+            item.group().unwrap_or_default().to_lowercase()
+        }),
+        SessionSortField::LastUsed => sort(items, direction, SessionManagerDisplayItem::last_used),
+    }
 }
 
 pub(super) fn session_manager_grid_rows(
@@ -2572,23 +2790,42 @@ pub(super) fn session_manager_grid_rows(
         true,
     );
 
+    // Route items through their ancestor paths once instead of scanning all
+    // connections separately for each root's subtree. Indices retain display order.
+    let mut grouped_items: HashMap<&str, Vec<usize>> = roots
+        .iter()
+        .map(|root| (root.as_str(), Vec::new()))
+        .collect();
+    let mut host_indices = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let mut group = item.group();
+        if roots.is_empty() || group.is_none() {
+            host_indices.push(index);
+            continue;
+        }
+        while let Some(path) = group {
+            if let Some(indices) = grouped_items.get_mut(path) {
+                indices.push(index);
+            }
+            group = path.rsplit_once('/').map(|(parent, _)| parent);
+        }
+    }
+
     // Grid mode keeps each root group as one section containing its subtree.
     for group in roots {
-        let group_indices = session_item_indices_for_group_subtree(items, group);
+        let group_indices = grouped_items
+            .get(group.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         push_session_manager_grid_section(
             &mut rows,
             group_display_name(group),
-            &group_indices,
+            group_indices,
             card_columns,
             false,
         );
     }
 
-    let host_indices = if roots.is_empty() {
-        (0..items.len()).collect::<Vec<_>>()
-    } else {
-        direct_session_item_indices_for_group(items, None)
-    };
     push_session_manager_grid_section(&mut rows, hosts_title, &host_indices, card_columns, false);
     rows
 }
@@ -2628,12 +2865,27 @@ pub(super) fn session_manager_tree_rows(
     children: &HashMap<String, Vec<String>>,
     expanded_groups: &HashSet<String>,
 ) -> Vec<SessionManagerTreeRow> {
+    // Index direct membership once; scanning every connection for each visible
+    // group makes a tree repaint quadratic as saved connections accumulate.
+    let mut grouped_items: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        grouped_items.entry(item.group()).or_default().push(index);
+    }
     let mut rows = Vec::new();
     for root in roots {
-        push_session_manager_tree_group_rows(&mut rows, root, 0, items, children, expanded_groups);
+        push_session_manager_tree_group_rows(
+            &mut rows,
+            root,
+            0,
+            &grouped_items,
+            children,
+            expanded_groups,
+        );
     }
     rows.extend(
-        direct_session_item_indices_for_group(items, None)
+        grouped_items
+            .remove(&None)
+            .unwrap_or_default()
             .into_iter()
             .map(|item_index| SessionManagerTreeRow::Item {
                 item_index,
@@ -2647,11 +2899,14 @@ fn push_session_manager_tree_group_rows(
     rows: &mut Vec<SessionManagerTreeRow>,
     group: &str,
     depth: usize,
-    items: &[SessionManagerDisplayItem],
+    grouped_items: &HashMap<Option<&str>, Vec<usize>>,
     children: &HashMap<String, Vec<String>>,
     expanded_groups: &HashSet<String>,
 ) {
-    let group_item_indices = direct_session_item_indices_for_group(items, Some(group));
+    let group_item_indices = grouped_items
+        .get(&Some(group))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let child_groups = children.get(group).map(Vec::as_slice).unwrap_or_default();
     let expanded = expanded_groups.contains(group);
     rows.push(SessionManagerTreeRow::Group {
@@ -2669,14 +2924,15 @@ fn push_session_manager_tree_group_rows(
             rows,
             child_group,
             depth + 1,
-            items,
+            grouped_items,
             children,
             expanded_groups,
         );
     }
     rows.extend(
         group_item_indices
-            .into_iter()
+            .iter()
+            .copied()
             .map(|item_index| SessionManagerTreeRow::Item {
                 item_index,
                 depth: depth + 1,
@@ -2685,47 +2941,23 @@ fn push_session_manager_tree_group_rows(
 }
 
 fn recent_session_item_indices(items: &[SessionManagerDisplayItem]) -> Vec<usize> {
-    let mut indices = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| item.last_used().is_some().then_some(index))
-        .collect::<Vec<_>>();
-    indices.sort_by(|left, right| items[*right].last_used().cmp(&items[*left].last_used()));
-    indices.truncate(8);
-    indices
-}
-
-fn direct_session_item_indices_for_group(
-    items: &[SessionManagerDisplayItem],
-    group: Option<&str>,
-) -> Vec<usize> {
-    items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| match (group, item.group()) {
-            (None, None) => Some(index),
-            (Some(group), Some(item_group)) if item_group == group => Some(index),
-            _ => None,
-        })
-        .collect()
-}
-
-fn session_item_indices_for_group_subtree(
-    items: &[SessionManagerDisplayItem],
-    group: &str,
-) -> Vec<usize> {
-    let child_prefix = format!("{group}/");
-    items
+    const RECENT_SESSION_LIMIT: usize = 8;
+    let mut candidates: Vec<_> = items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            item.group()
-                .is_some_and(|item_group| {
-                    item_group == group || item_group.starts_with(&child_prefix)
-                })
-                .then_some(index)
+            item.last_used()
+                .map(|time| (std::cmp::Reverse(time), index))
         })
-        .collect()
+        .collect();
+    // Only the recent strip needs ordering. The original index breaks ties so
+    // partial selection preserves the display order for equal timestamps.
+    if candidates.len() > RECENT_SESSION_LIMIT {
+        candidates.select_nth_unstable(RECENT_SESSION_LIMIT);
+        candidates.truncate(RECENT_SESSION_LIMIT);
+    }
+    candidates.sort_unstable();
+    candidates.into_iter().map(|(_, index)| index).collect()
 }
 
 fn session_manager_display_item_signature(item: &SessionManagerDisplayItem) -> u64 {

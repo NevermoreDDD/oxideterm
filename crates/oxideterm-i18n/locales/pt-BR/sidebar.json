@@ -1,5 +1,17 @@
 {
   "sidebar": {
+    "search": {
+      "title": "Pesquisar sessões",
+      "placeholder": "Pesquisar sessões…",
+      "empty": "Nenhuma sessão correspondente"
+    },
+    "sort": {
+      "title": "Ordenar sessões",
+      "default": "Ordem padrão",
+      "name_ascending": "Nome: A–Z",
+      "name_descending": "Nome: Z–A",
+      "connected_first": "Conectadas primeiro"
+    },
     "actions": {
       "expand": "Expandir barra lateral",
       "collapse": "Recolher barra lateral",
@@ -29,6 +41,7 @@
       "import_tooltip": "Importar de arquivo .oxide",
       "export_tooltip": "Exportar para arquivo .oxide",
       "host_tools": "Ferramentas do host",
+      "knowledge": "Base de conhecimento",
       "host_monitor": "Monitoramento",
       "gpu": "GPU / NPU",
       "processes": "Processos",
@@ -42,8 +55,8 @@
       "open_session_manager": "Abrir gerenciador de sessões",
       "plugins": "Plugins",
       "activity": "Atividade",
-      "event_log": "Registro de eventos",
-      "notifications": "Notificações",
+      "event_log": "Auditoria",
+      "notifications": "Notificações e auditoria",
       "saved_connections": "Conexões salvas",
       "forwarding": "Redirecionamento de portas",
       "ports": "Portas",
@@ -62,6 +75,7 @@
       "collapse": "Recolher"
     },
     "active_sessions": "Sessões ativas",
+    "active_session_count": "Sessões ativas: {{count}}",
     "no_sessions": "Nenhuma sessão",
     "add_new_connection": "Clique em + para adicionar uma conexão",
     "host_gpu": {
@@ -710,6 +724,7 @@
       "no_sessions": "Nenhuma sessão",
       "click_to_add": "Clique em + para adicionar uma conexão",
       "actions": {
+        "open_session": "Abrir sessão",
         "new_terminal": "Novo terminal",
         "sftp": "SFTP",
         "disconnect": "Desconectar",

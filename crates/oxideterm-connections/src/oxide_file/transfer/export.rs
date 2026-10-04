@@ -189,6 +189,27 @@ fn export_connections_to_oxide_inner(
     }
     report_progress("collecting_portable_secrets");
 
+    let credential_selection = crate::CredentialSyncSelection {
+        connection_ids: connection_ids.iter().cloned().collect(),
+        ..Default::default()
+    };
+    let selected_totp = store.totp_credentials().iter()
+        .filter(|p| store.totp_selected(&p.id, &credential_selection))
+        .collect::<Vec<_>>();
+    let totp_credentials = selected_totp.iter().map(|p| p.portable()).collect();
+    let mut portable_secrets = options.portable_secrets.clone();
+    if options.include_passwords {
+        for credential in selected_totp {
+            let already_exported = portable_secrets.iter().any(|secret| {
+                crate::is_profile_credential(secret) && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
+                    .is_ok_and(|target| target.owner == crate::CredentialOwner::Totp(credential.id.clone()))
+            });
+            if !already_exported && let Some(secret) = store.export_totp_secret(credential)? {
+                portable_secrets.push(secret);
+            }
+        }
+    }
+
     let quick_command_counts =
         count_quick_commands_for_export(options.quick_commands_json.as_deref());
     let serial_profiles_count =
@@ -210,8 +231,9 @@ fn export_connections_to_oxide_inner(
         || standalone_sftp_profiles_json.is_some()
         || options.remote_desktop_profiles_json.is_some()
         || !options.plugin_settings.is_empty()
-        || !options.portable_secrets.is_empty();
+        || !portable_secrets.is_empty();
     let mut payload = EncryptedPayload {
+        totp_credentials,
         version: if has_extra_payload { 2 } else { 1 },
         connections: encrypted_connections,
         app_settings_json: options.app_settings_json,
@@ -222,7 +244,7 @@ fn export_connections_to_oxide_inner(
         standalone_sftp_profiles_json,
         remote_desktop_profiles_json: options.remote_desktop_profiles_json,
         plugin_settings: options.plugin_settings,
-        portable_secrets: options.portable_secrets,
+        portable_secrets,
         checksum: String::new(),
     };
     payload.checksum = compute_checksum(&payload)?;
@@ -469,6 +491,7 @@ fn export_proxy_chain(
         ))
     })?;
     Ok(vec![EncryptedProxyHop {
+        totp_credential_id: jump.options.totp_credential_id.clone(),
         host: jump.host.clone(),
         port: jump.port,
         username: jump.username.clone(),
@@ -482,6 +505,7 @@ fn export_proxy_hop(
     options: &OxideExportOptions,
 ) -> Result<EncryptedProxyHop, OxideFileError> {
     Ok(EncryptedProxyHop {
+        totp_credential_id: hop.totp_credential_id.clone(),
         host: hop.host.clone(),
         port: hop.port,
         username: hop.username.clone(),
@@ -496,6 +520,7 @@ fn export_auth(
 ) -> Result<EncryptedAuth, OxideFileError> {
     match auth {
         SavedAuth::Password { .. } => Ok(EncryptedAuth::Password {
+            empty_password: auth.uses_empty_password(),
             password: if options.include_passwords {
                 store
                     .get_saved_auth_password(auth)
@@ -581,6 +606,7 @@ fn export_auth(
                     private_key.expose_secret().as_bytes(),
                 ))),
                 managed_key: Some(EncryptedManagedKeyMetadata {
+                    certificate: metadata.certificate,
                     key_id: metadata.id,
                     name: metadata.name,
                     fingerprint: Some(metadata.fingerprint),
@@ -675,8 +701,9 @@ fn count_mosh_profiles_for_export(snapshot_json: Option<&str>) -> Option<usize> 
 }
 
 fn count_standalone_sftp_profiles_for_export(snapshot_json: Option<&str>) -> Option<usize> {
-    let value = serde_json::from_str::<Value>(snapshot_json?).ok()?;
-    value.get("records")?.as_array().map(Vec::len)
+    let snapshot =
+        serde_json::from_str::<StandaloneSftpProfilesSyncSnapshot>(snapshot_json?).ok()?;
+    Some(snapshot.record_count())
 }
 
 fn portable_standalone_sftp_profiles_json(
@@ -690,6 +717,14 @@ fn portable_standalone_sftp_profiles_json(
         })?;
     for profile in &mut snapshot.records {
         crate::store::make_standalone_sftp_profile_portable(profile);
+    }
+    for profile in snapshot
+        .ftp
+        .as_mut()
+        .into_iter()
+        .flat_map(|s| &mut s.records)
+    {
+        crate::store::make_ftp_profile_portable(profile);
     }
     serde_json::to_string(&snapshot).map_err(|error| {
         OxideFileError::InvalidFormat(format!(

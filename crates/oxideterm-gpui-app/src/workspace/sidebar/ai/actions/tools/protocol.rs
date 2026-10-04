@@ -189,6 +189,7 @@ pub(in crate::workspace) fn annotate_ai_run_command_execution_result(
         .and_then(|target| target.get("kind"))
         .and_then(serde_json::Value::as_str);
     let data = envelope.get("data");
+    let command_id = data.and_then(|value| value.get("commandId")).cloned();
     let exit_code = data.and_then(|value| value.get("exitCode")).cloned();
     let timed_out = data
         .and_then(|value| value.get("timedOut"))
@@ -241,6 +242,9 @@ pub(in crate::workspace) fn annotate_ai_run_command_execution_result(
                 serde_json::Value::Object(execution_target),
             );
         }
+    }
+    if let Some(command_id) = command_id {
+        execution.insert("commandId".to_string(), command_id);
     }
     if let Some(exit_code) = exit_code {
         execution.insert("exitCode".to_string(), exit_code);
@@ -361,9 +365,10 @@ pub(in crate::workspace) fn ai_terminal_tui_state(
 
 pub(in crate::workspace) fn ai_terminal_command_record_json(
     record: &oxideterm_gpui_terminal::TerminalAiCommandRecord,
+    prompt_returned: bool,
 ) -> serde_json::Value {
     let status = match record.status {
-        oxideterm_gpui_terminal::TerminalCommandFactStatus::Open => "running",
+        oxideterm_gpui_terminal::TerminalCommandFactStatus::Open => if prompt_returned { "shell_ready" } else { "running" },
         oxideterm_gpui_terminal::TerminalCommandFactStatus::Closed => "completed",
         oxideterm_gpui_terminal::TerminalCommandFactStatus::Stale => "stale",
     };
@@ -371,6 +376,7 @@ pub(in crate::workspace) fn ai_terminal_command_record_json(
         "commandId": record.command_id,
         "command": oxideterm_ai::sanitize_for_ai(&record.command),
         "status": status,
+        "completionConfirmed": record.status == oxideterm_gpui_terminal::TerminalCommandFactStatus::Closed,
         "startedAt": record.started_at,
         "finishedAt": record.finished_at,
         "exitCode": record.exit_code,
@@ -407,7 +413,7 @@ pub(in crate::workspace) fn ai_terminal_wait_match(
             };
             matched.then(|| serde_json::json!({ "condition": condition }))
         }
-        "prompt" if looks_waiting_for_input(current_buffer) => {
+        "prompt" if ai_terminal_input_wait_reason(current_buffer, false).is_some() => {
             Some(serde_json::json!({ "condition": condition }))
         }
         "tui_entered" if !initial_alternate_screen && current_alternate_screen => {
@@ -430,7 +436,7 @@ pub(in crate::workspace) fn ai_terminal_wait_match(
                 .map(|record| {
                     serde_json::json!({
                         "condition": condition,
-                        "command": ai_terminal_command_record_json(record),
+                        "command": ai_terminal_command_record_json(record, false),
                     })
                 })
         }
@@ -462,8 +468,8 @@ pub(in crate::workspace) fn ai_terminal_screen_snapshot_json(
 
 
 pub(in crate::workspace) fn terminal_delta_output(before: &str, after: &str) -> String {
-    if after.starts_with(before) {
-        let delta = after[before.len()..].trim();
+    if let Some(delta) = after.strip_prefix(before) {
+        let delta = delta.trim();
         if !delta.is_empty() {
             return delta.to_string();
         }
@@ -494,9 +500,31 @@ pub(in crate::workspace) fn looks_waiting_for_input(value: &str) -> bool {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default();
-    ["password", "passphrase", "sudo", "验证码", "口令", "密码"]
+    // A mention in command output is not an input request. Keep this heuristic
+    // separate from the terminal owner's authoritative credential prompt state.
+    let prompt_suffix = prompt_line.ends_with([':', '：', '?', '？']);
+    prompt_suffix && ["password", "passphrase", "verification code", "验证码", "口令", "密码"]
         .iter()
         .any(|needle| prompt_line.contains(needle))
+}
+
+pub(in crate::workspace) fn ai_terminal_input_wait_reason(
+    buffer: &str,
+    waiting_for_secret: bool,
+) -> Option<&'static str> {
+    if waiting_for_secret {
+        Some("credential_prompt")
+    } else if looks_waiting_for_input(buffer) {
+        Some("possible_credential_prompt")
+    } else {
+        let line = buffer.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
+        let line = zeroize::Zeroizing::new(line.trim().to_ascii_lowercase());
+        let confirmation = ["[y/n]", "[y/n]:", "(y/n)", "(y/n)?", "(yes/no)?", "[yes/no]:", "([y]/n)?", "(y/[n])?", "[y/n]?"]
+            .iter().any(|suffix| line.ends_with(suffix));
+        let enter = line.contains("press enter") || line.contains("press return")
+            || line.contains("按回车") || line.contains("按 enter");
+        (confirmation || enter).then_some("interactive_prompt")
+    }
 }
 
 pub(in crate::workspace) fn settings_with_json_patch(
@@ -519,6 +547,39 @@ pub(in crate::workspace) fn settings_with_json_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_input_state_reaches_model_without_false_secret_waits() {
+        let snapshot = AiOrchestratorRuntimeSnapshot::background_result_projection();
+        for (buffer, known_secret, alternate, expected_reason, expected_tui) in [
+            ("[sudo] password for deploy:", false, false, Some("possible_credential_prompt"), "prompt"),
+            ("Enter passphrase for key '/tmp/key':", false, false, Some("possible_credential_prompt"), "prompt"),
+            ("请输入验证码：", false, false, Some("possible_credential_prompt"), "prompt"),
+            ("sudo: command not found", false, false, None, "shell"),
+            ("password updated successfully", false, false, None, "shell"),
+            ("Password:\nSelect an item and press Enter", false, true, Some("interactive_prompt"), "alternate_screen"),
+            ("Protected input", true, true, Some("credential_prompt"), "alternate_screen"),
+            ("Proceed ([y]/n)?", false, false, Some("interactive_prompt"), "shell"),
+            ("Proceed [y/n]:", false, false, Some("interactive_prompt"), "shell"),
+            ("Select an item and press Enter", false, false, Some("interactive_prompt"), "shell"),
+        ] {
+            let reason = ai_terminal_input_wait_reason(buffer, known_secret);
+            let screen = serde_json::json!({"isAlternateBuffer": alternate});
+            let result = snapshot.to_executed_tool_result(
+                "observe-1".into(), "observe_terminal".into(),
+                snapshot.ok("Terminal observed.", buffer, serde_json::json!({
+                    "waitingForInput": reason.is_some(),
+                    "inputWaitReason": reason,
+                    "tuiState": ai_terminal_tui_state(Some(&screen), buffer),
+                }), "read"), 0,
+            );
+            let content = oxideterm_ai::ai_tool_result_model_content(&result);
+            let model: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(model["waitingForInput"], expected_reason.is_some(), "{buffer}");
+            assert_eq!(model.get("inputWaitReason").and_then(serde_json::Value::as_str), expected_reason, "{buffer}");
+            assert_eq!(model["tuiState"], expected_tui, "{buffer}");
+        }
+    }
 
     pub(in crate::workspace) fn sample_result() -> AiExecutedToolResult {
         AiExecutedToolResult {
@@ -627,12 +688,15 @@ mod tests {
 
     #[test]
     pub(in crate::workspace) fn long_tool_output_uses_head_tail_preview_metadata() {
-        let output = "a".repeat(30_000);
+        let output = format!("HEAD{}OMITTED{}TAIL", "a".repeat(15_000), "b".repeat(15_000));
 
         let (preview, raw_output, output_preview, truncated) = prepare_ai_tool_output(&output);
 
         assert!(truncated);
-        assert!(raw_output.is_some());
+        assert_eq!(raw_output.as_deref(), Some(output.as_str()));
+        assert!(preview.starts_with("HEAD"));
+        assert!(preview.ends_with("TAIL"));
+        assert!(!preview.contains("OMITTED"));
         assert!(preview.contains("showing head and tail"));
         assert_eq!(
             output_preview.get("strategy"),
@@ -654,6 +718,7 @@ mod tests {
             "output": "Command sent: uptime",
             "data": {
                 "executionState": "sent",
+                "commandId": "command-1",
                 "visibleInTerminal": true
             },
             "targets": [{
@@ -670,6 +735,8 @@ mod tests {
             &serde_json::json!({ "command": "uptime" }),
         );
 
+        let model: serde_json::Value = serde_json::from_str(&oxideterm_ai::ai_tool_result_model_content(&result)).unwrap();
+        assert_eq!(model["execution"]["commandId"], "command-1");
         assert_eq!(
             result.envelope.pointer("/execution/state"),
             Some(&serde_json::json!("sent"))
@@ -883,13 +950,10 @@ struct AiTerminalCommandWait {
 }
 
 impl AiTerminalCommandWait {
-    #[cfg(test)]
-    fn new(now: std::time::Instant) -> Self {
-        Self::with_timeout(now, Duration::from_secs(30 * 60))
-    }
-
     fn with_timeout(now: std::time::Instant, timeout: Duration) -> Self {
-        Self { deadline: now + timeout.min(Duration::from_secs(30 * 60)) }
+        Self {
+            deadline: now + timeout.min(Duration::from_secs(30)),
+        }
     }
 
     fn expired(&self, now: std::time::Instant) -> bool {
@@ -899,22 +963,56 @@ impl AiTerminalCommandWait {
 
 fn ai_terminal_command_output_ready(
     command_completed: bool,
-    shell_integration_detected: bool,
+    prompt_returned: bool,
     before: &str,
     current: &str,
     quiet_for: Duration,
     waiting_for_secret: bool,
     recovering: bool,
 ) -> bool {
-    if waiting_for_secret || recovering {
+    if recovering {
         return false;
     }
-    // A frontend command mark does not prove that this shell emits completion events.
-    // Quiet output may be returned as a snapshot, never as a confirmed command exit.
-    command_completed || (!shell_integration_detected
-        && current != before
-        && !looks_waiting_for_input(current)
-        && quiet_for >= Duration::from_millis(400))
+    // Historical integration capability cannot describe a nested shell. Quiet output
+    // yields an observation regardless of that capability, without proving an exit.
+    command_completed
+        || prompt_returned
+        || ((current != before || waiting_for_secret) && quiet_for >= Duration::from_millis(400))
+}
+
+fn ai_terminal_observation_data(
+    command_id: Option<&str>,
+    completed: bool,
+    prompt_returned: bool,
+    input_reason: Option<&str>,
+    exit_code: Option<i32>,
+    expired: bool,
+) -> serde_json::Value {
+    let state = if completed {
+        "completed"
+    } else if prompt_returned {
+        "shell_ready"
+    } else if input_reason.is_some() {
+        "waiting_input"
+    } else {
+        "output_captured"
+    };
+    serde_json::json!({
+        "executionState": state,
+        "visibleInTerminal": true,
+        "commandId": command_id,
+        "exitCode": if completed { exit_code } else { None },
+        "waitingForInput": input_reason.is_some(),
+        "inputWaitReason": input_reason,
+        "terminalObservation": {
+            "state": state,
+            "commandId": command_id,
+            "completionConfirmed": completed,
+            "canRunCommand": (completed || prompt_returned) && input_reason.is_none(),
+            "exitCode": if completed { exit_code } else { None },
+            "waitExpired": expired,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -922,18 +1020,114 @@ mod command_output_tests {
     use super::*;
 
     #[test]
+    fn unconfirmed_observations_reach_the_model_without_claiming_success_or_freeing_input() {
+        let snapshot = AiOrchestratorRuntimeSnapshot::background_result_projection();
+        for (completed, prompt, reason, expired, expected_state, can_run, exit) in [
+            (false, false, None, true, "output_captured", false, None),
+            (false, true, None, false, "shell_ready", true, None),
+            (
+                false,
+                false,
+                Some("interactive_prompt"),
+                false,
+                "waiting_input",
+                false,
+                None,
+            ),
+            (true, false, None, false, "completed", true, Some(7)),
+        ] {
+            let mut result = snapshot.to_executed_tool_result(
+                "call".into(),
+                "run_command".into(),
+                snapshot.ok(
+                    "Terminal observation",
+                    "progress",
+                    ai_terminal_observation_data(
+                        Some("command-1"),
+                        completed,
+                        prompt,
+                        reason,
+                        Some(7),
+                        expired,
+                    ),
+                    "read",
+                ),
+                0,
+            );
+            annotate_ai_run_command_execution_result(
+                &mut result,
+                &serde_json::json!({"command":"install"}),
+            );
+            let model: serde_json::Value =
+                serde_json::from_str(&oxideterm_ai::ai_tool_result_model_content(&result)).unwrap();
+            assert_eq!(
+                model["terminalObservation"],
+                serde_json::json!({
+                    "state": expected_state, "commandId":"command-1", "completionConfirmed":completed,
+                    "canRunCommand":can_run, "exitCode":exit, "waitExpired":expired,
+                })
+            );
+            assert_eq!(model["execution"]["exitCode"], serde_json::json!(exit));
+            assert_eq!(model["waitingForInput"], reason.is_some());
+        }
+    }
+
+    #[test]
     fn output_capture_respects_shell_events_activity_and_wait_states() {
         let quiet = Duration::from_millis(500);
-        for (completed, integrated, output, elapsed, secret, reconnecting, expected) in [
-            (false, false, "command\nresult\n$ ", quiet, false, false, true),
-            (false, true, "command\nresult\n$ ", quiet, false, false, false),
-            (true, true, "command\nresult\n$ ", Duration::ZERO, false, false, true),
-            (false, false, "command\nresult", Duration::from_millis(100), false, false, false),
+        for (completed, prompt_returned, output, elapsed, secret, reconnecting, expected) in [
+            (
+                false,
+                false,
+                "command\nresult\n$ ",
+                quiet,
+                false,
+                false,
+                true,
+            ),
+            (
+                false,
+                true,
+                "command\nresult\n$ ",
+                quiet,
+                false,
+                false,
+                true,
+            ),
+            (
+                true,
+                true,
+                "command\nresult\n$ ",
+                Duration::ZERO,
+                false,
+                false,
+                true,
+            ),
+            (
+                false,
+                false,
+                "command\nresult",
+                Duration::from_millis(100),
+                false,
+                false,
+                false,
+            ),
             (false, false, "before", quiet, false, false, false),
-            (false, false, "command\nPassword:", quiet, true, false, false),
+            (false, false, "command\nPassword:", quiet, true, false, true),
             (false, false, "command\nresult", quiet, false, true, false),
         ] {
-            assert_eq!(ai_terminal_command_output_ready(completed, integrated, "before", output, elapsed, secret, reconnecting), expected);
+            assert_eq!(
+                ai_terminal_command_output_ready(
+                    completed,
+                    prompt_returned,
+                    "before",
+                    output,
+                    elapsed,
+                    secret,
+                    reconnecting
+                ),
+                expected
+            );
         }
     }
 }

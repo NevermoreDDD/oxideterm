@@ -18,7 +18,11 @@
       "port": "Port",
       "username": "Nom d'utilisateur cible *",
       "password": "Mot de passe",
+      "use_empty_password": "Utiliser un mot de passe vide",
       "save_password": "Enregistrer le mot de passe dans le trousseau",
+      "save_credentials_after_login": "Enregistrer les informations d’authentification après une connexion réussie",
+      "credentials_saved": "Informations d’authentification enregistrées",
+      "save_credentials_failed": "Échec de l’enregistrement des informations d’authentification",
       "group": "Groupe",
       "notes": "Notes",
       "notes_placeholder": "Ajouter des informations facultatives sur cette connexion",
@@ -145,6 +149,9 @@
       "ssh_algorithms_hint": "Vérifiez l’ordre de négociation et remplacez des catégories d’algorithmes précises.",
       "ssh_algorithms_categories": "Catégories d’algorithmes",
       "ssh_algorithms_default": "Par défaut",
+      "ssh_algorithms_follow_preset": "Suivre le préréglage",
+      "ssh_algorithms_disabled": "Algorithmes désactivés",
+      "ssh_algorithms_edit_hint": "Les premiers éléments sont prioritaires. Glissez ou utilisez Alt+↑/↓ pour déplacer, Espace pour activer ou désactiver. Gardez au moins un algorithme actif.",
       "ssh_algorithms_custom": "Personnalisé",
       "ssh_algorithms_custom_count": "{{count}} personnalisées",
       "ssh_algorithms_category_kex": "Échange de clés (KEX)",
@@ -203,6 +210,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "Enregistrer le mot de passe après une connexion réussie",
+      "password_saved": "Mot de passe SSH enregistré",
+      "save_password_failed": "Impossible d’enregistrer le mot de passe SSH. La connexion reste ouverte.",
       "title": "Authentification clavier interactive",
       "continue": "Continuer",
       "cancelled": "L’authentification clavier interactive a été annulée."

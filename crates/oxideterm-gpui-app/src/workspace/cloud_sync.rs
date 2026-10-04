@@ -8,10 +8,10 @@ use oxideterm_cloud_sync::{
     AuthMode, BackendType, CloudSyncSettings, CloudSyncStatus, ConflictStrategy,
     OXIDE_APP_SETTINGS_SECTION_IDS, RawSyncScope, normalize_sync_scope,
     operation::{
-        ApplyLegacyPreviewOutcome, ApplyStructuredPreviewOutcome, LegacyPreview, UploadOptions,
-        UploadOutcome,
+        ApplyLegacyPreviewOutcome, ApplyStructuredPreviewOutcome, LegacyPreview, UploadOutcome,
     },
     progress::CloudSyncProgress,
+    secret_keys,
     secrets::{CloudSyncKeychainSecretProvider, backend_uses_auth_mode},
     service::{CloudSyncLocalSnapshot, build_local_snapshot},
     state::{CloudSyncHistoryEntry, CloudSyncHistorySummary, CloudSyncPersistedState},
@@ -54,14 +54,13 @@ use oxideterm_gpui_cloud_sync::{
     cloud_sync_sidebar_empty, cloud_sync_status_label_key, cloud_sync_status_list,
     cloud_sync_status_row, cloud_sync_toggle, cloud_sync_toggle_grid, cloud_sync_upload_diff_items,
     cloud_sync_upload_field_diff_items, cloud_sync_value_prefers_mono,
-    cloud_sync_version_info_rows, deliver_cloud_sync_apply_preview, deliver_cloud_sync_check,
+    cloud_sync_version_info_rows, deliver_cloud_sync_apply_preview,
     deliver_cloud_sync_github_oauth, deliver_cloud_sync_google_oauth,
-    deliver_cloud_sync_microsoft_oauth, deliver_cloud_sync_pull_preview,
-    deliver_cloud_sync_restore_backup_preview, deliver_cloud_sync_upload,
-    deliver_cloud_sync_upload_preview, finish_cloud_sync_automatic_upload_error_state,
-    finish_cloud_sync_check_state, finish_cloud_sync_error_state,
-    finish_cloud_sync_pull_preview_state, finish_cloud_sync_upload_state,
-    finish_legacy_cloud_sync_apply_state, finish_structured_cloud_sync_apply_state,
+    deliver_cloud_sync_microsoft_oauth, deliver_cloud_sync_restore_backup_preview,
+    finish_cloud_sync_automatic_upload_error_state, finish_cloud_sync_check_state,
+    finish_cloud_sync_error_state, finish_cloud_sync_pull_preview_state,
+    finish_cloud_sync_upload_state, finish_legacy_cloud_sync_apply_state,
+    finish_structured_cloud_sync_apply_state,
     handle_cloud_sync_select_key as reduce_cloud_sync_select_key,
     normalize_cloud_sync_interval_draft, persist_remote_metadata, reset_cloud_sync_secret_drafts,
     store_cloud_sync_touched_secrets,
@@ -86,10 +85,12 @@ use oxideterm_gpui_ui::select::{
     select_option_action, select_option_highlighted, select_panel_overlay_popup_with_max_height,
 };
 
+mod causal;
 mod config;
 mod confirm_dialog;
 mod delivery;
 mod history;
+mod local_file;
 mod maintenance;
 mod preview;
 mod surface;
@@ -136,7 +137,7 @@ pub(super) struct CloudSyncInputRenderProjection {
 #[derive(Clone)]
 pub(super) struct CloudSyncPageRenderer {
     pub(super) cloud_sync: Entity<CloudSyncWorkspaceEntity>,
-    pub(super) render: Arc<CloudSyncListRenderProjection>,
+    pub(super) render: std::rc::Rc<CloudSyncListRenderProjection>,
 }
 
 impl std::ops::Deref for CloudSyncPageRenderer {
@@ -158,6 +159,8 @@ pub(super) struct CloudSyncControllerState {
     pub(super) dirty_refresh_scheduled: bool,
     pub(super) dirty_refresh_generation: u64,
     pub(super) upload_after_current: Option<bool>,
+    pub(super) causal_pending: Option<oxideterm_cloud_sync::operation::PreparedSync>,
+    pub(super) password_change: Option<zeroize::Zeroizing<String>>,
 }
 
 impl CloudSyncControllerState {
@@ -173,6 +176,8 @@ impl CloudSyncControllerState {
             dirty_refresh_scheduled: false,
             dirty_refresh_generation: 0,
             upload_after_current: None,
+            causal_pending: None,
+            password_change: None,
         }
     }
 }
@@ -180,6 +185,8 @@ impl CloudSyncControllerState {
 /// Owns Cloud Sync form drafts, navigation, dialogs, previews, and virtual-list caches.
 pub(super) struct CloudSyncViewState {
     pub(super) form: CloudSyncFormDraft,
+    pub(super) local_file_mode: bool,
+    pub(super) local_file_task: Option<Task<()>>,
     section_rows: Vec<CloudSyncSection>,
     pub(super) section_list_state: ListState,
     pub(super) section_list_cache: RefCell<VirtualListSignatureCache>,
@@ -198,6 +205,9 @@ pub(super) struct CloudSyncViewState {
     pub(super) confirm_presence: oxideterm_gpui_ui::motion::ExitPresence,
     pub(super) confirm_focused_action: Option<ConfirmDialogAction>,
     pub(super) pending_preview: Option<CloudSyncPendingPreview>,
+    pub(super) causal_summary: Option<oxideterm_cloud_sync::operation::SyncPlanSummary>,
+    pub(super) causal_choices: std::collections::BTreeMap<usize, usize>,
+    pub(super) causal_conflicts: Vec<oxideterm_cloud_sync::operation::SyncConflictPreview>,
     pub(super) upload_preview: Option<CloudSyncPendingPreview>,
     pub(super) preview_selection: Option<CloudSyncPreviewSelection>,
     pub(super) upload_selection: Option<CloudSyncUploadSelection>,
@@ -247,6 +257,8 @@ impl CloudSyncViewState {
 
         Self {
             form: CloudSyncFormDraft::from_settings(settings),
+            local_file_mode: settings.local_file_mode,
+            local_file_task: None,
             section_rows: Vec::new(),
             section_list_state,
             section_list_cache: RefCell::new(VirtualListSignatureCache::default()),
@@ -265,6 +277,9 @@ impl CloudSyncViewState {
             confirm_presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             confirm_focused_action: None,
             pending_preview: None,
+            causal_summary: None,
+            causal_choices: Default::default(),
+            causal_conflicts: Vec::new(),
             upload_preview: None,
             preview_selection: None,
             upload_selection: None,
@@ -301,14 +316,17 @@ pub(super) enum CloudSyncUiIntent {
     StartGithubOauth,
     StartMicrosoftOauth,
     StartGoogleOauth,
-    ImportLocalBackup,
-    ExportLocalBackup,
     StartUploadPreview,
-    CheckRemote,
     PullPreview,
     RestoreLatestBackup,
     SaveConfiguration,
     ApplyPreview,
+    ApplyCausal,
+    CancelCausal,
+    ChooseCausal {
+        conflict: usize,
+        candidate: usize,
+    },
     StartUpload,
     ForceUpload,
     FinishScopeEdit,
@@ -357,7 +375,9 @@ impl EventEmitter<CloudSyncWorkspaceEvent> for CloudSyncWorkspaceEntity {}
 
 impl CloudSyncWorkspaceEntity {
     pub(in crate::workspace) fn operation_in_flight(&self) -> bool {
-        self.controller.delivery_rx.is_some() || self.controller.active_action.is_some()
+        self.controller.delivery_rx.is_some()
+            || self.controller.active_action.is_some()
+            || self.view.local_file_task.is_some()
     }
 
     pub(in crate::workspace) fn ai_snapshot(&self) -> serde_json::Value {
@@ -396,7 +416,7 @@ impl CloudSyncWorkspaceEntity {
             "localDirty": state.local_dirty,
             "remoteExists": state.remote_exists,
             "blockedByConflict": state.auto_upload_blocked_by_conflict,
-            "hasConflict": state.conflict_details.is_some(),
+            "hasConflict": state.auto_upload_blocked_by_conflict || state.conflict_details.is_some(),
             "lastSyncAt": state.last_sync_at,
             "lastUploadAt": state.last_upload_at,
             "lastCheckAt": state.last_check_at,
@@ -476,30 +496,52 @@ impl CloudSyncWorkspaceEntity {
     }
 
     fn has_pending_preview(&self) -> bool {
-        self.view.pending_preview.is_some() || self.view.upload_preview.is_some()
+        self.view.causal_summary.is_some()
+            || self.view.pending_preview.is_some()
+            || self.view.upload_preview.is_some()
     }
 
     fn sections(&self) -> Vec<CloudSyncSection> {
-        cloud_sync_sections(
+        let mut sections = cloud_sync_sections(
             self.controller.store.state(),
             self.has_pending_preview(),
             self.view.active_tab,
-        )
+        );
+        if self.view.local_file_mode {
+            sections.retain(|section| {
+                !matches!(
+                    section,
+                    CloudSyncSection::Guide
+                        | CloudSyncSection::ConfigHealth
+                        | CloudSyncSection::ConfigNotes
+                )
+            });
+        }
+        sections
     }
 
     fn section_signature(&self, section: CloudSyncSection) -> u64 {
-        cloud_sync_section_signature(
+        let signature = cloud_sync_section_signature(
             section,
             self.controller.store.state(),
             &self.view.form.backend_type,
             &self.view.form.auth_mode,
             &self.view.form.default_conflict_strategy,
-            self.controller.delivery_rx.is_some(),
+            self.operation_in_flight(),
             self.has_pending_preview(),
             self.view.preview_selection.is_some(),
             self.controller.progress.is_some(),
             self.view.active_tab,
-        )
+        );
+        use std::hash::{Hash, Hasher};
+        let mut preview = std::collections::hash_map::DefaultHasher::new();
+        if let Some(summary) = &self.view.causal_summary {
+            summary.changed_fields.hash(&mut preview);
+            summary.conflicts.len().hash(&mut preview);
+            summary.upgrading.hash(&mut preview);
+            self.view.causal_choices.hash(&mut preview);
+        }
+        signature ^ u64::from(self.view.local_file_mode) ^ preview.finish()
     }
 
     fn sync_section_rows(&mut self) {
@@ -569,7 +611,8 @@ impl CloudSyncWorkspaceEntity {
         self.controller.auto_upload_generation =
             self.controller.auto_upload_generation.wrapping_add(1);
         self.auto_upload_task.take();
-        if !self.controller.store.state().settings.auto_upload_enabled {
+        if self.view.local_file_mode || !self.controller.store.state().settings.auto_upload_enabled
+        {
             return;
         }
         let generation = self.controller.auto_upload_generation;
@@ -675,9 +718,9 @@ fn cloud_sync_location_for_ai(value: &str) -> String {
 }
 
 impl CloudSyncDeliverySink for crate::workspace::delivery::ActiveDeliverySender<CloudSyncDelivery> {
-    fn send(&self, delivery: CloudSyncDelivery) -> Result<(), CloudSyncDelivery> {
+    fn send(&self, delivery: CloudSyncDelivery) -> Result<(), Box<CloudSyncDelivery>> {
         crate::workspace::delivery::ActiveDeliverySender::send(self, delivery)
-            .map_err(|error| error.0)
+            .map_err(|error| Box::new(error.0))
     }
 }
 

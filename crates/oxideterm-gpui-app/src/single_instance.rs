@@ -15,7 +15,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
 use oxideterm_settings::is_prerelease_version;
-use oxideterm_ssh_launch::NativeConnectionLaunch;
+use oxideterm_ssh_launch::{NativeConnectionHandoff, NativeConnectionLaunch};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -67,7 +67,7 @@ pub(crate) enum SingleInstanceOutcome {
 #[derive(Debug)]
 pub(crate) enum SingleInstanceEvent {
     ShowMainWindow,
-    OpenNativeConnection(NativeConnectionLaunch),
+    OpenNativeConnection(NativeConnectionHandoff),
     OpenExternalConnectionUri(NativeConnectionLaunch),
 }
 
@@ -203,6 +203,7 @@ fn acquire_or_forward_with_paths(
 
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&paths.lock_path)
@@ -215,7 +216,8 @@ fn acquire_or_forward_with_paths(
 
     match lock_file.try_lock_exclusive() {
         Ok(()) => start_primary(lock_file, paths, connection_launch),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        // Windows reports ERROR_LOCK_VIOLATION, which is not mapped to WouldBlock.
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
             forward_to_primary(&paths.state_path, connection_launch_path, connection_launch)
                 .with_context(|| {
                     format!(
@@ -404,7 +406,7 @@ fn events_from_stream(
 
 pub(crate) fn read_connection_launch_file(
     path: Option<PathBuf>,
-) -> Result<Option<NativeConnectionLaunch>> {
+) -> Result<Option<NativeConnectionHandoff>> {
     let Some(path) = path else {
         return Ok(None);
     };
@@ -415,7 +417,17 @@ pub(crate) fn read_connection_launch_file(
     // The CLI handoff file may contain a stdin password. Delete it only after
     // the owning app instance has accepted the request.
     let _ = fs::remove_file(&path);
-    serde_json::from_slice(&bytes).context("invalid connection launch request")
+    let mut handoff = serde_json::from_slice::<NativeConnectionHandoff>(&bytes)
+        .or_else(|_| serde_json::from_slice::<NativeConnectionLaunch>(&bytes).map(Into::into))
+        .context("invalid connection launch request")?;
+    if handoff
+        .audit_parent_id
+        .as_deref()
+        .is_some_and(|id| Uuid::parse_str(id).is_err())
+    {
+        handoff.audit_parent_id = None;
+    }
+    Ok(Some(handoff))
 }
 
 #[cfg(test)]
@@ -423,7 +435,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forwards_second_launch_to_primary_instance() {
+    fn cli_handoff_keeps_audit_parent_separate_from_launch() {
+        let path =
+            std::env::temp_dir().join(format!("oxideterm-audit-handoff-{}.json", Uuid::new_v4()));
+        let parent_id = Uuid::new_v4().to_string();
+        let handoff = NativeConnectionHandoff {
+            launch: NativeConnectionLaunch::SavedConnection(
+                oxideterm_ssh_launch::SavedConnectionLaunch {
+                    saved_connection_id: "saved-connection".to_string(),
+                },
+            ),
+            audit_parent_id: Some(parent_id.clone()),
+        };
+        fs::write(&path, serde_json::to_vec(&handoff).unwrap()).unwrap();
+        let received = read_connection_launch_file(Some(path.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received.audit_parent_id.as_deref(),
+            Some(parent_id.as_str())
+        );
+        assert!(
+            matches!(received.launch, NativeConnectionLaunch::SavedConnection(ref saved) if saved.saved_connection_id == "saved-connection")
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn forwards_second_launch_after_a_shared_receiver_holder_drops() {
         let data_dir =
             std::env::temp_dir().join(format!("oxideterm-single-instance-test-{}", Uuid::new_v4()));
         let paths = InstancePaths::for_data_dir(&data_dir, "test");
@@ -436,6 +475,8 @@ mod tests {
         else {
             panic!("first launch should become the primary instance");
         };
+        let workspace_receiver = receiver.clone();
+        drop(workspace_receiver);
         let forwarded = acquire_or_forward_with_paths(paths, None, None).unwrap();
         assert!(matches!(forwarded, SingleInstanceOutcome::Forwarded));
 
@@ -494,6 +535,69 @@ mod tests {
     }
 
     #[test]
+    fn cli_handoff_delivers_the_connection_and_removes_the_file() {
+        for already_running in [false, true] {
+            let data_dir =
+                std::env::temp_dir().join(format!("oxideterm-cli-handoff-{}", Uuid::new_v4()));
+            fs::create_dir_all(&data_dir).unwrap();
+            let paths = InstancePaths::for_data_dir(&data_dir, "test");
+            let request_path = data_dir.join("launch.json");
+            // Synthetic credentials exercise the secret-bearing CLI handoff without a network.
+            fs::write(&request_path, br#"{"kind":"ssh","username":"cli-user","host":"example.test","port":2222,"password":"handoff-test"}"#).unwrap();
+            let primary = if already_running {
+                acquire_or_forward_with_paths(paths.clone(), None, None).unwrap()
+            } else {
+                acquire_or_forward_with_paths(paths.clone(), Some(request_path.clone()), None)
+                    .unwrap()
+            };
+            let SingleInstanceOutcome::Primary {
+                _guard: guard,
+                receiver,
+                ..
+            } = primary
+            else {
+                panic!("initial launch must own the instance");
+            };
+            let launch = if already_running {
+                assert!(matches!(
+                    acquire_or_forward_with_paths(paths, Some(request_path.clone()), None).unwrap(),
+                    SingleInstanceOutcome::Forwarded
+                ));
+                let receiver = receiver.lock().unwrap();
+                assert!(matches!(
+                    receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+                    SingleInstanceEvent::ShowMainWindow
+                ));
+                let SingleInstanceEvent::OpenNativeConnection(launch) =
+                    receiver.recv_timeout(Duration::from_secs(1)).unwrap()
+                else {
+                    panic!("CLI launch must not be treated as an external URI");
+                };
+                launch
+            } else {
+                // Startup consumes the file after acquiring primary ownership.
+                read_connection_launch_file(Some(request_path.clone()))
+                    .unwrap()
+                    .unwrap()
+            };
+            let NativeConnectionLaunch::Ssh(launch) = launch.launch else {
+                panic!("expected an SSH launch");
+            };
+            assert_eq!(
+                (launch.username.as_str(), launch.host.as_str(), launch.port),
+                ("cli-user", "example.test", 2222)
+            );
+            assert_eq!(
+                launch.password.as_deref().map(|password| password.as_str()),
+                Some("handoff-test")
+            );
+            assert!(!request_path.exists());
+            drop(guard);
+            fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    #[test]
     fn installed_channels_and_development_use_distinct_instance_paths() {
         let data_dir = Path::new("/tmp/oxideterm-instance-scopes");
         let development = InstancePaths::for_data_dir(data_dir, "development");
@@ -524,38 +628,5 @@ mod tests {
 
         assert!(rendered.contains("redacted"));
         assert!(!rendered.contains("sensitive-instance-token"));
-    }
-
-    #[test]
-    fn shared_receiver_survives_workspace_holder_drop() {
-        let (tx, rx) = mpsc::channel();
-        let application_receiver = Arc::new(Mutex::new(rx));
-        let first_workspace_receiver = application_receiver.clone();
-        let ssh_launch = NativeConnectionLaunch::Ssh(oxideterm_ssh_launch::TemporarySshLaunch {
-            username: "test-user".to_string(),
-            host: "example.test".to_string(),
-            port: 22,
-            password: None,
-        });
-
-        drop(first_workspace_receiver);
-        tx.send(SingleInstanceEvent::ShowMainWindow).unwrap();
-        tx.send(SingleInstanceEvent::OpenNativeConnection(ssh_launch))
-            .unwrap();
-
-        let receiver = application_receiver.lock().unwrap();
-        assert!(matches!(
-            receiver.try_recv().unwrap(),
-            SingleInstanceEvent::ShowMainWindow
-        ));
-        let SingleInstanceEvent::OpenNativeConnection(NativeConnectionLaunch::Ssh(received_launch)) =
-            receiver.try_recv().unwrap()
-        else {
-            panic!("second event should retain the forwarded SSH launch");
-        };
-        assert_eq!(received_launch.username, "test-user");
-        assert_eq!(received_launch.host, "example.test");
-        assert_eq!(received_launch.port, 22);
-        assert!(received_launch.password.is_none());
     }
 }

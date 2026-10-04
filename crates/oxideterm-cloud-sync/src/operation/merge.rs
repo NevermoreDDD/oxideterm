@@ -167,9 +167,37 @@ pub(super) fn merge_connection_records(
     conflict_strategy: &ConflictStrategy,
     merged_at: &str,
 ) -> Result<bool> {
+    let mut local_profiles_changed = false;
+    for remote_profile in &mut remote.local_terminal_profiles {
+        let Some(base_profile) = base
+            .local_terminal_profiles
+            .iter()
+            .find(|p| p.id == remote_profile.id)
+        else {
+            continue;
+        };
+        let Some(local_profile) = local
+            .local_terminal_profiles
+            .iter()
+            .find(|p| p.id == remote_profile.id)
+        else {
+            continue;
+        };
+        if let Some(mut merged) = merge_structured_model_fields(
+            base_profile,
+            local_profile,
+            remote_profile,
+            conflict_strategy,
+        )? {
+            merged.updated_at =
+                chrono::DateTime::parse_from_rfc3339(merged_at)?.with_timezone(&Utc);
+            *remote_profile = merged;
+            local_profiles_changed = true;
+        }
+    }
     let base_records = sync_records_by_id(&base.records);
     let local_records = sync_records_by_id(&local.records);
-    let mut changed = false;
+    let mut changed = local_profiles_changed;
     for remote_record in &mut remote.records {
         if remote_record.deleted {
             continue;
@@ -458,6 +486,33 @@ pub(super) fn merge_standalone_sftp_profile_records(
         .map(|profile| (profile.id.as_str(), profile))
         .collect::<BTreeMap<_, _>>();
     let mut changed = false;
+    if let (Some(remote), Some(base), Some(local)) = (&mut remote.ftp, &base.ftp, &local.ftp) {
+        let base_records = base
+            .records
+            .iter()
+            .map(|p| (p.id.as_str(), p))
+            .collect::<BTreeMap<_, _>>();
+        let local_records = local
+            .records
+            .iter()
+            .map(|p| (p.id.as_str(), p))
+            .collect::<BTreeMap<_, _>>();
+        for remote_profile in &mut remote.records {
+            let (Some(base), Some(local)) = (
+                base_records.get(remote_profile.id.as_str()),
+                local_records.get(remote_profile.id.as_str()),
+            ) else {
+                continue;
+            };
+            if let Some(mut merged) =
+                merge_structured_model_fields(*base, *local, remote_profile, conflict_strategy)?
+            {
+                merged.updated_at = merged_at;
+                *remote_profile = merged;
+                changed = true;
+            }
+        }
+    }
     for remote_profile in &mut remote.records {
         let Some(base_profile) = base_records.get(remote_profile.id.as_str()).copied() else {
             continue;

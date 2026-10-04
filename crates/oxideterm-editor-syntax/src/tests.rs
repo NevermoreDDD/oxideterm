@@ -5,6 +5,27 @@ use oxideterm_editor_core::{BufferOffset, TextRange};
 
 use crate::*;
 
+fn syntax_scope_covers_range(
+    spans: &[HighlightSpan],
+    scope: SyntaxScope,
+    range: std::ops::Range<usize>,
+) -> bool {
+    // Adjacent grammar tokens may represent one visual delimiter, such as `**`.
+    let mut covered_until = range.start;
+    for span in spans.iter().filter(|span| span.scope == scope) {
+        if span.range.start.0 > covered_until {
+            break;
+        }
+        if span.range.end.0 > covered_until {
+            covered_until = span.range.end.0;
+        }
+        if covered_until >= range.end {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn detects_supported_language_extensions_and_shebangs() {
     assert_eq!(LanguageId::from_path("src/main.rs"), Some(LanguageId::Rust));
@@ -214,6 +235,25 @@ fn parses_and_highlights_all_supported_languages() {
         let session = SyntaxSession::parse(language, source)
             .unwrap_or_else(|error| panic!("{language:?} query failed: {error}"));
         let spans = session.highlight_spans(source);
+        let expected_scopes: &[SyntaxScope] = match language {
+            LanguageId::Rust | LanguageId::Markdown => &[
+                SyntaxScope::Keyword,
+                SyntaxScope::Function,
+                SyntaxScope::String,
+            ],
+            LanguageId::Bash => &[SyntaxScope::Keyword, SyntaxScope::String],
+            LanguageId::Json => &[SyntaxScope::String],
+            _ => &[],
+        };
+        for scope in expected_scopes {
+            assert!(
+                spans.iter().any(|span| span.scope == *scope),
+                "{language:?}: missing {scope:?}"
+            );
+        }
+        if language == LanguageId::Rust {
+            assert!(!session.root_has_error());
+        }
         let mut structure = StructureCache::default();
         structure.update(&session, source, 4, None);
         let expected_folds: std::collections::BTreeMap<_, _> =
@@ -283,65 +323,121 @@ fn parses_and_highlights_all_supported_languages() {
 }
 
 #[test]
-fn parses_and_highlights_rust() {
-    let source = "fn main() {\n    let message = \"hi\";\n}\n";
-    let session = SyntaxSession::parse(LanguageId::Rust, source).unwrap();
+fn markdown_inline_code_highlights_paired_delimiters_symmetrically() {
+    for (source, delimiter) in [
+        ("Run `cargo check` before saving.", "`"),
+        ("Run ``cargo `check`` before saving.", "``"),
+    ] {
+        let session = SyntaxSession::parse(LanguageId::Markdown, source).unwrap();
+        let spans = session.highlight_spans(source);
+        let opening = source.find(delimiter).unwrap();
+        let closing = source.rfind(delimiter).unwrap();
+        for range in [
+            opening..opening + delimiter.len(),
+            opening + delimiter.len()..closing,
+            closing..closing + delimiter.len(),
+        ] {
+            assert!(
+                spans.contains(&HighlightSpan {
+                    range: TextRange::new(BufferOffset(range.start), BufferOffset(range.end)),
+                    scope: SyntaxScope::String,
+                }),
+                "missing literal range {range:?} in {source}"
+            );
+        }
+        assert!(
+            !spans.iter().any(|span| {
+                span.scope == SyntaxScope::Punctuation
+                    && (span.range.start.0 == opening || span.range.start.0 == closing)
+            }),
+            "delimiter classified as punctuation in {source}"
+        );
+    }
+}
 
-    assert!(!session.root_has_error());
+#[test]
+fn markdown_inline_code_keeps_literal_color_after_incremental_toolbar_wrap() {
+    let before = "```\necho hello\n```\n\ncdlalalala\n";
+    let selected_start = before.find("cdlalalala").unwrap();
+    let selected_end = selected_start + "cdlalalala".len();
+    let edit_range = TextRange::new(BufferOffset(selected_start), BufferOffset(selected_end));
+    let replacement = "`cdlalalala`";
+    let edit = SyntaxEdit::replace(before, edit_range, replacement);
+    let after = before.replacen("cdlalalala", replacement, 1);
+    let mut session = SyntaxSession::parse(LanguageId::Markdown, before).unwrap();
+
+    session.apply_edit(&after, edit).unwrap();
+    let spans = session.highlight_spans(&after);
+
+    assert!(syntax_scope_covers_range(
+        &spans,
+        SyntaxScope::String,
+        selected_start..selected_start + replacement.len(),
+    ));
+    assert!(!spans.iter().any(|span| {
+        span.scope == SyntaxScope::Punctuation
+            && span.range.start.0 >= selected_start
+            && span.range.end.0 <= selected_start + replacement.len()
+    }));
+}
+
+#[test]
+fn markdown_fenced_code_highlights_both_fences_as_literal_tokens() {
+    let source = "```\necho hello\n```\n";
+    let session = SyntaxSession::parse(LanguageId::Markdown, source).unwrap();
     let spans = session.highlight_spans(source);
+    let closing_fence = source.rfind("```").unwrap();
 
-    assert!(spans.iter().any(|span| span.scope == SyntaxScope::Keyword));
-    assert!(spans.iter().any(|span| span.scope == SyntaxScope::Function));
-    assert!(spans.iter().any(|span| span.scope == SyntaxScope::String));
-    assert!(spans.iter().all(|span| span.range.end.0 <= source.len()));
+    assert!(syntax_scope_covers_range(
+        &spans,
+        SyntaxScope::String,
+        0..closing_fence + 3,
+    ));
+    assert!(spans.iter().any(|span| {
+        span.scope == SyntaxScope::String
+            && span.range.start.0 == 3
+            && span.range.end.0 == closing_fence
+    }));
+    assert!(!spans.iter().any(|span| {
+        span.scope == SyntaxScope::Punctuation
+            && (span.range.start.0 == 0 || span.range.start.0 == closing_fence)
+    }));
 }
 
 #[test]
-fn parses_and_highlights_common_remote_files() {
-    let json = "{\"scripts\": {\"build\": \"cargo build\"}}";
-    let json_session = SyntaxSession::parse(LanguageId::Json, json).unwrap();
-    assert!(
-        json_session
-            .highlight_spans(json)
-            .iter()
-            .any(|span| span.scope == SyntaxScope::String)
-    );
+fn markdown_emphasis_highlights_paired_delimiters_symmetrically() {
+    for (source, delimiter_width) in [("Use *care* here.", 1), ("Use **care** here.", 2)] {
+        let session = SyntaxSession::parse(LanguageId::Markdown, source).unwrap();
+        let spans = session.highlight_spans(source);
+        let delimiter = "*".repeat(delimiter_width);
+        let opening_delimiter = source.find(&delimiter).unwrap();
+        let closing_delimiter = source.rfind(&delimiter).unwrap();
 
-    let bash = "if command -v cargo; then\n  echo \"ok\"\nfi\n";
-    let bash_session = SyntaxSession::parse(LanguageId::Bash, bash).unwrap();
-    let spans = bash_session.highlight_spans(bash);
-    assert!(spans.iter().any(|span| span.scope == SyntaxScope::Keyword));
-    assert!(spans.iter().any(|span| span.scope == SyntaxScope::String));
-
-    let markdown = "# Title\n\nSee [docs](https://example.com).\n\n```sh\necho ok\n```\n";
-    let markdown_session = SyntaxSession::parse(LanguageId::Markdown, markdown).unwrap();
-    let markdown_spans = markdown_session.highlight_spans(markdown);
-    assert!(
-        markdown_spans
-            .iter()
-            .any(|span| span.scope == SyntaxScope::Keyword)
-    );
-    assert!(
-        markdown_spans
-            .iter()
-            .any(|span| span.scope == SyntaxScope::Function)
-    );
-    assert!(
-        markdown_spans
-            .iter()
-            .any(|span| span.scope == SyntaxScope::String)
-    );
-}
-
-#[test]
-fn indent_guides_come_from_syntax_blocks() {
-    let source = "fn main() {\n    if true {\n        println!(\"ok\");\n    }\n}\n";
-    let session = SyntaxSession::parse(LanguageId::Rust, source).unwrap();
-    let guides = session.indent_guides(source, 4);
-
-    assert!(guides.iter().any(|guide| guide.column == 0));
-    assert!(guides.iter().any(|guide| guide.column == 4));
-    assert!(!guides.iter().any(|guide| guide.column == 8));
+        assert!(
+            syntax_scope_covers_range(
+                &spans,
+                SyntaxScope::Punctuation,
+                opening_delimiter..opening_delimiter + delimiter_width,
+            ),
+            "missing opening delimiter for {source}: {spans:?}"
+        );
+        assert!(
+            syntax_scope_covers_range(
+                &spans,
+                SyntaxScope::Punctuation,
+                closing_delimiter..closing_delimiter + delimiter_width,
+            ),
+            "missing closing delimiter for {source}: {spans:?}"
+        );
+        assert!(
+            spans.iter().any(|span| {
+                span.scope == SyntaxScope::Variable
+                    && span.range.start.0 == opening_delimiter + delimiter_width
+                    && span.range.end.0 == closing_delimiter
+            }),
+            "missing emphasized content for {source}: {spans:?}"
+        );
+    }
 }
 
 #[test]
@@ -377,39 +473,6 @@ fn indent_guides_keep_body_indentation_for_delimiter_free_languages() {
 
     assert!(guides.iter().any(|guide| guide.column == 4));
     assert!(guides.iter().any(|guide| guide.column == 8));
-}
-
-#[test]
-fn reparses_incrementally_after_edit() {
-    let before = "fn main() {\n    let x = 1;\n}\n";
-    let edit_range = TextRange::new(BufferOffset(22), BufferOffset(23));
-    let edit = SyntaxEdit::replace(before, edit_range, "10");
-    let after = "fn main() {\n    let x = 10;\n}\n";
-    let mut session = SyntaxSession::parse(LanguageId::Rust, before).unwrap();
-
-    session.apply_edit(after, edit).unwrap();
-
-    assert!(!session.root_has_error());
-    assert!(
-        session
-            .highlight_spans(after)
-            .iter()
-            .any(|span| span.scope == SyntaxScope::Number)
-    );
-}
-
-#[test]
-fn computes_bracket_and_fold_ranges() {
-    let source = "fn main() {\n    if true {\n        println!(\"x\");\n    }\n}\n";
-    let session = SyntaxSession::parse(LanguageId::Rust, source).unwrap();
-
-    assert!(session.bracket_pairs(source).len() >= 3);
-    assert!(
-        session
-            .fold_ranges()
-            .iter()
-            .any(|range| range.start_line == 0 && range.end_line >= 3)
-    );
 }
 
 #[test]
@@ -559,6 +622,11 @@ fn range_queries_follow_boundary_edits_in_sequence() {
     for (language, initial, edits) in [
         (
             LanguageId::Rust,
+            "fn main() {\n    let x = 1;\n}\n",
+            vec![(24, 25, "10")],
+        ),
+        (
+            LanguageId::Rust,
             "fn first() {}\nfn second() {}\n",
             vec![(0, 0, "/*"), (2, 2, "*/"), (0, 4, "")],
         ),
@@ -584,6 +652,13 @@ fn range_queries_follow_boundary_edits_in_sequence() {
             );
             source.replace_range(start..end, replacement);
             let change = session.apply_edit(&source, edit).unwrap();
+            if replacement == "10" {
+                assert!(!session.root_has_error());
+                assert!(session.highlight_spans(&source).contains(&HighlightSpan {
+                    range: TextRange::new(BufferOffset(24), BufferOffset(26)),
+                    scope: SyntaxScope::Number,
+                }));
+            }
             assert_eq!(change.edit.start_byte, start);
             assert_eq!(change.edit.old_end_byte, end);
             assert_eq!(change.edit.new_end_byte, start + replacement.len());

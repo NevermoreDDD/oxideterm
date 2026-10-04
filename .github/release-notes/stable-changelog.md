@@ -3,6 +3,574 @@
 Stable releases are listed newest first. The release workflow uses each versioned
 section as the detailed changelog attached to the corresponding GitHub Release.
 
+## 2.2.0
+
+### 中文
+
+OxideTerm 2.2.0 新增了通知与审计工作区、加密会话录制和可复用的 TOTP 验证码凭据，让连接、命令、文件操作及自动化任务可以在同一个应用中回顾。同时，本版本加入终端粘贴编辑，完善本地会话管理和快捷命令分组，提供 Linux Nix 安装方式，并修复云同步闪退、Windows 终端输出和 Linux 录制恢复等问题。
+
+#### 📋 通知与审计工作区
+
+- 通知中心扩展为“通知与审计”，提供通知、审计记录、会话汇总和会话录制入口。审计开关直接显示在页面顶部，**默认关闭**；开启后记录后续操作，关闭后仍可查看已经保存的记录。
+- 审计记录可以按时间、类别、级别、事件来源和结果筛选，并按内容、连接、会话、本机账号或远程账号等字段搜索。记录详情展示操作过程、耗时、结果依据，以及可获得的退出码或传输字节数。
+- 会话视图汇总命令、文件操作、其他操作和连接次数，支持继续查看该会话的相关记录。操作详情可沿父子关系查看子操作，方便追踪一次请求触发的后续任务。
+- 事件来源区分用户、命令栏、快捷命令、广播、AI、MCP、插件、命令行和系统。操作结果区分已发送、成功、失败、取消、部分完成、中断和未知，保留判断结果所依据的协议响应、退出码或生命周期事件。
+- 操作记录的默认保留策略为 **90 天、512 MiB**。保留天数和容量均可直接输入，支持 1–3650 天和 1 MiB–64 GiB；达到保留条件后自动清理，也可手动清除记录。
+- 支持按当前筛选范围导出 JSON 或 CSV 摘要。需要命令、路径、账号和端点等详情时，可单独选择“导出受保护详情”，确认后生成明文文件。
+
+使用方法：打开侧栏的“通知与审计”，在顶部启用审计，再通过筛选和会话汇总查看操作。审计数据在本机保存，敏感详情加密存储。
+
+#### 🔎 覆盖连接、文件和自动化操作
+
+- SSH 审计覆盖主机密钥验证、认证尝试、交互式认证、连接状态、共享连接使用关系和重连阶段。终端与文件浏览等功能共用连接时，记录仍保留各自的会话、通道和实际连接代次。
+- 本地终端、Telnet、Mosh、串口以及远程桌面的连接和退出过程接入审计；串口控制、Telnet 控制、远程桌面剪贴板与文件传输等操作也有相应记录。
+- 终端命令、快捷命令、广播发送和 tmux 操作可以追溯到发起入口。命令完成状态使用可获得的 Shell 集成或退出码信息，单纯发送输入会保留“已发送”这一结果。
+- 文件审计覆盖本地和远程文件浏览、搜索、预览、打开、创建目录、复制、移动、重命名、删除、上传下载及编辑器保存，也记录传输的暂停、恢复、取消和中断，以及文件冲突处理。
+- 端口转发的创建、启动、停止、暂停、恢复和规则变更接入审计；主机面板中的进程、服务、容器、计划任务及日志查询等操作保留对应目标和结果。
+- 设置、连接配置、密钥与凭据管理、云同步、备份恢复、应用锁、便携保险库、更新和诊断报告等操作接入记录。凭据管理记录操作及结果，省略密码、私钥和令牌内容。
+- AI 工具调用、后台任务、MCP 请求及权限变更、插件操作和知识库管理可以关联到具体请求。授权、拒绝、取消和执行结果保留各自状态，便于了解自动化任务执行到了哪一步。
+
+#### 🎞️ 加密会话录制与回放
+
+- 新增本地终端、SSH、Telnet、Mosh 和串口的审计录制，保存终端显示的输出与尺寸变化。**输出录制默认关闭**，首次开启时会单独确认。
+- 录制内容在本地加密保存，不参与云同步；不采集键盘输入和终端文件传输载荷。终端显示出的敏感内容仍可能进入录制，开启时会明确提示。
+- 录制页面支持播放、暂停、从头播放、时间定位和倍速播放，并显示录制中、已结束、已中断、不完整或已过期等状态。回放按需读取内容，长录制无需一次载入全部输出。
+- 录制使用有容量上限的队列与后台写入。存储处理不及时会向终端读取路径传递背压，输入、取消和关闭继续获得处理；输出及尺寸变化保持原有顺序，采集缺口会明确标记。
+- 修复 Linux 在录制队列恢复容量后，PTY 读取未重新启用、持续输出停住的问题。
+- 录制内容默认保留 **7 天、2 GiB**，可独立于操作记录设置保留时间和容量。
+
+使用方法：先启用审计，再进入“会话录制”开启“记录终端输出”。需要回顾时，从录制列表打开对应会话。
+
+#### 🔐 可复用的 TOTP 验证码凭据
+
+- “设置 → 凭据”统一放置提权凭据和动态验证码凭据。TOTP 支持 Base32 密钥及 `otpauth://` 链接，并支持 SHA-1、SHA-256、SHA-512、6 位或 8 位验证码和自定义更新周期。
+- 一个验证码凭据可以供多个 SSH 连接使用，目标主机和各级跳板分别选择自己的凭据。它可以配合已有密码、密钥或交互式认证使用。
+- 自动填写仅处理 SSH 认证阶段的提示。默认识别 `MFA CODE`、`Verification code`、`OTP` 等验证码提示，也支持自定义正则表达式；只有一个明确匹配的隐藏输入项时才自动填写。
+- 同一轮认证包含其他问题时，先收集人工回答，再生成当前验证码。每次认证只自动提交一次，服务器继续追问时转为人工输入；多个连接需要人工验证时会排队显示。
+- 密钥存入受保护存储，连接配置只保存凭据引用。凭据可编辑、停用并被多个连接共用，仍有连接绑定时会阻止删除。
+- 加密连接文件和云同步保留凭据及连接之间的关系，仅在选择包含敏感凭据时携带密钥。接收端将密钥存入自己的受保护存储；仅同步元数据时，不会把旧密钥当成已经更新的新密钥。
+
+使用方法：在“设置 → 凭据”中添加动态验证码凭据，然后在 SSH 连接或跳板的编辑页面选择它。
+
+#### ✍️ 终端粘贴前编辑
+
+- 新增“编辑后粘贴”，使用应用现有编辑器修改剪贴板中的命令或脚本，支持多行编辑、选择和撤销。多行粘贴确认流程也可以进入编辑，确认后才发送到终端。
+- 提供明确的代码围栏移除操作，方便处理从 Markdown 文档或对话中复制的代码块。仅在用户选择该操作时移除包裹代码的围栏。
+- 打开编辑器后未修改内容，或撤销全部修改时，保留原始粘贴内容及换行；编辑后的内容保留来源的 CRLF 换行约定。
+
+#### 💻 本地会话与远程终端管理
+
+- 已保存的本地终端配置在侧栏拥有独立的会话条目，按配置组织正在运行的终端；可以折叠、展开，并从该配置继续新建终端。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- 选择本地会话时可以聚焦其运行中的终端，移除会话会关闭该配置对应的终端并记住侧栏隐藏状态；从会话管理器重新打开配置后，会再次显示并获得焦点。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- 修复 Windows 将暂时没有输出的 PTY 读取误判为结束，导致后续终端输出不再显示的问题。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- SSH、Telnet、Mosh 和串口会话结束后保留终端窗格与已有输出，便于查看退出原因或最后的错误信息；本地命令行环境保留原有退出自动关闭行为。
+- 打开会话不再改变用户选择的侧栏可见状态，退出专注模式时恢复原有侧栏选择。
+
+#### 🗂️ 快捷命令分组
+
+- 支持删除“系统”“网络”“文件”“Docker”等预设分组，组内命令会移动到“自定义”分组。“自定义”作为接收命令的默认分组保留。
+- 在快捷命令管理页拖动分组左侧的手柄即可调整顺序，重启后保持排序。
+- 删除和排序在保存成功后生效；保存失败时保留原有分组及命令状态。
+
+#### 🛠️ 界面、输入与同步修复
+
+- 修复云同步预览渲染中的状态借用冲突，解决相关同步及本地导出流程可能触发的闪退。
+- 修复终端视口短暂改变后恢复原尺寸，仍应用过期尺寸请求的问题，避免侧栏动画等操作留下错误的终端行列数。
+- 修复相邻滚动区域共用交互状态导致滚动异常的问题，让各区域保持独立滚动。
+- 终端右键菜单和串口传输菜单会随焦点离开而关闭，打开串口传输菜单时先聚焦对应窗格。
+- 手动 X/Y/ZMODEM 操作集中到串口控制栏的“二进制传输”；SSH 等终端继续在检测到远端传输程序后提示选择文件或目录。传输失败提示区分超时、协议错误、文件读写和文件过大等原因。
+- 修复替换已保存密码时首个字符与光标位置不同步的问题，以及会话日志遇到连续回车或跨数据块回车时产生多余空行的问题。
+- 终端与 IDE 的中文／CJK 字体设置均支持手动填写自定义字体名称。笔记页面未使用背景图片时恢复不透明背景。
+- 审计事件、会话和录制列表的行背景及分隔线铺满可用宽度，搜索与保留策略字段使用现有输入框交互。
+- Windows 安装脚本明确采用 UTF-8 编码，修复本地化安装提示在系统代码页下显示异常的问题。
+
+#### 🐧 Linux Nix 支持与项目文档
+
+- 新增 Linux x86_64 和 aarch64 的 Nix Flake，提供应用包、命令行入口、开发环境、overlay 与 NixOS 模块，可使用 `nix build .#oxideterm`、`nix run .#oxideterm` 或 `nix develop`。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)）
+- Nix 安装由应用识别，更新交由 Nix 管理；包内包含运行所需资源、辅助程序和桌面集成，并完善 Linux 视频预览依赖处理。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)）
+- 更新 Nix 使用的 SSH 依赖哈希，加入打包校验，并补充 Nix 构建、开发及依赖维护文档。（PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)）
+- Nix 校验现由独立工作流执行，按相关文件变更触发，也可手动运行。
+- 各语言 README 增加贡献者墙及内存占用对比说明，更新了相关用户指南。
+
+#### 👥 贡献者
+
+感谢以下外部贡献者参与本次更新：
+
+- @dzzzc：完善已保存本地会话的侧栏管理、移除与聚焦行为，并修复 Windows PTY 后续输出丢失的问题。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）
+- @sgnay：引入 Linux Nix 打包、NixOS 集成及 Nix 更新识别，并完善依赖哈希、打包校验和维护文档。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)、PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)）
+
+#### 📌 使用与升级说明
+
+- 审计与会话输出录制均需主动开启。操作记录和输出录制的保留策略分别管理，关闭审计不会删除已有记录。
+- 审计记录反映 OxideTerm 能观察到的操作及结果；本机账号表示操作系统会话，命令退出状态取决于对应协议或 Shell 集成提供的信息。
+- 选择导出受保护详情会生成明文文件；会话录制则继续在本机加密保存，不随云同步上传。
+- Nix 安装请通过 Nix 更新；其他安装方式继续使用对应平台的安装包或应用内更新。
+
+### English
+
+OxideTerm 2.2.0 introduces a Notification & Audit workspace, encrypted session recordings, and reusable TOTP credentials, bringing connection history, commands, file operations, and automated tasks into one place. This release also adds editing before terminal paste, improves local session management and quick-command groups, introduces Linux Nix packaging, and fixes cloud-sync crashes, Windows terminal output, and Linux recording recovery.
+
+#### 📋 Notification & Audit Workspace
+
+- Expanded the notification center into Notification & Audit, with views for notifications, audit records, session summaries, and session recordings. The audit switch is visible at the top of the page and is **off by default**. Enabling it captures subsequent operations; existing records remain readable after it is turned off.
+- Added filtering by time, category, severity, source, and outcome, plus searches for content, connections, sessions, local accounts, and remote accounts. Record details show operation history, duration, the basis for an outcome, and exit codes or transferred bytes when available.
+- Added session summaries with command, file-operation, other-operation, and connection counts. Open a session's related records or follow parent and child operations to trace the work triggered by a request.
+- Distinguished user actions, the command bar, quick commands, broadcasts, AI, MCP, plugins, CLI commands, and system activity. Outcomes distinguish sent, succeeded, failed, cancelled, partially completed, interrupted, and unknown, with their supporting protocol response, exit code, or lifecycle event.
+- Set default operation retention to **90 days and 512 MiB**. Days and capacity accept direct numeric input, from 1–3650 days and 1 MiB–64 GiB. Records are pruned according to these limits and can also be cleared manually.
+- Added JSON and CSV summary export for the current filters. A separate protected-details export includes commands, paths, accounts, and endpoints in a plaintext file after confirmation.
+
+To use it, open Notification & Audit from the sidebar, enable auditing at the top, and use filters or session summaries to review activity. Audit data stays on the device, with sensitive details stored encrypted.
+
+#### 🔎 Connection, File, and Automation Coverage
+
+- Added SSH auditing for host-key verification, authentication attempts, interactive authentication, connection state, shared-connection consumers, and reconnect stages. Terminals and file browsers sharing a connection retain their own session, channel, and physical-connection identities.
+- Added connection and exit records for local terminals, Telnet, Mosh, serial sessions, and remote desktops, along with serial controls, Telnet controls, and remote-desktop clipboard and file transfers.
+- Traced terminal commands, quick commands, broadcasts, and tmux operations back to their entry point. Command completion uses available shell integration or exit-code evidence; sending input alone retains a sent outcome.
+- Covered local and remote file browsing, search, preview, opening, directory creation, copying, moving, renaming, deletion, uploads, downloads, and editor saves. Records also include transfer pause, resume, cancellation, interruption, and file-conflict decisions.
+- Added auditing for port-forward creation, start, stop, suspension, restoration, and rule changes, plus host-panel operations involving processes, services, containers, scheduled tasks, and log queries.
+- Added records for settings, connection profiles, keys and credentials, cloud sync, backup and restore, app lock, the portable vault, updates, and support reports. Credential management records actions and outcomes while omitting passwords, private keys, and tokens.
+- Associated AI tool calls, background tasks, MCP requests and permission changes, plugin operations, and knowledge-base management with their originating requests. Authorization, denial, cancellation, and execution outcomes retain distinct states.
+
+#### 🎞️ Encrypted Session Recording and Playback
+
+- Added audit recordings for local terminals, SSH, Telnet, Mosh, and serial sessions, capturing displayed terminal output and size changes. **Output recording is off by default** and requires a separate confirmation when enabled.
+- Stored recordings locally with encryption and excluded them from cloud sync. Keyboard input and terminal file-transfer payloads are not captured. Sensitive information displayed in terminal output can appear in recordings, as explained when recording is enabled.
+- Added play, pause, restart, seeking, and playback-speed controls, with active, finished, interrupted, partial, and expired states. Playback reads content as needed instead of loading an entire long recording at once.
+- Used bounded recording queues and background writes. Slow storage applies backpressure to terminal reads while input, cancellation, and closure continue to be serviced. Output and resize events retain their order, and capture gaps are identified explicitly.
+- Fixed Linux PTY reads remaining disabled after recording capacity became available again, which could leave sustained output stalled.
+- Set default recording retention to **7 days and 2 GiB**, configurable independently of operation-record retention.
+
+To use it, enable auditing, open Session Recordings, and enable Record Terminal Output. Open a recorded session from the list to review it.
+
+#### 🔐 Reusable TOTP Credentials
+
+- Brought privilege credentials and TOTP credentials together under Settings → Credentials. TOTP accepts Base32 secrets and `otpauth://` URIs, with SHA-1, SHA-256, SHA-512, six or eight digits, and a configurable period.
+- Allowed multiple SSH connections to share one TOTP credential, with an explicit selection for the target host and each jump host. TOTP works alongside existing password, key, or interactive authentication.
+- Limited autofill to SSH authentication prompts. Defaults recognize prompts such as `MFA CODE`, `Verification code`, and `OTP`; custom regular expressions are supported. Autofill requires exactly one matching hidden input.
+- Collected manual answers to other questions before generating a current code. Each authentication attempt submits a code automatically once, then uses manual input for further challenges. Concurrent manual authentication prompts are queued.
+- Stored secrets in protected storage and kept credential references in connection profiles. Credentials can be edited, disabled, and shared, with deletion blocked while a saved connection still uses them.
+- Preserved credential bindings in encrypted connection archives and cloud sync. Secrets are included only when sensitive credentials are selected and are restored into the receiving device's protected storage. Metadata-only synchronization does not reuse an old seed as though it were a newly rotated one.
+
+To use it, add a TOTP credential under Settings → Credentials, then select it when editing an SSH connection or jump host.
+
+#### ✍️ Edit Before Terminal Paste
+
+- Added Edit Before Paste using the existing editor, with multiline editing, selection, and undo. The multiline paste-confirmation flow can also open the editor; content is sent only after confirmation.
+- Added an explicit code-fence removal action for code copied from Markdown documents or conversations. Surrounding fences are removed only when that action is selected.
+- Preserved original clipboard content and line endings when no edits remain, including after undoing all changes. Edited content retains the source's CRLF convention.
+
+#### 💻 Local Sessions and Remote Terminal Management
+
+- Gave saved local terminal profiles persistent sidebar session entries that group their running terminals, support expand and collapse, and can open additional terminals with the same startup configuration. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- Focused a running terminal when selecting its local session. Removing a session closes that profile's terminals and remembers its hidden sidebar state; reopening the profile from the session manager restores visibility and focus. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- Fixed Windows treating a temporarily empty PTY read as end-of-file, which prevented later terminal output from appearing. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- Kept SSH, Telnet, Mosh, and serial terminal panes and their output available after a session ends, making final errors and exit messages readable. Local shells retain their existing automatic close-on-exit behavior.
+- Preserved the chosen sidebar visibility when opening sessions and restored that choice when leaving Zen mode.
+
+#### 🗂️ Quick-Command Groups
+
+- Allowed removal of preset groups such as System, Network, Files, and Docker. Their commands move into Custom, which remains the default destination group.
+- Added drag handles for reordering groups in the quick-command manager, with the order retained after restart.
+- Applied deletion and reordering only after saving succeeds. A failed save preserves the previous groups and commands.
+
+#### 🛠️ Interface, Input, and Sync Fixes
+
+- Fixed a state-borrow conflict while rendering cloud-sync previews that could crash related synchronization and local-export flows.
+- Cancelled obsolete terminal resize requests when the viewport returned to its original size, preventing sidebar animations and similar changes from leaving the terminal with incorrect dimensions.
+- Fixed adjacent scroll areas sharing interaction state, keeping their scrolling independent.
+- Dismissed terminal context menus and serial-transfer menus when focus leaves the pane, and focused the relevant serial pane before opening its transfer menu.
+- Consolidated manual X/Y/ZMODEM actions under Binary Transfer in the serial toolbar. SSH and other terminals continue to prompt for files or directories after detecting a remote transfer program. Failure notices now distinguish timeouts, protocol errors, file I/O, and oversized files.
+- Fixed first-character caret positioning when replacing saved passwords, and extra session-log lines caused by repeated or chunk-split carriage returns.
+- Added custom Chinese/CJK font names to both terminal and IDE settings. Restored an opaque notes background when no background image is configured.
+- Made audit-event, session, and recording rows and separators fill the available width, and used the existing input controls for audit search and retention settings.
+- Explicitly encoded Windows installer scripts as UTF-8 to preserve localized prompts across system code pages.
+
+#### 🐧 Linux Nix Support and Documentation
+
+- Added a Linux x86_64 and aarch64 Nix flake with application packages, a CLI entry point, a development shell, an overlay, and a NixOS module. Use `nix build .#oxideterm`, `nix run .#oxideterm`, or `nix develop`. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623))
+- Recognized Nix installations and delegated updates to Nix. Packages include runtime resources, helpers, and desktop integration, with improved Linux video-preview dependency handling. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623))
+- Updated the Nix SSH dependency hash, added package verification, and documented Nix builds, development, and dependency maintenance. (PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632))
+- Moved Nix validation into a dedicated workflow triggered by relevant file changes or manual dispatch.
+- Added contributor walls and idle-memory comparisons to the localized READMEs and updated related user guides.
+
+#### 👥 Contributors
+
+Thank you to the external contributors to this release:
+
+- @dzzzc: Improved saved local-session sidebar management, removal, and focus, and fixed missing Windows PTY output after an empty read. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631))
+- @sgnay: Introduced Linux Nix packaging, NixOS integration, and Nix update detection, then improved dependency hashes, package verification, and maintenance documentation. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623), PR [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632))
+
+#### 📌 Usage and Upgrade Notes
+
+- Auditing and session-output recording require explicit activation. Operation records and recordings have separate retention settings; turning auditing off preserves existing records.
+- Audit records describe operations and outcomes observable by OxideTerm. The local account identifies the operating-system session, and command completion depends on information available from the protocol or shell integration.
+- Exporting protected details creates a plaintext file. Session recordings remain encrypted on the device and are excluded from cloud sync.
+- Update Nix installations through Nix. Other installations continue to use their platform packages or the in-app updater.
+
+## 2.1.0
+
+### 中文
+
+OxideTerm 2.1.0 带来了跨主机混合分屏、可重复使用的本地终端配置、更直观的主题预览，以及可折叠的串口和 tmux 控制栏，同时改善了持续输出处理、AI 消息编辑和原生窗口体验。祝大家中秋节快乐！感谢你让 OxideTerm 成为日常工作的一部分。
+
+![OxideTerm 2.1.0 中秋更新海报](https://raw.githubusercontent.com/AnalyseDeCircuit/oxideterm/d7f50e8b633fc0c01cd0ad600e4c2279a16e36db/docs/media/releases/oxideterm-2.1.0-mid-autumn.png)
+
+#### 🪟 跨主机、跨窗口的混合工作区
+
+- 一个标签页现在最多可以容纳四个窗格。本地、SSH、Mosh 终端可以与 SFTP、编辑器、端口转发页面组合，也可以来自不同主机。例如，本地开发终端、远程终端、远程文件和编辑器可以放在同一个布局中协作。
+- 新增按边缘放置标签页的交互。将一个标签拖入另一个页面的内容区域，在左、右、上、下边缘松开，即可放到目标窗格旁边。拖动过程中会显示落点预览，组合后的分隔线仍可调整。
+- 组合工作区可以整体移到独立窗口，也可以返回主窗口，保留正在运行的会话和分屏布局。移动页面时保留原有会话与页面身份，无需重新建立连接。
+- 文件浏览、传输对话框、端口转发操作、键盘焦点和输入路由都与发起操作的窗格及窗口关联。多个文件或转发页面可以保留各自的工作状态；已关闭页面的延迟操作不会误作用到其他页面。
+- 窗格相关命令、文件操作和 AI 上下文会跟随混合工作区中当前聚焦的页面。读取多个终端的上下文时，会区分各窗格对应的会话、目标主机和运行环境。
+- 串口终端因设备独占访问继续使用独立标签页。混合工作区支持上述终端与工具页面，本次没有将所有应用页面都开放为可分屏窗格。
+
+使用方法：先打开需要的终端或工具页面，将其中一个标签拖到另一个页面的边缘，再按需要继续组合。希望将整组工作放到另一块屏幕上时，可以把组合标签移到新窗口。
+
+#### 💻 可保存的本地终端配置
+
+- 本地终端现在也可以像远程连接一样保存配置，记录名称、命令行环境、起始目录、分组、图标、图标颜色和背景色，方便重新打开常用项目。
+- 支持仅连接、仅保存、保存并连接三种操作。仅保存时不要求当前机器已经具备对应环境或目录；实际打开时会先检查启动目标，明确提示环境或目录不可用，避免先创建一个注定失败的会话。
+- 本地终端配置已接入会话管理器的搜索、分组、编辑、删除和批量分组操作。打开保存的配置时，也会记录其使用情况。
+- 云同步的选择与预览已包含本地终端配置，支持字段差异、冲突合并和删除记录处理。同步的是启动配置，打开它的机器仍需具备对应的命令行环境和目录。
+- 新建本地分屏会继承来源终端的启动环境，并在能够取得当前目录时使用该目录。WSL 的起始目录通过其启动参数传入，包含空格的路径也会作为完整参数处理。
+- 活动会话侧栏将本地终端集中到一个“本地终端”分组中，数量按正在运行的本地会话统计。每个子项保留自身标题和图标，“新建终端”入口放在现有终端列表底部。
+
+使用方法：在新建连接中选择本地终端，设置命令行环境和工作目录，填写名称并保存。以后即可从会话管理器重新打开，不必每次重复选择。
+
+#### 🎨 主题预览与连接图标
+
+- 主题列表新增配色色板，并与终端示例预览联动。鼠标悬停时可以先查看主题效果，点击或确认后才应用到工作区。
+- 支持使用上下方向键、Home、End 浏览并预览主题；Enter 或空格确认，Escape 或 Tab 关闭列表而不应用预览。打开列表时会定位到当前主题。
+- 自定义主题预览读取实际配置的背景、前景、光标及所展示的 ANSI 颜色。预览标签与操作提示也会跟随应用语言。
+- 新增保留原始色彩的 Ubuntu、Debian、Arch Linux、Linux Mint、Gentoo、Rocky Linux 和 NixOS 发行版图标。SSH 会话可以根据识别到的远程发行版选择图标；明确指定的自定义图标优先显示。
+- SSH 连接属性中的“自动”和“自定义”图标选项更加明确。选择后自动收起图标列表，自动模式会解释图标与远程系统的关系。发行版图标的来源说明与许可文件已包含在安装包中。
+
+#### 🎛️ 更清爽、可折叠的串口与 tmux 控制栏
+
+- 将密集的胶囊按钮改为轻量文字控件与短竖线分隔，与终端命令栏的风格保持一致。已开启的设置、当前会话和当前窗口使用主题强调色，不可用操作保持淡化显示。
+- 工具栏分为信息行和操作行。串口上行显示连接名称、设备参数、连接状态和端口状态，下行提供发送模式、显示模式、收发换行、回显、刷新、Break、DTR、RTS。tmux 控制模式上行显示会话、窗口和状态，下行提供重命名、命令、切换、新建、分屏、尺寸调整、关闭及分离操作。
+- 信息行最左侧新增固定折叠箭头，可隐藏或恢复下方操作行，并始终保留连接信息。每个窗格在本次运行期间独立保留展开状态，终端可用高度随工具栏同步调整。
+- 两行可以独立横向滚动，折叠箭头保持可见。终端内容边界和 tmux 消息位置也会跟随当前工具栏高度更新。
+- 修复侧栏终端子项的选中与悬停背景在右侧超出父级的问题。各连接类型共用的终端条目现在保留左侧树形缩进，并在不同侧栏宽度下与父级右边缘对齐。
+
+#### ⚡ 终端输出与画面快照性能
+
+- 对长 CSI 参数序列、DEC 线条字符和 OSC 内容采用批量处理，减少重复的逐字节操作。
+- macOS 新增有容量上限的 PTY 预读，改善持续大量输出；构建画面快照时复用对比度计算结果及共享元数据。
+- 修复 SSH 解析器忙碌时，界面读取 tmux 状态仍需等待解析锁的问题。延后的输出会继续安排重绘，最后一段输出无需等待下一个数据包才能显示。
+
+**OxideTerm 2.1.0 实测结果：**每项测试处理 **16 MiB** 数据，**预热 1 次，正式测量 3 次**，下表列出耗时和吞吐量各自的中位数。测试时间：**2026-09-25 17:35:10 UTC**。
+
+| 测试场景 | 耗时中位数（ms） | 吞吐量中位数（MiB/s） |
+| --- | ---: | ---: |
+| 纯文本（`plain`） | 111.104 | 144.009 |
+| ANSI（`ansi`） | 131.939 | 121.268 |
+| Unicode（`unicode`） | 146.536 | 109.188 |
+| 长 CSI 序列（`long-csi`） | 124.260 | 128.763 |
+
+下图与此前发布的基准结果并列展示，金色为 2.1.0。本测试测量进程到伪终端的吞吐量，不代表画面帧率或 GPU 呈现速度。
+
+![OxideTerm 历次版本终端吞吐量对比 · 中秋版](https://raw.githubusercontent.com/AnalyseDeCircuit/oxideterm/34657ab9a2ffc0975660283c72f6a9618ab4ef42/.github/release-notes/assets/terminal-performance-2.1.0-comparison.png)
+
+#### 🤖 AI 消息编辑与输入
+
+- 历史消息支持多行编辑，包括主动换行、自动折行和有高度上限的纵向编辑区域。长消息编辑时会保持光标可见。
+- 鼠标定位、文本选择、上下移动光标和输入法候选位置与实际显示的文本行保持一致，已通过针对 Unicode、空行、自动折行及主动换行边界的检查。
+- 修正 AI 侧栏输入框按实际折行定位鼠标的问题。在混合工作区中，AI 上下文和工具目标跟随当前内容页面，并区分各终端的运行环境。
+
+#### 🛠️ 原生窗口与安装修复
+
+- 启动阶段尚未获得显示器信息时，保留有效的已保存窗口尺寸，包括 Wayland 启动路径。临时启动尺寸不会再提前裁小保存的窗口；已知显示器边界限制和首次启动默认值继续生效。
+- Windows 从托盘恢复时仅对最小化窗口执行还原。隐藏前处于最大化或全屏的窗口重新显示时，会保留原有尺寸和状态。
+- Windows 安装器会在覆盖所选安装目录前检查占用文件的应用，先询问是否请求正常关闭，再确认文件已释放。关闭失败可重试，取消操作或静默安装发生占用冲突时会停止；分阶段自动更新流程保持原有行为。
+- 安装提示及新增界面文案已同步维护现有 11 种语言。
+
+#### 🧪 验证与平台范围
+
+- 开发验证覆盖终端解析、网格行为、真实本地 PTY 协议回复与退出清理、SSH 输出绘制、tmux 交互、工具栏折叠与恢复、主题预览数据和侧栏行布局。最终终端视图测试通过 221 项，另有 1 项手动测试未纳入常规执行；应用全目标检查通过。此前性能验证还通过了终端和网格测试、VTE 全特性及固定缓冲区配置测试，以及原生应用构建。
+- 本次性能测量来自 Apple M5 上的 macOS 环境。Windows 原生运行和 Ubuntu Wayland 环境下的平台专项实机验证仍待完成，自动化与无界面检查不能替代这些平台验证。
+
+### English
+
+OxideTerm 2.1.0 expands the workspace with mixed panes across hosts, reusable local terminal profiles, richer theme previews, and collapsible serial and tmux control bars. It also improves sustained terminal output processing, AI message editing, and native window behavior. Happy Mid-Autumn Festival! Thank you for making OxideTerm part of your everyday work.
+
+#### 🪟 Mixed Workspaces Across Hosts and Windows
+
+- Added mixed workspaces with up to four panes in one tab. Local, SSH, and Mosh terminals can sit alongside SFTP, IDE, and port-forwarding pages, including pages connected to different hosts. A local development shell, a remote shell, remote files, and an editor can now share one working layout.
+- Added edge-based tab placement. Drag a tab into another tab's content and drop it near the left, right, top, or bottom edge to place it beside the destination pane. A placement preview shows where it will land, and existing split dividers remain adjustable.
+- Allowed a combined workspace to move into a separate native window and return to the main window while retaining its live sessions and split layout. Moving a page preserves its session and page identity rather than creating another connection.
+- Kept file browsing, transfer dialogs, forwarding controls, keyboard focus, and input routing associated with their originating pane and window. Multiple SFTP or forwarding pages can retain their own working state, and a delayed action from a closed page does not fall through to another page.
+- Updated pane-aware commands, file actions, and AI context to follow the focused content page within a mixed workspace. Multi-terminal context distinguishes each pane's session, target, and environment.
+- Serial terminals remain separate tabs because their device access is exclusive. Mixed workspaces support the terminal and page types listed above; this release does not turn every application page into a splittable pane.
+
+To try it: open the terminals or tool pages you need, drag one tab to an edge of another page, then repeat until the layout contains the desired panes. Move the combined tab to a new window when you want that workspace on another display.
+
+#### 💻 Reusable Local Terminal Profiles
+
+- Added saved local terminal profiles alongside saved remote connections. Profiles retain a name, command-line environment, starting directory, group, icon, foreground color, and icon background, making frequently used projects easier to reopen.
+- Added connect-only, save-only, and save-and-connect flows. Saving a profile does not require its selected environment or directory to exist on the current machine; opening it validates the launch target and reports an unavailable environment or directory before registering a failed session.
+- Integrated local profiles with session-manager search, groups, editing, deletion, and batch group operations. Opening a saved profile also records its usage through the existing profile store.
+- Included local profiles in cloud-sync selection and previews, including field-level changes, conflict merging, and deletion records. A synchronized profile remains a launch configuration; the required command-line environment and directory must be available on the machine that opens it.
+- Made new local splits inherit the source terminal's launch environment and use its known current directory when available. WSL starting directories are passed through the WSL launch arguments, including paths containing spaces.
+- Grouped running local terminals under one Local Terminal entry in the active-session sidebar. The count reflects running local sessions, each child keeps its own title and icon, and New Terminal appears below the existing terminals.
+
+To create a reusable entry, choose Local Terminal in the connection form, select the environment and working directory, give it a name, and save it. Open it later from the session manager like other saved configurations.
+
+#### 🎨 Theme Discovery and Connection Icons
+
+- Added palette swatches to the theme selector and a live terminal preview. Hovering a theme previews its colors without applying it to the workspace; clicking or confirming the selection applies it.
+- Added keyboard preview navigation with Up, Down, Home, and End. Enter or Space confirms the previewed theme; Escape or Tab closes the selector without applying the preview. Opening the selector brings the current selection into view.
+- Made custom-theme previews use their configured background, foreground, cursor, and displayed ANSI colors. Preview labels and guidance now follow the selected application language.
+- Added color-preserving Linux distribution icons for Ubuntu, Debian, Arch Linux, Linux Mint, Gentoo, Rocky Linux, and NixOS. SSH sessions can select an icon from the detected remote distribution, while an explicitly chosen custom icon takes precedence.
+- Clarified Automatic and Custom icon choices in SSH connection properties. Selecting either mode closes the icon picker, and the automatic mode explains how the remote system determines the icon. Distribution artwork attribution and licenses are included in packaged builds.
+
+#### 🎛️ Clearer Serial and tmux Control Bars
+
+- Replaced the dense capsule-button presentation with lightweight text controls and short vertical separators, matching the terminal command bar's visual style. Active settings, sessions, and windows use the theme's accent color; unavailable operations remain visually disabled.
+- Split each toolbar into two rows. Serial connection details, device parameters, connection state, and port presence appear above the send/display modes, line-ending settings, local echo, refresh, Break, DTR, and RTS controls. In tmux control mode, sessions, windows, and status appear above rename, command, navigation, creation, split, resize, close, and detach actions.
+- Added a fixed disclosure arrow at the far left of the information row. It hides or restores the lower action row while keeping connection information visible. Each pane retains its own expanded state during its lifetime, and the terminal viewport grows or shrinks with the toolbar.
+- Gave the two rows independent horizontal scrolling, with the disclosure arrow staying reachable. Updated the terminal's content bounds and tmux message placement to account for the current toolbar height.
+- Aligned child-terminal selection and hover backgrounds with their parent row's right edge across connection types, retaining the left tree indentation at narrow and wide sidebar sizes.
+
+#### ⚡ Terminal Output and Snapshot Performance
+
+- Batched long CSI parameter sequences, DEC line-drawing character runs, and OSC payload collection to reduce repeated per-byte work.
+- Added bounded PTY read-ahead on macOS for sustained output, and reused contrast-adjusted styles and shared metadata when building terminal snapshots.
+- Fixed an SSH rendering stall caused by reading tmux state while the parser was busy. Deferred output continues to schedule a redraw so the final received output can appear without waiting for another packet.
+
+**OxideTerm 2.1.0 benchmark:** each workload processes **16 MiB**, with **1 warm-up and 3 measured runs**. The table reports the median elapsed time and median throughput. Run time: **2026-09-25 17:35:10 UTC**.
+
+| Workload | Median elapsed time (ms) | Median throughput (MiB/s) |
+| --- | ---: | ---: |
+| Plain text (`plain`) | 111.104 | 144.009 |
+| ANSI (`ansi`) | 131.939 | 121.268 |
+| Unicode (`unicode`) | 146.536 | 109.188 |
+| Long CSI (`long-csi`) | 124.260 | 128.763 |
+
+The chart places these results alongside the previously published benchmarks, with 2.1.0 highlighted in gold. These measurements cover process-to-PTY throughput, not frame rate or GPU presentation.
+
+![OxideTerm terminal throughput across releases — Mid-Autumn edition](https://raw.githubusercontent.com/AnalyseDeCircuit/oxideterm/34657ab9a2ffc0975660283c72f6a9618ab4ef42/.github/release-notes/assets/terminal-performance-2.1.0-comparison.png)
+
+#### 🤖 AI Message Editing and Input
+
+- Added multiline editing for historical messages, including explicit newlines, visual wrapping, and a bounded vertical editing area. Long edits keep the caret visible instead of being squeezed into a single-line field.
+- Aligned mouse placement, selection, vertical caret navigation, and IME candidate positioning with the displayed text rows. Unicode text, empty lines, and both soft-wrap and explicit-newline boundaries are covered by focused checks.
+- Corrected the AI sidebar composer's hit testing to use its visual wrapped lines. In mixed workspaces, AI context and tool targeting follow the active content page and identify individual terminal environments.
+
+#### 🛠️ Native Window and Installer Fixes
+
+- Preserved valid saved window dimensions when display information is not yet available during startup, including the Wayland startup path. A temporary bootstrap size no longer prematurely clips the saved size; known-display constraints and first-launch defaults remain in place.
+- Updated Windows tray restoration to restore only minimized windows. A hidden maximized or fullscreen window keeps its existing size and state when shown again.
+- Added a Windows installer preflight for applications holding files in the selected installation directory. The installer asks before requesting a normal shutdown, verifies that files are released before overwriting, offers retry when needed, and stops on cancellation or a silent-mode conflict. The staged automatic-update path remains unchanged.
+- Localized the installer prompts and all new application labels across the existing 11 languages.
+
+#### 🧪 Validation and Platform Scope
+
+- Development validation covered terminal parsing, grid behavior, real local PTY replies and shutdown, SSH output rendering, tmux interaction, toolbar collapse/restore, theme preview data, and sidebar row geometry. The final terminal-view suite passed 221 tests with one manual test excluded; application all-target checks passed. Earlier performance validation also passed the terminal and grid suites, VTE all-feature and fixed-buffer configurations, and the native application build.
+- The reported performance measurements were collected on macOS with an Apple M5. Native Windows execution and Ubuntu Wayland runtime validation for the platform-specific fixes remain pending. Automated and headless checks do not replace those platform checks.
+
+## 2.0.31
+
+### English
+
+OxideTerm 2.0.31 adds independent terminal sync groups and standalone FTP/explicit FTPS connections, moves quick commands into a resizable bottom panel, and improves terminal history, AI interaction, and native window behavior.
+
+#### ⌨️ Terminal Sync Groups and Commands
+
+- Replaced global interactive broadcasting with groups of individual terminal panes. Multiple groups can run or pause independently, and input from a pane outside an enabled group no longer broadcasts to that group's members. Separate terminals connected to the same host can belong to different groups; each pane belongs to at most one group.
+- Added per-pane isolation and resume controls, with the group name and syncing, paused, or isolated state shown above member terminals, including detached windows. Isolation stops both outgoing and incoming synchronized input without removing membership or replaying input afterward.
+- Kept saved connection groups as templates for initial pane selection. Selecting a template does not start synchronization; new panes are not automatically recruited into an initialized group. Reconnected panes retain their group but remain isolated until manually resumed, and closing the last member disables the group.
+- Routed quick commands through the invoking pane's active sync group while retaining per-target parameter expansion. The batch sender keeps its explicit target selection; its saved connection groups still select matching terminals independently of interactive isolation, with an explanatory hint in the interface.
+- Moved quick commands from a floating card into a resizable panel below the terminal toolbar. Preserved categories, search, management, pinning, and parameter entry while keeping the terminal visible above; quick commands and the batch sender retain separate panel state.
+- Added fuzzy history suggestions, match highlighting, a scrollable candidate list, and visible navigation hints. Selecting candidates keeps them in view; clicking fills the command line without executing, and accepting a fuzzy match replaces the query while handling Unicode input.
+- Isolated terminal search state and focus per pane so searches in split or detached terminals do not share the wrong query or input target.
+
+#### 📁 FTP, FTPS, and File Transfers
+
+- Added standalone FTP and explicit FTPS connection creation, saving, editing, and opening through the existing file-transfer interface. Supported directory browsing, file and directory upload/download, file preview and editing, directory creation, renaming, and deletion.
+- Added direct, global-proxy, and custom-proxy routing for FTP control and passive data connections. Used EPSV with a supported-server fallback to PASV, and kept data connections directed to the configured host. This release supports plain FTP and explicit TLS, not implicit FTPS or active-mode transfers.
+- Validated FTPS certificates against system trust. Saved passwords use the existing credential store; FTP profiles and selected credentials participate in cloud synchronization and encrypted `.oxide` import/export under file-transfer connections.
+- Added cancellation and timeout handling for FTP operations. Uploads use temporary remote files before renaming, downloads stage local data before replacement, and a failed remote rename does not delete the existing destination.
+- Updated the SFTP dependency to `russh-sftp` 3.0.0 while retaining OxideTerm's maintained transport patches.
+
+#### 🤖 OxideSens and AI Interaction
+
+- Made the AI sidebar honor the configured AI submit shortcut, including custom modifier bindings. Plain Enter remains available for newlines when another send binding is selected; composition and visible completion selection do not accidentally submit a message.
+- Added a sticky question header with a “Back to question” action while reading long conversations. Expanding or collapsing reasoning and tool details preserves the reading position; chat, model-selection, and tool-call controls received more consistent spacing and styling.
+- Made command approval previews readable and clarified execution guidance to continue authorized work while respecting requests for diagnosis only and the existing approval policy.
+- Bounded each visible-terminal observation to 30 seconds so missing completion signals no longer hold a single observation open for an extended period. Returning a shell prompt or captured output is distinguished from a confirmed command exit; observation does not interrupt the running command.
+- Distinguished the local application's operating system from the selected terminal's environment, including SSH, Mosh, Telnet, and serial targets, to avoid treating remote devices as the local machine.
+
+#### 🪟 Navigation and Native Interface
+
+- Added command-palette searches using multiple keywords in any order, with matching across connection details. Widened the palette as space permits and added a full connection preview for identifying similar entries.
+- Refined active-session navigation, session-manager search and actions, the welcome screen and shortcut hints, and plugin-manager spacing. Simplified batch-sender controls and improved panel transitions.
+- Unified floating surfaces and added theme-aware transitions for sidebars, disclosures, menus, tooltips, and segmented controls, respecting reduced-motion settings. Kept connection forms opaque for readability over background images and rendered Markdown blockquotes as one rounded surface.
+- Fixed detached-window input and window styling, including routing RDP/VNC keyboard and clipboard shortcuts to the window's own session. Fixed an entity re-entry failure while detaching tabs.
+- Fixed scrolling in the terminal-trigger connection picker.
+
+#### 🛠️ Platform Fixes and Validation
+
+- Fixed Wayland startup sizing to preserve restored floating-window dimensions while respecting compositor-controlled maximized, fullscreen, and tiled states; state changes are recorded even when pixel dimensions stay the same.
+- Stopped macOS frame callbacks during window teardown to avoid late rendering against a closed window.
+- Compressed bundled MapleMono fonts with Zstd and reused application font assets for SVG rendering. Improved missing-character fallback and reduced diagnostics for successful font fallback.
+- Updated affected interface text across all 11 supported languages. The maintainer ran the GUI before approving release. Before the version bump, application tests passed 775 cases with 7 ignored, and terminal tests passed 218 with 1 ignored; formatting, locale consistency, application checks, and the build also passed. These checks do not establish a complete cross-platform or multi-host runtime matrix.
+
+### 中文
+
+OxideTerm 2.0.31 新增独立终端同步组及独立 FTP／显式 FTPS 连接，将快捷命令移至可调整高度的底部面板，并改善终端历史建议、AI 交互和原生窗口行为。
+
+#### ⌨️ 终端同步组与命令
+
+- 将全局交互广播改为按具体终端窗格组成的同步组。多个组可独立启用或暂停，组外窗格输入不再广播给该组成员。同一主机的不同终端可加入不同组，每个窗格最多属于一个组。
+- 新增单窗格隔离与恢复操作，成员终端上方显示组名及同步中、已暂停或已隔离状态，分离窗口同样适用。隔离同时停止发送和接收同步输入，保留成员归属，恢复后不补发隔离期间的输入。
+- 保留已保存的连接分组作为首次选择窗格的模板。选择模板不会立即开始同步，已初始化的组不会自动吸收新窗格。重连后的窗格保留分组但先隔离，需手动恢复；最后一个成员关闭后停用该组。
+- 快捷命令按发起窗格所属的活动同步组分发，保留每个目标独立的参数展开。批量发送器继续使用显式目标选择，其已保存连接分组仍匹配对应终端，不受交互同步隔离影响，界面增加了说明。
+- 快捷命令由悬浮卡片改为终端工具栏下方可调整高度的面板，保留分类、搜索、管理、固定及参数填写，终端内容在上方保持可见；快捷命令与批量发送器分别保留面板状态。
+- 新增模糊历史建议、匹配高亮、可滚动候选列表和操作提示。键盘选择时保持候选可见，点击只填入命令而不执行；接受模糊匹配时替换查询内容，并处理 Unicode 输入。
+- 按窗格隔离终端搜索状态与焦点，避免分屏或分离终端共用错误的查询内容或输入目标。
+
+#### 📁 FTP、FTPS 与文件传输
+
+- 新增独立 FTP 和显式 FTPS 连接的创建、保存、编辑及打开，复用现有文件传输界面。支持目录浏览、文件和目录上传下载、文件预览与编辑、创建目录、重命名及删除。
+- FTP 控制连接与被动数据连接支持直连、全局代理及自定义代理。优先使用 EPSV，在服务器明确不支持时回退到 PASV，数据连接仍指向配置的主机。本版支持普通 FTP 和显式 TLS，不支持隐式 FTPS 或主动模式传输。
+- FTPS 使用系统信任验证证书。保存的密码进入现有凭据存储；FTP 配置及选定凭据通过“文件传输连接”参与云同步和加密 `.oxide` 导入导出。
+- FTP 操作接入取消及超时处理。上传先写远端临时文件再重命名，下载先写本地临时文件再替换目标；远端重命名失败时不会删除已有目标文件。
+- 将 SFTP 依赖升级至 `russh-sftp` 3.0.0，并保留 OxideTerm 维护的传输补丁。
+
+#### 🤖 OxideSens 与 AI 交互
+
+- AI 侧栏遵循配置的 AI 发送快捷键，支持自定义修饰键组合。选择其他发送组合后，普通回车可用于换行；输入法组字和可见补全项选择不会误发消息。
+- 阅读长对话时新增问题吸顶栏及“返回问题”操作。展开或折叠思考过程、工具详情时保持阅读位置，并统一聊天、模型选择和工具调用控件的间距与样式。
+- 改善命令审批预览的可读性，调整执行指引，使 AI 在已有授权范围内继续完成工作，同时遵守仅诊断的请求和现有审批策略。
+- 将每次可见终端观察限制在 30 秒内，避免缺少完成信号时单次观察长时间不返回。区分提示符恢复、已取得输出和已确认命令退出；观察操作不会中断运行中的命令。
+- 区分本地应用的操作系统与所选终端环境，包括 SSH、Mosh、Telnet 和串口目标，避免把远端设备当作本机。
+
+#### 🪟 导航与原生界面
+
+- 命令面板支持任意顺序的多关键词搜索，并匹配连接详情。根据可用空间加宽面板，新增完整连接预览，便于区分相似条目。
+- 调整活动会话导航、会话管理器搜索与操作、欢迎页和快捷键提示，以及插件管理器间距。简化批量发送器控件并改善面板切换动画。
+- 统一浮动界面材质，为侧栏、折叠区、菜单、提示和分段控件加入遵循主题及减少动态效果设置的过渡。连接表单保持不透明，改善背景图片上的可读性；Markdown 引用块按完整圆角区域渲染。
+- 修复分离窗口的输入与窗口样式，包括将 RDP／VNC 键盘及剪贴板快捷键发送到该窗口自身的会话；修复分离标签时的实体重入错误。
+- 修复终端触发器连接选择器的滚动问题。
+
+#### 🛠️ 平台修复与验证
+
+- 修复 Wayland 启动时浮动窗口恢复尺寸的问题，同时遵循合成器对最大化、全屏和平铺窗口的尺寸控制；即使像素尺寸不变，也记录窗口状态变化。
+- macOS 窗口销毁时停止帧回调，避免窗口关闭后继续渲染。
+- 使用 Zstd 压缩内置 MapleMono 字体，并让 SVG 渲染复用应用字体资源；改善缺字回退，减少成功字体回退产生的诊断信息。
+- 同步更新涉及的全部 11 种语言文案。维护者已运行 GUI 并批准发布。版本升级前，应用测试通过 775 项、忽略 7 项，终端测试通过 218 项、忽略 1 项；格式、语言一致性、应用检查及构建亦通过。这些检查不代表完成了全部平台及多主机运行场景验证。
+
+## 2.0.30
+
+### English
+
+OxideTerm 2.0.30 adds a native notes workspace with synchronized Markdown source and preview, expands document rendering, and brings proxy support to Telnet. This release also improves host monitoring, session management, configuration transfers, and terminal input behavior.
+
+#### 📝 Notes and AI Knowledge
+
+- Added a native notes workspace with notebooks, title-and-body search, file import, and note creation, renaming, moving, copying, cutting, pasting, and deletion. Compact file rows, a collapsible navigator, and notebook controls follow the application's existing theme and animation settings.
+- Added Markdown source, read-only preview, and side-by-side source/preview modes. The split view updates while editing, supports dragging the divider between 20% and 80%, and synchronizes vertical scrolling in both directions using source positions, including virtualized preview content.
+- Kept the same editor buffer, selection, cursor, and undo history when switching modes. Added Markdown formatting controls, autosave, explicit save, and unsaved-change handling when navigating or closing notes; conflicting saves retain the draft instead of silently overwriting stored content.
+- Saved the last Markdown mode and split ratio as device-local preferences. They are excluded from cloud synchronization and `.oxide` exports, and importing settings preserves the receiving device's values.
+- Integrated notes with the existing knowledge store and AI indexing actions. Unchanged chunks can retain embeddings; edited or removed content invalidates stale vectors. Save state and AI index state are shown separately, with clearer feedback when embedding configuration is missing or generation fails.
+
+#### 📖 Markdown Rendering and Reading
+
+- Preserved nested lists, multiple paragraphs within list items, and mixed Markdown/HTML structure. Added native handling for supported HTML blocks and inline formatting, collapsible `details` sections, image dimensions and alignment, and linked images. HTML support remains a limited native rendering subset; scripts, event handlers, and embedded active content are not executed.
+- Improved mixed text, links, and inline formulas, including formula baseline alignment and formulas inside tables. Adjusted heading weights and sizes, paragraph spacing, table text, and code-block spacing for more consistent reading.
+- Added preview text selection and copying, heading and footnote navigation, and relative document/image resolution. Wide tables and code content can scroll horizontally; source and preview views expose scrollbars for overflowing content.
+- Replaced the previous Mermaid engine with background rendering through `mermaid-rs-renderer`, and connected diagram enlargement and localized feedback to note previews.
+- Fixed missing images, incomplete scrolling to the document bottom, excessive overscroll, and blank preview frames during fast synchronized scrolling. Preview surfaces respect image-background transparency without imposing a fixed maximum reading width.
+
+#### ⌨️ Terminal and Editor Interaction
+
+- Added configurable previous-word and next-word terminal shortcuts to shortcut settings: Option+Left/Right on macOS and Alt+B/F on Windows and Linux by default. Bindings can be changed or disabled.
+- Restored shell handling of Ctrl+L on macOS. The default host-side clear-screen shortcut is now Ctrl+Shift+L on all platforms; explicit custom bindings remain configurable.
+- Suppressed shell-history suggestions while a TUI owns terminal input, including inline applications that report their working directory. Submitting commands through history navigation or completion also leaves shell-prompt input tracking, and TUI input is excluded from command-history recording.
+- Added semantic coloring for UUIDs and complete hexadecimal MD5/SHA digests, plus short Git object IDs and container IDs in their corresponding command output. Existing ANSI colors and higher-priority URLs, paths, and quoted strings remain intact.
+- Fixed terminal search refreshes pulling the viewport away from a manually selected scroll position, and focused the command-palette search field immediately when opening it.
+- Improved the shared text editor's wrapping and scroll geometry using rendered font metrics, kept the caret visible while typing beyond the viewport, and fixed clipping of the final line. Multi-line selections highlight the selected rows while retaining the cursor line's distinct gutter highlight.
+- Replaced the quick-command body field with the shared multiline editor and stabilized its form scrolling and overflow behavior.
+
+#### 🔗 Connections, Sessions, and Transfers
+
+- Added Telnet proxy choices for global settings, direct connection, and custom proxy configuration, reusing proxy authentication, remote DNS, and bypass-list behavior. Proxy settings survive saving and reconnecting and participate in cloud synchronization and `.oxide` import/export; sensitive credentials follow the existing encrypted transfer options. Older Telnet profiles continue to connect directly by default.
+- Added session search and persistent active-session sorting by name or connected state. SSH algorithm lists can be reordered in the connection editor.
+- Ran configured post-connect commands when opening another terminal from an existing active SSH session, using the current saved connection settings.
+- Fixed missing-password prompting while preserving explicitly selected empty-password authentication, including saved connections and portable transfers. Temporary SSH connections now use the host-key confirmation flow before connecting.
+- Fixed Windows command-line connection requests failing to reach an already-running application because of platform-specific instance-lock error handling.
+- Unified local encrypted configuration archives with cloud synchronization's scope selection, item selection, and preview flow. Fixed WebDAV folder creation to build missing child folders beneath the configured endpoint without attempting to create the service root.
+- Aligned connection-note fields with the basic-information section across connection forms.
+
+#### 📊 Monitoring, Appearance, and Responsiveness
+
+- Added theme-aware usage indicators and trend charts to Host Tools monitoring while retaining detailed system, storage, network, and latency values.
+- Bounded pending monitoring notifications and retained sample history so a slow interface cannot accumulate an unbounded queue of samples. Stopping monitoring releases its retained history.
+- Adopted Material file and folder icons across file-list surfaces, including language-specific icons, and included the icon theme's license in packaged distributions.
+- Reduced repeated session-tree and sorting work, moved local directory listing off the UI thread, coalesced frequent serial-output updates, and reduced fitted background-image memory and repeated decoding.
+- Fixed native menu language selection at startup and after language changes. AI command approvals now show temporary command previews, and pending AI history is flushed on exit even when no Tokio runtime is active on the calling thread.
+
+#### 🧰 Maintenance and Validation
+
+- Added bounded retries for macOS DMG creation when `hdiutil` reports a transient resource-busy error; other creation errors still stop packaging immediately.
+- Moved the maintained `russh` dependency to a separate repository pinned to a specific revision, and applied the workspace's Clippy policy across application crates.
+- Updated affected interface text across all 11 supported languages. The maintainer completed GUI validation before approving this release. The latest identifier-coloring changes passed 44 classification tests, 11 rendering tests, and the application build; Windows CLI handoff still needs Windows-specific runtime confirmation.
+
+### 中文
+
+OxideTerm 2.0.30 新增原生笔记工作区，支持 Markdown 源码与预览分栏及双向滚动同步，扩展文档渲染能力，并为 Telnet 接入代理支持。本次更新还改善了主机监控、会话管理、配置传输和终端输入体验。
+
+#### 📝 笔记与 AI 知识库
+
+- 新增原生笔记工作区，支持笔记本、标题与正文搜索、文件导入，以及笔记新建、重命名、移动、复制、剪切、粘贴和删除。紧凑文件列表、可折叠导航栏与笔记本控件沿用应用主题和动画设置。
+- 新增 Markdown 源码、只读预览及“源码｜预览”分栏模式。分栏支持边编辑边预览、在 20%～80% 范围内拖动分隔线，并按源码位置进行双向垂直滚动同步，包含虚拟化预览内容的定位。
+- 切换模式时保留同一编辑器的内容、选区、光标与撤销历史。提供 Markdown 格式工具栏、自动保存、手动保存，以及切换或关闭笔记时的未保存提示；保存冲突时保留草稿，不静默覆盖已存内容。
+- 将最近使用的 Markdown 模式与分栏比例保存为本机偏好，不进入云同步或 `.oxide` 导出；导入设置时保留接收设备原有的这些偏好。
+- 笔记接入现有知识库存储和 AI 索引操作。未变化的分块可保留嵌入向量，编辑或删除内容会使旧向量失效。保存状态与 AI 索引状态分别展示，嵌入配置缺失或生成失败时提供更明确的反馈。
+
+#### 📖 Markdown 渲染与阅读
+
+- 保留嵌套列表、列表项内多段文字及 Markdown/HTML 混排结构。新增受支持 HTML 块和行内格式的原生解析、`details` 折叠区、图片尺寸与对齐，以及带链接的图片。HTML 仍按有限的原生渲染子集处理，不执行脚本、事件处理器或嵌入的活动内容。
+- 改善文字、链接与行内公式混排，修正公式基线及表格内公式对齐，调整标题字号与字重、段落间距、表格文字及代码块留白，使阅读层级更一致。
+- 接入预览文本选择与复制、标题及脚注导航，以及相对文档和图片路径解析。宽表格和代码内容支持横向滚动，源码与预览为溢出内容提供滚动条。
+- 使用 `mermaid-rs-renderer` 在后台渲染 Mermaid，替换原有渲染引擎，并为笔记预览接入图表放大和本地化提示。
+- 修复图片不显示、无法滚到文档末尾、过度滚动及快速同步滚动时预览短暂空白的问题。预览组件遵循图片背景透明度设置，不再限制固定的最大阅读宽度。
+
+#### ⌨️ 终端与编辑器交互
+
+- 在快捷键设置中新增可配置的终端向前／向后移动一个词操作：macOS 默认使用 Option+左／右方向键，Windows 和 Linux 默认使用 Alt+B/F，可修改或禁用。
+- 恢复 macOS 上由 Shell 处理 Ctrl+L；应用侧清屏的默认快捷键统一为 Ctrl+Shift+L，用户自定义绑定仍可配置。
+- TUI 接管终端输入时抑制 Shell 历史建议，包含会报告工作目录的内联应用。通过历史导航或补全提交命令后，也会退出 Shell 提示符输入跟踪；TUI 内输入不会被记录为命令历史。
+- 新增 UUID、完整十六进制 MD5/SHA 摘要，以及对应命令输出中的短 Git 对象 ID 和容器 ID 语义着色，保留程序原有 ANSI 颜色及优先级更高的网址、路径和引号内容。
+- 修复终端搜索刷新打断手动滚动位置的问题；打开命令面板后立即聚焦搜索框。
+- 共享文本编辑器按实际字体度量处理换行与滚动，输入超出视口时保持光标可见，并修复最后一行被裁切的问题。多行选区高亮所选行，同时保留光标所在行独立的行号高亮。
+- 快捷命令正文改用共享多行编辑器，改善表单滚动稳定性和超出输入区域后的显示。
+
+#### 🔗 连接、会话与配置传输
+
+- Telnet 新增“使用全局／直连／自定义”代理选项，复用代理认证、远端 DNS 和绕过列表。代理配置支持保存、重新连接、云同步及 `.oxide` 导入导出，敏感凭据遵循现有加密传输选项。旧 Telnet 配置升级后仍默认直连。
+- 新增会话搜索，以及按名称或连接状态排序并保存偏好的能力；连接编辑器中的 SSH 算法列表支持调整顺序。
+- 从已有活动 SSH 会话再打开终端时，执行当前保存的连接配置中的连接后命令。
+- 修复缺少密码时的提示，同时保留用户明确选择的空密码认证，包括已保存连接和可移植配置传输。临时 SSH 连接在建立连接前接入主机密钥确认流程。
+- 修复 Windows 命令行连接请求因单实例锁错误识别差异而无法转交给已运行应用的问题。
+- 本地加密配置归档复用云同步的范围选择、条目选择和预览流程。修复 WebDAV 目录创建，仅在配置的端点下逐级创建缺失子目录，不尝试创建服务根目录。
+- 将各连接表单的备注字段统一放到基本信息区域。
+
+#### 📊 监控、外观与响应
+
+- 主机工具监控新增使用率指示和趋势图，沿用主题配色，同时保留系统、存储、网络和延迟的详细数值。
+- 限制待处理监控通知与采样历史的规模，避免界面处理较慢时持续积压采样；停止监控后释放保留的历史数据。
+- 文件列表采用 Material 文件和文件夹图标，包含语言专属图标，并在发布包中附带图标主题许可证。
+- 减少会话树和排序的重复计算，将本地目录读取移出界面线程，合并频繁串口输出刷新，并降低适配窗口的背景图片内存占用和重复解码。
+- 修复启动及切换语言后的原生菜单语言。AI 命令审批展示临时命令预览，退出时即使调用线程没有活动 Tokio 运行时，也会写完待保存的 AI 历史。
+
+#### 🧰 维护与验证
+
+- macOS DMG 创建遇到 `hdiutil` 的临时资源忙错误时进行有限重试，其他创建错误仍立即终止打包。
+- 将维护中的 `russh` 依赖移到独立仓库并固定具体修订，同时让应用各 crate 采用工作区 Clippy 规则。
+- 更新涉及的全部 11 个语言包。维护者已完成 GUI 验证并批准发布；最新标识符着色改动通过 44 项分类测试、11 项渲染测试及应用构建。Windows 命令行转交仍需 Windows 环境的运行确认。
+
 ## 2.0.29
 
 ### English

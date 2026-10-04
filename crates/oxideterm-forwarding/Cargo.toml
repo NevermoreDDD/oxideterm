@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "oxideterm-forwarding"
 edition.workspace = true
@@ -16,6 +19,7 @@ runtime = [
 ]
 
 [dependencies]
+oxideterm-audit = { path = "../oxideterm-audit" }
 chrono.workspace = true
 dashmap = { workspace = true, optional = true }
 oxideterm-backend-classification = { path = "../oxideterm-backend-classification", optional = true }
@@ -32,6 +36,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 rand10.workspace = true
-russh = { path = "../russh" }
+russh.workspace = true
 serde_json.workspace = true
 tempfile = "3.23"
+zeroize.workspace = true

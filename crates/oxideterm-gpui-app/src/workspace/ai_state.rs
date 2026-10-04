@@ -362,6 +362,9 @@ pub(in crate::workspace) struct AiWorkspaceEntity {
     chat_drafts: HashMap<String, zeroize::Zeroizing<String>>,
     pub(in crate::workspace) pending_user_questions: HashMap<(u64, String), AiPendingUserQuestion>,
     pending_tool_approvals: HashMap<(u64, String), tokio::sync::oneshot::Sender<bool>>,
+    // Approval previews are runtime-only; conversation history never owns execution payloads.
+    pub(in crate::workspace) tool_approval_previews:
+        HashMap<(u64, String), zeroize::Zeroizing<String>>,
     pending_acp_permission_choices:
         HashMap<(u64, String), tokio::sync::oneshot::Sender<Option<String>>>,
     pending_tool_candidate_selections:
@@ -570,10 +573,6 @@ impl AiWorkspaceEntity {
         changed
     }
 
-    pub(in crate::workspace) fn push_chat_draft_newline(&mut self) {
-        self.chat_ui.draft.push('\n');
-    }
-
     pub(in crate::workspace) fn pop_conversation_rename(&mut self) -> bool {
         self.chat_ui.renaming_conversation_draft.pop().is_some()
     }
@@ -621,12 +620,15 @@ impl AiWorkspaceEntity {
     pub(in crate::workspace) fn begin_message_edit(&mut self, message_id: String, content: String) {
         self.chat_ui.editing_message_id = Some(message_id);
         self.chat_ui.editing_message_draft = content;
+        self.chat_ui.editing_message_scroll = ScrollHandle::new();
+        self.chat_ui.editing_message_caret_position.set(None);
         self.focus_message_edit();
     }
 
     pub(in crate::workspace) fn clear_message_edit(&mut self) {
         self.chat_ui.editing_message_id = None;
         self.chat_ui.editing_message_draft.clear();
+        self.chat_ui.editing_message_caret_position.set(None);
         self.chat_ui.editing_message_focused = false;
     }
 
@@ -811,11 +813,21 @@ impl AiWorkspaceEntity {
         self.knowledge_window_activation_subscription = Some(knowledge_activation);
     }
 
+    fn anchor_chat_before_disclosure(&self) {
+        // Manual disclosures grow below the clicked header; they are not new
+        // messages and must not pull the viewport along with the list tail.
+        let list = &self.chat_ui.message_list_state;
+        let top = list.logical_scroll_top();
+        list.pause_following_tail();
+        list.scroll_to(top);
+    }
+
     pub(in crate::workspace) fn toggle_thinking_expansion(
         &mut self,
         key: String,
         default_expanded: bool,
     ) {
+        self.anchor_chat_before_disclosure();
         let current = self
             .chat_ui
             .thinking_expansion_state
@@ -826,6 +838,7 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn toggle_tool_call_expansion(&mut self, key: String) {
+        self.anchor_chat_before_disclosure();
         if !self.chat_ui.tool_call_expansion_state.remove(&key) {
             self.chat_ui.tool_call_expansion_state.insert(key);
         }
@@ -1136,6 +1149,7 @@ impl AiWorkspaceEntity {
             chat_drafts: HashMap::new(),
             pending_user_questions: HashMap::new(),
             pending_tool_approvals: HashMap::new(),
+            tool_approval_previews: HashMap::new(),
             pending_acp_permission_choices: HashMap::new(),
             pending_tool_candidate_selections: HashMap::new(),
             pending_tool_candidate_counts: HashMap::new(),
@@ -3196,6 +3210,7 @@ impl AiWorkspaceEntity {
         self.abort_terminal_inline_stream();
         let panel = &mut self.terminal_inline_panel;
         panel.open = true;
+        panel.target = None;
         panel.prompt.clear();
         panel.response.clear();
         panel.error = None;
@@ -3212,6 +3227,7 @@ impl AiWorkspaceEntity {
         self.abort_terminal_inline_stream();
         let panel = &mut self.terminal_inline_panel;
         panel.open = false;
+        panel.target = None;
         panel.prompt_focused = false;
         panel.loading = false;
         panel.error = None;
@@ -3642,6 +3658,8 @@ impl AiWorkspaceEntity {
     }
 
     fn reject_run_tool_interactions(&mut self, generation: u64) {
+        self.tool_approval_previews
+            .retain(|(run, _), _| *run != generation);
         self.history.answers.retain(|(run, _), task| {
             if *run == generation {
                 task.abort();
@@ -3753,6 +3771,29 @@ impl AiWorkspaceEntity {
         true
     }
 
+    pub(in crate::workspace) fn update_tool_approval_preview(
+        &mut self,
+        generation: u64,
+        message_id: &str,
+        tool_call_id: &str,
+        arguments: &str,
+        status: &str,
+    ) {
+        let key = (generation, tool_call_id.to_owned());
+        if status != "pending_user_approval" || !self.is_chat_stream_generation(generation) {
+            self.tool_approval_previews.remove(&key);
+            return;
+        }
+        let preview =
+            zeroize::Zeroizing::new(oxideterm_ai::sanitize_json_text_for_persistence(arguments));
+        if self.tool_approval_previews.insert(key, preview).is_none() {
+            // Show what is being approved immediately, while keeping the existing collapse control.
+            self.chat_ui
+                .tool_call_expansion_state
+                .insert(format!("{message_id}:{tool_call_id}"));
+        }
+    }
+
     pub(in crate::workspace) fn register_tool_approval(
         &mut self,
         generation: u64,
@@ -3786,6 +3827,8 @@ impl AiWorkspaceEntity {
         else {
             return false;
         };
+        self.tool_approval_previews
+            .remove(&(generation, tool_call_id.to_owned()));
         let _ = sender.send(approved);
         true
     }
@@ -3821,11 +3864,14 @@ impl AiWorkspaceEntity {
         else {
             return false;
         };
+        self.tool_approval_previews
+            .remove(&(generation, tool_call_id.to_owned()));
         let _ = sender.send(option_id);
         true
     }
 
     fn reject_all_tool_approvals(&mut self) {
+        self.tool_approval_previews.clear();
         self.pending_user_questions.clear();
         for (_, sender) in self.pending_tool_approvals.drain() {
             let _ = sender.send(false);
@@ -4781,6 +4827,8 @@ pub(super) struct AiChatWorkspaceState {
     pub(super) editing_message_id: Option<String>,
     pub(super) editing_message_draft: String,
     pub(super) editing_message_focused: bool,
+    pub(super) editing_message_scroll: ScrollHandle,
+    pub(super) editing_message_caret_position: std::cell::Cell<Option<(usize, usize, usize)>>,
     pub(super) thinking_expansion_state: HashMap<String, bool>,
     pub(super) tool_call_expansion_state: HashSet<String>,
     pub(super) tool_candidate_selection: Option<AiToolCandidateSelectionState>,
@@ -4848,6 +4896,8 @@ impl AiChatWorkspaceState {
             editing_message_id: None,
             editing_message_draft: String::new(),
             editing_message_focused: false,
+            editing_message_scroll: ScrollHandle::new(),
+            editing_message_caret_position: std::cell::Cell::new(None),
             thinking_expansion_state: HashMap::new(),
             tool_call_expansion_state: HashSet::new(),
             tool_candidate_selection: None,
@@ -4908,6 +4958,77 @@ impl AiModelWorkspaceState {
 pub(in crate::workspace) mod entity_tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn manual_disclosure_keeps_header_position_while_content_grows(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListAlignment, ListState, point, px, size};
+        struct DisclosureViewport {
+            state: ListState,
+            expanded: bool,
+        }
+        impl gpui::Render for DisclosureViewport {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let expanded = self.expanded;
+                div().size_full().child(
+                    gpui::list(self.state.clone(), move |index, _, _| {
+                        div()
+                            .w_full()
+                            .h(px(if index == 0 {
+                                400.0
+                            } else if expanded {
+                                500.0
+                            } else {
+                                100.0
+                            }))
+                            .into_any_element()
+                    })
+                    .size_full(),
+                )
+            }
+        }
+        for tool in [false, true] {
+            let entity = cx.new(|cx| {
+                AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
+            });
+            let state = ListState::new(2, ListAlignment::Top, px(0.0));
+            state.set_follow_mode(FollowMode::Tail);
+            entity.update(cx, |ai, _| ai.chat_ui.message_list_state = state.clone());
+            let view = cx.new(|_| DisclosureViewport {
+                state: state.clone(),
+                expanded: false,
+            });
+            let window = cx.add_empty_window();
+            let draw = |expanded: bool, cx: &mut gpui::VisualTestContext| {
+                view.update(cx, |view, _| view.expanded = expanded);
+                let view = view.clone();
+                cx.draw(
+                    point(px(0.0), px(0.0)),
+                    size(px(300.0), px(300.0)),
+                    move |_, _| view.into_any_element(),
+                );
+            };
+            let mut window = window;
+            draw(false, &mut window);
+            let header_y = state.bounds_for_item(1).unwrap().top();
+            assert_eq!(header_y, px(200.0));
+            for expanded in [true, false] {
+                entity.update(&mut *window, |ai, _| {
+                    if tool {
+                        ai.toggle_tool_call_expansion("message:tool".into());
+                    } else {
+                        ai.toggle_thinking_expansion("message:thinking".into(), false);
+                    }
+                });
+                state.remeasure_items(1..2);
+                draw(expanded, &mut window);
+                assert_eq!(
+                    state.bounds_for_item(1).unwrap().top(),
+                    header_y,
+                    "tool={tool}, expanded={expanded}"
+                );
+            }
+        }
+    }
     use std::sync::atomic::AtomicUsize;
 
     pub(in crate::workspace) fn queued_turn(id: &str) -> AiQueuedChatTurn {
@@ -5281,7 +5402,9 @@ pub(in crate::workspace) mod entity_tests {
     }
 
     #[gpui::test]
-    fn chat_confirmation_reopen_cancels_stale_exit(cx: &mut TestAppContext) {
+    fn chat_confirmation_reopen_and_keyboard_actions_preserve_current_payload_once(
+        cx: &mut TestAppContext,
+    ) {
         let entity = cx.new(|cx| {
             AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
         });
@@ -5310,13 +5433,6 @@ pub(in crate::workspace) mod entity_tests {
                     focused_action: None,
                 })
             );
-        });
-    }
-
-    #[gpui::test]
-    fn chat_confirmation_keys_publish_each_effect_at_most_once(cx: &mut TestAppContext) {
-        let entity = cx.new(|cx| {
-            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
         });
         entity.update(cx, |entity, cx| {
             entity.open_chat_confirm(AiChatConfirmKind::ClearAll, cx);
@@ -5360,29 +5476,9 @@ pub(in crate::workspace) mod entity_tests {
     }
 
     #[gpui::test]
-    fn entity_release_cancels_retained_chat_confirmation_exit(cx: &mut TestAppContext) {
-        let entity = cx.new(|cx| {
-            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
-        });
-        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
-        entity.update(cx, |entity, cx| {
-            // The AI owner retains its modal exit task so Entity release
-            // cancels a pending animation completion.
-            entity.chat_confirm_exit_task = Some(cx.spawn(async move |_, _| {
-                let _ = release_receiver.await;
-            }));
-        });
-        cx.run_until_parked();
-
-        drop(entity);
-        cx.update(|_| {});
-        cx.run_until_parked();
-
-        assert!(release_sender.send(()).is_err());
-    }
-
-    #[gpui::test]
-    fn provider_secret_draft_and_operation_are_entity_owned(cx: &mut TestAppContext) {
+    fn provider_secret_handoff_store_failure_and_queued_removal_preserve_the_owner(
+        cx: &mut TestAppContext,
+    ) {
         let entity = cx.new(|cx| {
             AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
         });
@@ -5439,13 +5535,7 @@ pub(in crate::workspace) mod entity_tests {
                 } if provider_id == "provider-test"
             ));
         });
-    }
 
-    #[gpui::test]
-    fn provider_operation_failure_exposes_only_typed_category(cx: &mut TestAppContext) {
-        let entity = cx.new(|cx| {
-            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
-        });
         entity.update(cx, |entity, cx| {
             assert!(entity.start_provider_key_operation(
                 "provider-test".to_string(),
@@ -5455,7 +5545,6 @@ pub(in crate::workspace) mod entity_tests {
             ));
         });
         cx.run_until_parked();
-
         entity.update(cx, |entity, _cx| {
             let intent = entity
                 .take_credential_intents()
@@ -5466,13 +5555,7 @@ pub(in crate::workspace) mod entity_tests {
                 AiCredentialIntent::Failed(AiCredentialFailure::RemoveProviderKey)
             ));
         });
-    }
 
-    #[gpui::test]
-    fn provider_removal_is_queued_behind_an_inflight_store(cx: &mut TestAppContext) {
-        let entity = cx.new(|cx| {
-            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
-        });
         entity.update(cx, |entity, cx| {
             assert!(entity.start_provider_key_operation(
                 "provider-test".to_string(),
@@ -5487,6 +5570,108 @@ pub(in crate::workspace) mod entity_tests {
                     .contains("provider-test")
             );
             assert_eq!(entity.provider_key_operation_tasks.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn knowledge_document_creation_failure_and_window_transfer_preserve_the_dialog_owner(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let entity = cx.new(|cx| {
+            let mut entity =
+                AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx);
+            entity.rag_store = LazyAiRagStore::new(directory.path().to_path_buf());
+            entity
+        });
+        entity.update(cx, |entity, cx| {
+            let store = entity.rag_store();
+            assert!(entity.focus_settings_input(SettingsInput::KnowledgeCollectionName, cx));
+            assert!(entity.replace_settings_input(
+                SettingsInput::KnowledgeCollectionName,
+                None,
+                "部署运维手册",
+                cx,
+            ));
+            assert!(entity.create_knowledge_collection("failed".to_string()));
+            let first = oxideterm_ai::rag_list_collections(&store, None)
+                .unwrap()
+                .remove(0);
+            assert_eq!(first.name, "部署运维手册");
+            let second = oxideterm_ai::rag_create_collection(
+                &store,
+                oxideterm_ai::RagCreateCollectionRequest {
+                    name: "second".to_string(),
+                    scope: oxideterm_ai::RagDocScopeRequest::Global,
+                },
+            )
+            .unwrap();
+            let owner_window_id: gpui::WindowId = 41_u64.into();
+            entity.open_knowledge_document_dialog(first.id.clone(), owner_window_id, true);
+            entity.select_knowledge_collection(second.id.clone());
+            assert!(entity.focus_settings_input(SettingsInput::KnowledgeDocumentTitle, cx));
+            assert!(entity.replace_settings_input(
+                SettingsInput::KnowledgeDocumentTitle,
+                None,
+                "Runbook",
+                cx,
+            ));
+
+            let (document, open_in_workspace) = entity
+                .create_blank_knowledge_document("failed".to_string())
+                .unwrap();
+
+            assert_eq!(document.collection_id, first.id);
+            assert!(open_in_workspace);
+            assert!(entity.knowledge_document_dialog_owned_by(owner_window_id));
+            assert_eq!(
+                oxideterm_ai::rag_list_documents(&store, &second.id, None, None)
+                    .unwrap()
+                    .total,
+                0
+            );
+
+            oxideterm_ai::rag_delete_collection(&store, &first.id).unwrap();
+            assert!(entity.replace_settings_input(
+                SettingsInput::KnowledgeDocumentTitle,
+                None,
+                "Runbook",
+                cx,
+            ));
+
+            assert!(
+                entity
+                    .create_blank_knowledge_document("failed".to_string())
+                    .is_none()
+            );
+            assert!(entity.knowledge_document_dialog_open());
+            assert_eq!(entity.knowledge_new_document_title(), "Runbook");
+            assert_eq!(entity.knowledge_new_document_error(), Some("failed"));
+            assert_eq!(entity.knowledge_error(), None);
+
+            let second_window_id: gpui::WindowId = 44_u64.into();
+            assert!(entity.replace_settings_input(
+                SettingsInput::KnowledgeDocumentTitle,
+                Some(0..7),
+                "Draft title",
+                cx,
+            ));
+
+            entity.open_knowledge_document_dialog(second.id, second_window_id, false);
+            assert!(entity.knowledge_document_dialog_owned_by(owner_window_id));
+            assert!(!entity.knowledge_document_dialog_owned_by(second_window_id));
+            assert_eq!(entity.knowledge_new_document_title(), "Draft title");
+
+            assert!(entity.transfer_knowledge_document_dialog_owner(
+                owner_window_id,
+                second_window_id,
+                cx,
+            ));
+            assert!(entity.knowledge_document_dialog_owned_by(second_window_id));
+            assert!(entity.dismiss_knowledge_document_dialog_for_window(second_window_id, cx));
+            assert!(!entity.knowledge_document_dialog_open());
+            assert_eq!(entity.knowledge_new_document_title(), "");
+            assert_eq!(entity.focused_settings_input(), None);
         });
     }
 
@@ -5788,7 +5973,9 @@ pub(in crate::workspace) mod entity_tests {
     }
 
     #[gpui::test]
-    fn knowledge_reindex_progress_cancel_and_completion_are_entity_owned(cx: &mut TestAppContext) {
+    fn knowledge_reindex_progress_completion_and_release_preserve_task_ownership(
+        cx: &mut TestAppContext,
+    ) {
         let entity = cx.new(|cx| {
             AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
         });
@@ -5825,6 +6012,28 @@ pub(in crate::workspace) mod entity_tests {
         assert_eq!(
             entity.read_with(cx, |entity, _cx| entity.knowledge_reindex_progress()),
             None
+        );
+
+        let release_cancel = Arc::new(AtomicBool::new(false));
+        let (paths_sender, paths_receiver) = tokio::sync::oneshot::channel();
+        entity.update(cx, |entity, cx| {
+            entity.knowledge_reindex_cancel = Some(release_cancel.clone());
+            assert!(entity.start_knowledge_import(
+                async move { paths_receiver.await.ok().flatten() },
+                "collection".to_string(),
+                "safe import failure".to_string(),
+                cx,
+            ));
+        });
+
+        drop(entity);
+        cx.update(|_cx| {});
+        cx.run_until_parked();
+
+        assert!(release_cancel.load(Ordering::Acquire));
+        assert!(
+            paths_sender.send(Some(Vec::new())).is_err(),
+            "dropping the entity must cancel its retained import future"
         );
     }
 
@@ -5880,41 +6089,17 @@ pub(in crate::workspace) mod entity_tests {
         let documents = oxideterm_ai::rag_list_documents(&store, &collection.id, None, Some(10))
             .expect("list imported Knowledge documents");
         assert_eq!(documents.documents.len(), 1);
+        assert_eq!(
+            oxideterm_ai::rag_get_document_content(&store, &documents.documents[0].id).unwrap(),
+            "# Guide\nEntity-owned import"
+        );
         drop(entity);
         drop(store);
         std::fs::remove_dir_all(&data_dir).expect("remove Knowledge test directory");
     }
 
     #[gpui::test]
-    fn entity_release_cancels_knowledge_tasks_and_reindex(cx: &mut TestAppContext) {
-        let entity = cx.new(|cx| {
-            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
-        });
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (paths_sender, paths_receiver) = tokio::sync::oneshot::channel();
-        entity.update(cx, |entity, cx| {
-            entity.knowledge_reindex_cancel = Some(cancel.clone());
-            assert!(entity.start_knowledge_import(
-                async move { paths_receiver.await.ok().flatten() },
-                "collection".to_string(),
-                "safe import failure".to_string(),
-                cx,
-            ));
-        });
-
-        drop(entity);
-        cx.update(|_cx| {});
-        cx.run_until_parked();
-
-        assert!(cancel.load(Ordering::Acquire));
-        assert!(
-            paths_sender.send(Some(Vec::new())).is_err(),
-            "dropping the entity must cancel its retained import future"
-        );
-    }
-
-    #[gpui::test]
-    fn stream_task_replacement_and_cancel_abort_each_task_exactly_once(cx: &mut TestAppContext) {
+    fn stream_replacement_cancel_and_release_abort_each_owned_task_once(cx: &mut TestAppContext) {
         let runtime = test_worker_runtime();
         let entity = cx.new({
             let runtime = Arc::clone(&runtime);
@@ -5966,17 +6151,7 @@ pub(in crate::workspace) mod entity_tests {
         });
         wait_for_lifecycle_count(&chat_drop_count, 2);
         wait_for_lifecycle_count(&terminal_drop_count, 2);
-    }
 
-    #[gpui::test]
-    fn entity_release_aborts_chat_and_terminal_stream_tasks_exactly_once(cx: &mut TestAppContext) {
-        let runtime = test_worker_runtime();
-        let entity = cx.new({
-            let runtime = Arc::clone(&runtime);
-            move |cx| AiWorkspaceEntity::new(runtime, oxideterm_ai::AiProviderKeyStore::new(), cx)
-        });
-        let chat_drop_count = Arc::new(AtomicUsize::new(0));
-        let terminal_drop_count = Arc::new(AtomicUsize::new(0));
         let chat_generation = entity.update(cx, |entity, _cx| {
             entity
                 .begin_chat_stream("conversation-a".into(), "assistant-a".into())
@@ -5997,11 +6172,11 @@ pub(in crate::workspace) mod entity_tests {
         cx.update(|_cx| {});
         cx.run_until_parked();
 
-        wait_for_lifecycle_count(&chat_drop_count, 1);
-        wait_for_lifecycle_count(&terminal_drop_count, 1);
+        wait_for_lifecycle_count(&chat_drop_count, 3);
+        wait_for_lifecycle_count(&terminal_drop_count, 3);
         std::thread::sleep(Duration::from_millis(10));
-        assert_eq!(chat_drop_count.load(Ordering::Acquire), 1);
-        assert_eq!(terminal_drop_count.load(Ordering::Acquire), 1);
+        assert_eq!(chat_drop_count.load(Ordering::Acquire), 3);
+        assert_eq!(terminal_drop_count.load(Ordering::Acquire), 3);
     }
 
     #[gpui::test]
@@ -6086,6 +6261,76 @@ pub(in crate::workspace) mod entity_tests {
             assert!(entity.complete_chat_stream(generation));
             assert!(!entity.is_chat_stream_generation(generation));
             assert!(!entity.complete_chat_stream(generation));
+        });
+    }
+
+    #[gpui::test]
+    fn approval_preview_is_visible_redacted_and_cleared_after_interaction(cx: &mut TestAppContext) {
+        let entity = cx.new(|cx| {
+            AiWorkspaceEntity::new(test_runtime(), oxideterm_ai::AiProviderKeyStore::new(), cx)
+        });
+        entity.update(cx, |entity, _cx| {
+            let (generation, _) =
+                entity.begin_chat_stream("conversation-a".into(), "assistant-a".into());
+            let arguments = r#"{"command":"pwd\nls -la","apiKey":"private-test-key"}"#;
+            let key = (generation, "tool-a".to_string());
+            for approved in [true, false] {
+                let (sender, mut receiver) = tokio::sync::oneshot::channel();
+                entity.register_tool_approval(generation, "tool-a".into(), sender);
+                entity.update_tool_approval_preview(
+                    generation,
+                    "assistant-a",
+                    "tool-a",
+                    arguments,
+                    "pending_user_approval",
+                );
+                let preview: serde_json::Value =
+                    serde_json::from_str(entity.tool_approval_previews[&key].as_str()).unwrap();
+                assert_eq!(
+                    preview,
+                    serde_json::json!({"command": "pwd\nls -la", "apiKey": "[REDACTED]"})
+                );
+                assert!(
+                    entity
+                        .chat_ui
+                        .tool_call_expansion_state
+                        .contains("assistant-a:tool-a")
+                );
+                let persisted = oxideterm_ai::sanitize_tool_arguments_text_for_persistence(
+                    entity.tool_approval_previews[&key].as_str(),
+                );
+                assert!(!persisted.contains("pwd"));
+                assert!(!persisted.contains("private-test-key"));
+                entity.resolve_tool_approval(generation, "tool-a", approved);
+                assert_eq!(receiver.try_recv(), Ok(approved));
+                assert!(!entity.tool_approval_previews.contains_key(&key));
+            }
+            entity.update_tool_approval_preview(
+                generation,
+                "assistant-a",
+                "tool-a",
+                arguments,
+                "pending_user_approval",
+            );
+            entity.update_tool_approval_preview(generation, "assistant-a", "tool-a", "{}", "error");
+            assert!(!entity.tool_approval_previews.contains_key(&key));
+            entity.update_tool_approval_preview(
+                generation,
+                "assistant-a",
+                "tool-a",
+                arguments,
+                "pending_user_approval",
+            );
+            entity.cancel_chat_stream_for("conversation-a");
+            assert!(!entity.tool_approval_previews.contains_key(&key));
+            entity.update_tool_approval_preview(
+                generation,
+                "assistant-a",
+                "tool-a",
+                arguments,
+                "pending_user_approval",
+            );
+            assert!(!entity.tool_approval_previews.contains_key(&key));
         });
     }
 
@@ -6391,7 +6636,7 @@ pub(in crate::workspace) mod entity_tests {
             cx.add_empty_window().draw(
                 gpui::point(gpui::px(0.0), gpui::px(0.0)),
                 gpui::size(gpui::px(200.0), gpui::px(100.0)),
-                move |_, _| view.clone().into_any_element(),
+                move |_, _| view.into_any_element(),
             );
             if matches!(mode, gpui::FollowMode::Tail) {
                 cx.run_until_parked();

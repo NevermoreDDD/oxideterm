@@ -3,8 +3,7 @@ use std::{cell::Cell, panic::Location, rc::Rc};
 use gpui::{
     AnyElement, App, AppContext, CursorStyle, Div, Element, ElementId, EmptyView,
     InteractiveElement, IntoElement, ParentElement, Point, RenderOnce, ScrollHandle, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, WithAlpha, div,
-    prelude::FluentBuilder, px,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
 };
 
 const SCROLLBAR_LAYER_WIDTH: f32 = 10.0;
@@ -67,6 +66,7 @@ impl ScrollbarHandle {
 
 #[derive(Clone)]
 struct ScrollbarDragState {
+    on_scroll: Option<Rc<dyn Fn()>>,
     scroll_handle: ScrollbarHandle,
     axis: ScrollbarAxis,
     grab_offset: Rc<Cell<f32>>,
@@ -140,6 +140,9 @@ impl ScrollbarDragState {
             ScrollbarAxis::Both => return,
         };
         if current != next {
+            if let Some(on_scroll) = &self.on_scroll {
+                on_scroll();
+            }
             self.scroll_handle.set_offset(next);
             window.refresh();
         }
@@ -163,14 +166,18 @@ pub trait ScrollableElement: InteractiveElement + Styled + ParentElement + Eleme
         )
     }
 
+    // Preserve the viewport's call site so sibling scroll areas own separate state.
+    #[track_caller]
     fn overflow_y_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Vertical)
     }
 
+    #[track_caller]
     fn overflow_x_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Horizontal)
     }
 
+    #[track_caller]
     fn overflow_scrollbar(self) -> Scrollable<Self> {
         Scrollable::new(self, ScrollbarAxis::Both)
     }
@@ -246,6 +253,7 @@ where
             .read(cx)
             .clone();
         let style = self.element.style().clone();
+        let restrict_scroll_to_axis = style.restrict_scroll_to_axis == Some(true);
         *self.element.style() = StyleRefinement::default();
 
         let mut root = div().id(self.id).size_full().relative();
@@ -262,6 +270,9 @@ where
                     ScrollbarAxis::Both => this.overflow_scroll(),
                 })
                 .track_scroll(&scroll_handle)
+                .when(restrict_scroll_to_axis, |area| {
+                    area.restrict_scroll_to_axis()
+                })
                 .child(self.element.flex_1()),
         )
         .child(
@@ -281,6 +292,7 @@ pub enum ScrollbarAxis {
 
 #[derive(IntoElement)]
 pub struct Scrollbar {
+    on_scroll: Option<Rc<dyn Fn()>>,
     id: ElementId,
     scroll_handle: ScrollbarHandle,
     axis: ScrollbarAxis,
@@ -289,6 +301,7 @@ pub struct Scrollbar {
 impl Scrollbar {
     pub fn new(scroll_handle: &ScrollHandle) -> Self {
         Self {
+            on_scroll: None,
             id: "scrollbar".into(),
             scroll_handle: ScrollbarHandle::Scroll(scroll_handle.clone()),
             axis: ScrollbarAxis::Vertical,
@@ -297,6 +310,7 @@ impl Scrollbar {
 
     pub fn for_list(state: &gpui::ListState) -> Self {
         Self {
+            on_scroll: None,
             id: "list-scrollbar".into(),
             scroll_handle: ScrollbarHandle::List(state.clone()),
             axis: ScrollbarAxis::Vertical,
@@ -312,13 +326,18 @@ impl Scrollbar {
         self.axis = axis;
         self
     }
+
+    pub fn on_vertical_scroll(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_scroll = Some(Rc::new(callback));
+        self
+    }
 }
 
 impl RenderOnce for Scrollbar {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         match self.axis {
             ScrollbarAxis::Vertical => {
-                render_vertical_scrollbar(self.id, &self.scroll_handle, window)
+                render_vertical_scrollbar(self.id, &self.scroll_handle, self.on_scroll, window)
             }
             ScrollbarAxis::Horizontal => {
                 render_horizontal_scrollbar(self.id, &self.scroll_handle, window)
@@ -333,6 +352,7 @@ impl RenderOnce for Scrollbar {
                 .child(render_vertical_scrollbar(
                     "vertical-scrollbar",
                     &self.scroll_handle,
+                    self.on_scroll,
                     window,
                 ))
                 .child(render_horizontal_scrollbar(
@@ -348,6 +368,7 @@ impl RenderOnce for Scrollbar {
 fn render_vertical_scrollbar(
     id: impl Into<ElementId>,
     scroll_handle: &ScrollbarHandle,
+    on_scroll: Option<Rc<dyn Fn()>>,
     window: &mut Window,
 ) -> AnyElement {
     let bounds = scroll_handle.bounds();
@@ -358,8 +379,9 @@ fn render_vertical_scrollbar(
     let Some(geometry) = scrollbar_geometry(viewport_height, max_offset_y, scroll_position) else {
         return div().id(id).into_any_element();
     };
-    let thumb_color = window.text_style().color.with_alpha(SCROLLBAR_THUMB_ALPHA);
+    let thumb_color = window.text_style().color.alpha(SCROLLBAR_THUMB_ALPHA);
     let drag_state = ScrollbarDragState {
+        on_scroll,
         scroll_handle: scroll_handle.clone(),
         axis: ScrollbarAxis::Vertical,
         grab_offset: Rc::new(Cell::new(0.0)),
@@ -389,7 +411,7 @@ fn render_vertical_scrollbar(
                 .on_mouse_up_out(gpui::MouseButton::Left, move |_, _, _| {
                     release_outside.end_drag()
                 })
-                .on_drag(drag_state.clone(), |drag, position, _window, cx| {
+                .on_drag(drag_state, |drag, position, _window, cx| {
                     drag.scroll_handle.begin_drag();
                     drag.grab_offset.set(f32::from(position.y));
                     cx.new(|_| EmptyView)
@@ -415,8 +437,9 @@ fn render_horizontal_scrollbar(
     let Some(geometry) = scrollbar_geometry(viewport_width, max_offset_x, scroll_position) else {
         return div().id(id).into_any_element();
     };
-    let thumb_color = window.text_style().color.with_alpha(SCROLLBAR_THUMB_ALPHA);
+    let thumb_color = window.text_style().color.alpha(SCROLLBAR_THUMB_ALPHA);
     let drag_state = ScrollbarDragState {
+        on_scroll: None,
         scroll_handle: scroll_handle.clone(),
         axis: ScrollbarAxis::Horizontal,
         grab_offset: Rc::new(Cell::new(0.0)),
@@ -440,7 +463,7 @@ fn render_horizontal_scrollbar(
                 .rounded(px(SCROLLBAR_THUMB_RADIUS))
                 .bg(thumb_color)
                 .cursor(CursorStyle::OpenHand)
-                .on_drag(drag_state.clone(), |drag, position, _window, cx| {
+                .on_drag(drag_state, |drag, position, _window, cx| {
                     drag.grab_offset.set(f32::from(position.x));
                     cx.new(|_| EmptyView)
                 })
@@ -466,6 +489,77 @@ pub fn vertical_scrollbar_layer(id: impl Into<ElementId>, handle: &ScrollHandle)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, Modifiers, MouseButton, Render, TestAppContext, point, size};
+
+    struct AdjacentScrollAreas;
+
+    impl Render for AdjacentScrollAreas {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div().w(px(200.0)).h(px(40.0)).overflow_x_scrollbar().child(
+                        div()
+                            .w(px(80.0))
+                            .h(px(30.0))
+                            .flex_none()
+                            .debug_selector(|| "short-content".into()),
+                    ),
+                )
+                .child(
+                    div().w(px(200.0)).h(px(40.0)).overflow_x_scrollbar().child(
+                        div()
+                            .w(px(600.0))
+                            .h(px(30.0))
+                            .flex_none()
+                            .debug_selector(|| "long-content".into()),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn adjacent_scroll_areas_keep_independent_offsets_when_dragging(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| AdjacentScrollAreas);
+        cx.simulate_resize(size(px(240.0), px(120.0)));
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let short_before = cx.debug_bounds("short-content").unwrap();
+        let long_before = cx.debug_bounds("long-content").unwrap();
+
+        cx.simulate_mouse_down(
+            point(px(20.0), px(75.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(60.0), px(75.0)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(120.0), px(75.0)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(120.0), px(75.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        assert_eq!(cx.debug_bounds("short-content").unwrap(), short_before);
+        assert!(
+            cx.debug_bounds("long-content").unwrap().left() < long_before.left() - px(100.0),
+            "dragging the lower scrollbar must move its content"
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("long-content").unwrap().left() < long_before.left() - px(100.0));
+    }
 
     #[test]
     fn scrollbar_coordinates_translate_gpui_offsets_and_thumb_edges() {

@@ -18,7 +18,11 @@
       "port": "ポート",
       "username": "対象ユーザー名 *",
       "password": "パスワード",
+      "use_empty_password": "空のパスワードを使用",
       "save_password": "パスワードをキーチェーンに保存",
+      "save_credentials_after_login": "ログイン成功後に認証情報を保存する",
+      "credentials_saved": "認証情報を保存しました",
+      "save_credentials_failed": "認証情報の保存に失敗しました",
       "group": "グループ",
       "notes": "メモ",
       "notes_placeholder": "この接続に関する任意の情報を追加",
@@ -145,6 +149,9 @@
       "ssh_algorithms_hint": "ネゴシエーション順序を確認し、カテゴリごとに既定値を上書きします。",
       "ssh_algorithms_categories": "アルゴリズムカテゴリ",
       "ssh_algorithms_default": "既定",
+      "ssh_algorithms_follow_preset": "プリセットに従う",
+      "ssh_algorithms_disabled": "無効なアルゴリズム",
+      "ssh_algorithms_edit_hint": "上にある項目ほど優先されます。ドラッグ、または Alt+↑/↓ で並べ替え、スペースで有効・無効を切り替えます。少なくとも1つ有効にしてください。",
       "ssh_algorithms_custom": "カスタム",
       "ssh_algorithms_custom_count": "{{count}} 件をカスタマイズ",
       "ssh_algorithms_category_kex": "鍵交換（KEX）",
@@ -203,6 +210,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "ログイン成功後にパスワードを保存",
+      "password_saved": "SSH パスワードを保存しました",
+      "save_password_failed": "SSH パスワードを保存できませんでした。接続は維持されています。",
       "title": "キーボード対話認証",
       "continue": "続行",
       "cancelled": "キーボード対話認証はキャンセルされました。"

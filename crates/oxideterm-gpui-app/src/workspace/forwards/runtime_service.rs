@@ -81,7 +81,13 @@ struct ForwardingBindingState {
 
 #[derive(Default)]
 struct RemoteDesktopTunnelState {
-    leases: HashMap<String, (NodeId, String)>,
+    leases: HashMap<String, RemoteDesktopTunnelBinding>,
+}
+
+struct RemoteDesktopTunnelBinding {
+    node_id: NodeId,
+    forward_id: String,
+    audit: Option<oxideterm_audit::AuditContext>,
 }
 
 impl ForwardingBindingState {
@@ -176,7 +182,7 @@ impl ForwardingRuntimeService {
     }
 
     #[cfg(test)]
-    pub(super) fn test_fixture() -> Self {
+    pub(in crate::workspace) fn test_fixture() -> Self {
         let ssh_registry = SshConnectionRegistry::new(ConnectionPoolConfig::default());
         let node_router = NodeRouter::new(ssh_registry.clone());
         let task_runtime = Arc::new(
@@ -297,9 +303,14 @@ impl ForwardingRuntimeService {
             .create_forward_with_health_check(rule, true)
             .await
             .map_err(|error| error.to_string())?;
-        self.remote_desktop_tunnel_state()
-            .leases
-            .insert(lease_id, (node_id.clone(), rule.id.clone()));
+        self.remote_desktop_tunnel_state().leases.insert(
+            lease_id,
+            RemoteDesktopTunnelBinding {
+                node_id: node_id.clone(),
+                forward_id: rule.id.clone(),
+                audit: oxideterm_audit::AuditContext::current_request(),
+            },
+        );
         Ok(RemoteDesktopEndpoint::new(
             rule.bind_address,
             rule.bind_port,
@@ -307,19 +318,20 @@ impl ForwardingRuntimeService {
     }
 
     pub(in crate::workspace) fn close_remote_desktop_tunnel(&self, lease_id: String) {
-        let Some((node_id, forward_id)) =
-            self.remote_desktop_tunnel_state().leases.remove(&lease_id)
-        else {
+        let Some(binding) = self.remote_desktop_tunnel_state().leases.remove(&lease_id) else {
             return;
         };
         let service = self.clone();
-        self.task_runtime.spawn(async move {
-            if let Some(manager) = service.manager_for_node(&node_id) {
-                // The remote desktop lease owns only this hidden listener; the
-                // forwarding service and NodeRouter continue owning SSH liveness.
-                let _ = manager.delete_forward(&forward_id).await;
-            }
-        });
+        self.task_runtime
+            .spawn(oxideterm_audit::AuditContext::scope_optional(
+                binding.audit,
+                async move {
+                    if let Some(manager) = service.manager_for_node(&binding.node_id) {
+                        // The desktop lease owns this listener, not the shared SSH node.
+                        let _ = manager.delete_forward(&binding.forward_id).await;
+                    }
+                },
+            ));
     }
 
     pub(in crate::workspace) fn public_mcp_forward_is_persisted(&self, forward_id: &str) -> bool {
@@ -653,7 +665,7 @@ impl ForwardingRuntimeService {
         self.remote_desktop_tunnel_state()
             .leases
             .values()
-            .map(|(_, forward_id)| forward_id.clone())
+            .map(|binding| binding.forward_id.clone())
             .collect()
     }
 
@@ -678,7 +690,8 @@ impl ForwardingRuntimeService {
         let Some(binding) = state.leases.get_mut(lease_id) else {
             return false;
         };
-        *binding = (node_id, forward_id);
+        binding.node_id = node_id;
+        binding.forward_id = forward_id;
         true
     }
 
@@ -1360,28 +1373,14 @@ mod tests {
             state.node_for_connection_id("connection-b"),
             Some(NodeId::new("node-a"))
         );
+        state.remove_exact(&session_id, "connection-a", &second_consumer);
+        assert_eq!(
+            state.connection_id(&session_id).as_deref(),
+            Some("connection-b")
+        );
         assert_eq!(
             state.remove(&session_id),
             Some(("connection-b".to_string(), second_consumer))
-        );
-    }
-
-    #[test]
-    fn stale_exact_removal_does_not_delete_reconnected_binding() {
-        let mut state = ForwardingBindingState::default();
-        let session_id = ForwardingRuntimeService::session_id_for_node(&NodeId::new("node-b"));
-        let consumer = ConnectionConsumer::PortForward(session_id.clone());
-        state.replace(
-            session_id.clone(),
-            "connection-new".to_string(),
-            consumer.clone(),
-        );
-
-        state.remove_exact(&session_id, "connection-old", &consumer);
-
-        assert_eq!(
-            state.connection_id(&session_id).as_deref(),
-            Some("connection-new")
         );
     }
 

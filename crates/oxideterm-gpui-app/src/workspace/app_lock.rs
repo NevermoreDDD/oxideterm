@@ -154,7 +154,24 @@ impl WorkspaceApp {
         self.close_terminal_command_overlays(cx);
         self.clear_workspace_tooltip("activity-app-lock", cx);
         self.clear_app_lock_input_state();
+        let was_locked = self.app_lock.locked;
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Security,
+            "app_lock",
+            None,
+            None,
+        );
         self.app_lock.locked = true;
+        audit.finish(
+            if was_locked {
+                oxideterm_audit::AuditOutcome::Unchanged
+            } else {
+                oxideterm_audit::AuditOutcome::Succeeded
+            },
+            oxideterm_audit::AuditEvidence::Lifecycle,
+            None,
+            None,
+        );
         self.app_lock.error = None;
         self.refresh_app_lock_biometric_availability(cx);
         self.focus_app_lock_input(SettingsInput::AppLockCurrentPassword, window, cx);
@@ -296,11 +313,34 @@ impl WorkspaceApp {
         self.app_lock.error = None;
         let store = self.app_lock.store.clone();
         let runtime = self.forwarding_runtime.handle().clone();
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Security,
+            match dialog {
+                AppLockDialog::Configure => "app_lock_setup",
+                AppLockDialog::Change => "app_lock_change",
+                AppLockDialog::Remove => "app_lock_remove",
+            },
+            None,
+            None,
+        );
         cx.spawn(async move |weak, cx| {
-            let task = runtime.spawn_blocking(move || match dialog {
-                AppLockDialog::Configure => store.set_password(new_password).map(|_| true),
-                AppLockDialog::Change => store.change_password(current_password, new_password),
-                AppLockDialog::Remove => store.remove_password(current_password),
+            let task = runtime.spawn_blocking(move || {
+                let result = match dialog {
+                    AppLockDialog::Configure => store.set_password(new_password).map(|_| true),
+                    AppLockDialog::Change => store.change_password(current_password, new_password),
+                    AppLockDialog::Remove => store.remove_password(current_password),
+                };
+                audit.finish(
+                    match &result {
+                        Ok(true) => oxideterm_audit::AuditOutcome::Succeeded,
+                        Ok(false) => oxideterm_audit::AuditOutcome::Denied,
+                        Err(_) => oxideterm_audit::AuditOutcome::Failed,
+                    },
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
+                result
             });
             let result = task
                 .await
@@ -317,8 +357,20 @@ impl WorkspaceApp {
                         this.app_lock.lock_after_configure = false;
                         this.clear_app_lock_input_state();
                         if should_lock {
+                            let lock_audit = oxideterm_audit::AuditOperation::begin(
+                                oxideterm_audit::AuditCategory::Security,
+                                "app_lock",
+                                None,
+                                None,
+                            );
                             this.suspend_public_mcp_runtime(cx);
                             this.app_lock.locked = true;
+                            lock_audit.finish(
+                                oxideterm_audit::AuditOutcome::Succeeded,
+                                oxideterm_audit::AuditEvidence::Lifecycle,
+                                None,
+                                None,
+                            );
                             this.focused_settings_input =
                                 Some(SettingsInput::AppLockCurrentPassword);
                             this.refresh_app_lock_biometric_availability(cx);
@@ -362,10 +414,29 @@ impl WorkspaceApp {
         let password = Zeroizing::new(std::mem::take(&mut self.app_lock.current_password));
         let store = self.app_lock.store.clone();
         let runtime = self.forwarding_runtime.handle().clone();
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Security,
+            "app_unlock",
+            None,
+            Some("password"),
+        );
         self.app_lock.pending = true;
         self.app_lock.error = None;
         cx.spawn(async move |weak, cx| {
-            let task = runtime.spawn_blocking(move || store.verify_password(password));
+            let task = runtime.spawn_blocking(move || {
+                let result = store.verify_password(password);
+                audit.finish(
+                    match &result {
+                        Ok(true) => oxideterm_audit::AuditOutcome::Succeeded,
+                        Ok(false) => oxideterm_audit::AuditOutcome::Denied,
+                        Err(_) => oxideterm_audit::AuditOutcome::Failed,
+                    },
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
+                result
+            });
             let result = task
                 .await
                 .map_err(|error| error.to_string())
@@ -410,11 +481,32 @@ impl WorkspaceApp {
             .t("settings_view.general.app_lock_biometric_reason");
         let native_window_handle = app_lock_native_window_handle(window);
         let runtime = self.forwarding_runtime.handle().clone();
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Security,
+            "app_unlock",
+            None,
+            Some("biometric"),
+        );
         self.app_lock.pending = true;
         self.app_lock.error = None;
         cx.spawn(async move |weak, cx| {
-            let task = runtime
-                .spawn_blocking(move || authenticate_biometric(&reason, native_window_handle));
+            let task = runtime.spawn_blocking(move || {
+                let result = authenticate_biometric(&reason, native_window_handle);
+                audit.finish(
+                    match &result {
+                        Ok(BiometricOutcome::Verified) => oxideterm_audit::AuditOutcome::Succeeded,
+                        Ok(BiometricOutcome::Canceled) => oxideterm_audit::AuditOutcome::Cancelled,
+                        Ok(BiometricOutcome::Failed | BiometricOutcome::Unavailable) => {
+                            oxideterm_audit::AuditOutcome::Denied
+                        }
+                        Err(_) => oxideterm_audit::AuditOutcome::Failed,
+                    },
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
+                result
+            });
             let result = task
                 .await
                 .map_err(|error| error.to_string())
@@ -540,8 +632,9 @@ impl WorkspaceApp {
         true
     }
 
-    pub(in crate::workspace) fn render_app_lock_activity_icon(
+    pub(in crate::workspace) fn render_app_lock_button(
         &self,
+        button_size: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.tokens.ui;
@@ -558,19 +651,16 @@ impl WorkspaceApp {
                 rgb(theme.text),
             ),
             oxideterm_gpui_ui::button::IconButtonOptions {
-                size: self.tokens.metrics.activity_icon_size,
+                size: button_size,
                 radius: oxideterm_gpui_ui::button::ButtonRadius::Md,
                 hover_background: Some(rgb(theme.bg_hover)),
                 idle_opacity: 1.0,
-                ..oxideterm_gpui_ui::button::IconButtonOptions::compact(
-                    self.tokens.metrics.activity_icon_size,
-                )
+                ..oxideterm_gpui_ui::button::IconButtonOptions::compact(button_size)
             },
         );
         button
             .id("activity-app-lock")
             .relative()
-            .mb(px(self.tokens.metrics.activity_icon_gap))
             .on_mouse_move(
                 cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
                     this.queue_workspace_tooltip(
@@ -1007,6 +1097,7 @@ impl WorkspaceApp {
             .child(WorkspaceImeElement::new(
                 cx.entity(),
                 self.focus_handle.clone(),
+                window.window_handle().window_id(),
             ))
             .into_any_element()
     }

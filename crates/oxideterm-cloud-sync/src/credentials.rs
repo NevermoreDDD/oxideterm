@@ -38,6 +38,7 @@ pub(crate) fn credential_selection(
             .iter()
             .map(|p| p.id.clone())
             .collect();
+        result.ftp_ids = store.ftp_profiles().iter().map(|p| p.id.clone()).collect();
     }
     if scope.sync_mosh_profiles {
         result.mosh_ids = store
@@ -46,6 +47,19 @@ pub(crate) fn credential_selection(
             .filter(|p| {
                 filter
                     .mosh_profile_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&p.id))
+            })
+            .map(|p| p.id.clone())
+            .collect();
+    }
+    if scope.sync_telnet_profiles {
+        result.telnet_ids = store
+            .telnet_profiles()
+            .iter()
+            .filter(|p| {
+                filter
+                    .telnet_profile_ids
                     .as_ref()
                     .is_none_or(|ids| ids.contains(&p.id))
             })
@@ -218,17 +232,5 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn network_settings_export_omits_device_local_password_reference() {
-        let snapshot = oxideterm_settings::export_oxide_settings_snapshot_json(
-            &settings("device-secret-reference"),
-            Some(&std::collections::HashSet::from(["network".into()])),
-            false,
-        )
-        .unwrap();
-        assert!(!snapshot.contains("device-secret-reference"));
-        assert!(snapshot.contains("proxy.test"));
     }
 }

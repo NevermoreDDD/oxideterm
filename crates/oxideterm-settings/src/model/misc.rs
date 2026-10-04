@@ -184,19 +184,15 @@ pub enum SettingsUpstreamProxyProtocol {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SettingsUpstreamProxyAuth {
+    #[default]
     None,
     Password {
         username: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keychain_id: Option<String>,
     },
-}
-
-impl Default for SettingsUpstreamProxyAuth {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -395,6 +391,8 @@ fn default_host_tool_enabled() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct WindowUiState {
     #[serde(default)]
+    pub knowledge_editor: KnowledgeEditorUiState,
+    #[serde(default)]
     pub normal_bounds: Option<WindowGeometry>,
     #[serde(default)]
     pub maximized: bool,
@@ -402,6 +400,31 @@ pub struct WindowUiState {
     pub fullscreen: bool,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KnowledgeEditorMode {
+    #[default]
+    Source,
+    Preview,
+    Split,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KnowledgeEditorUiState {
+    pub mode: KnowledgeEditorMode,
+    pub source_ratio: f32,
+}
+
+impl Default for KnowledgeEditorUiState {
+    fn default() -> Self {
+        Self {
+            mode: KnowledgeEditorMode::Source,
+            source_ratio: 0.5,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -554,10 +577,7 @@ mod misc_tests {
         let restored: PersistedSettings =
             serde_json::from_value(serialized.clone()).expect("settings should deserialize");
 
-        assert_eq!(
-            serialized["settingsNavigation"]["groups"][0][0],
-            "terminal"
-        );
+        assert_eq!(serialized["settingsNavigation"]["groups"][0][0], "terminal");
         assert_eq!(restored.settings_navigation, settings.settings_navigation);
     }
 
@@ -576,45 +596,21 @@ mod misc_tests {
     }
 
     #[test]
-    fn legacy_settings_default_onboarding_disclaimer_acceptance_when_missing() {
+    fn missing_settings_fields_preserve_onboarding_appearance_and_ssh_defaults() {
         let mut serialized = PersistedSettings::default().to_value();
-        serialized
-            .as_object_mut()
-            .expect("settings should be an object")
-            .remove("onboardingDisclaimerAccepted");
-
-        let restored: PersistedSettings =
-            serde_json::from_value(serialized).expect("legacy settings should deserialize");
-
-        assert!(!restored.onboarding_disclaimer_accepted);
-    }
-
-    #[test]
-    fn legacy_appearance_settings_default_to_visible_window_titlebar() {
-        let mut serialized = PersistedSettings::default().to_value();
+        let root = serialized.as_object_mut().unwrap();
+        root.remove("onboardingDisclaimerAccepted");
+        root.remove("sshConfig");
         serialized["appearance"]
             .as_object_mut()
-            .expect("appearance should be an object")
+            .unwrap()
             .remove("showWindowTitlebar");
 
-        let restored: PersistedSettings =
-            serde_json::from_value(serialized).expect("legacy settings should deserialize");
+        let restored: PersistedSettings = serde_json::from_value(serialized).unwrap();
 
+        assert!(!restored.onboarding_disclaimer_accepted);
         assert!(restored.appearance.show_window_titlebar);
         assert_eq!(restored.appearance.window_opacity, DEFAULT_WINDOW_OPACITY);
-    }
-
-    #[test]
-    fn legacy_settings_default_to_automatic_ssh_config_discovery() {
-        let mut serialized = PersistedSettings::default().to_value();
-        serialized
-            .as_object_mut()
-            .expect("settings should be an object")
-            .remove("sshConfig");
-
-        let restored: PersistedSettings =
-            serde_json::from_value(serialized).expect("legacy settings should deserialize");
-
         assert!(restored.ssh_config.auto_load_hosts);
         assert!(!restored.ssh_config.auto_sync_hosts);
         assert!(!restored.ssh_config.allow_proxy_command);
@@ -675,6 +671,10 @@ mod misc_tests {
         let serialized = settings.to_value();
 
         assert_eq!(serialized["network"]["applicationProxyMode"], "direct");
-        assert!(serialized["network"].get("applicationProxyEnabled").is_none());
+        assert!(
+            serialized["network"]
+                .get("applicationProxyEnabled")
+                .is_none()
+        );
     }
 }

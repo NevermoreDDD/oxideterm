@@ -59,8 +59,12 @@ impl WorkspaceApp {
         .when(!disabled, |trigger| {
             trigger.cursor_pointer().on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.open_settings_select_from_pointer(select_id, cx);
+                cx.listener(move |this, _event, window, cx| {
+                    this.open_settings_select_from_pointer(
+                        select_id,
+                        window.window_handle().window_id(),
+                        cx,
+                    );
                     cx.stop_propagation();
                     cx.notify();
                 }),
@@ -77,9 +81,10 @@ impl WorkspaceApp {
             .child(select_anchor_probe(
                 anchor_id,
                 trigger,
-                move |anchor, _window, cx| {
+                move |anchor, window, cx| {
+                    let window_id = window.window_handle().window_id();
                     let _ = workspace.update(cx, |this, cx| {
-                        this.update_select_anchor(anchor, cx);
+                        this.update_settings_select_anchor(window_id, anchor, cx);
                     });
                 },
             ))
@@ -543,6 +548,27 @@ impl WorkspaceApp {
         .into_any_element()
     }
 
+    pub(in crate::workspace) fn update_settings_select_anchor(
+        &mut self,
+        window_id: gpui::WindowId,
+        anchor: OverlayAnchor,
+        cx: &mut Context<Self>,
+    ) {
+        let is_open_select_in_other_window = self
+            .open_settings_select
+            .is_some_and(|select| select.anchor_id() == anchor.id)
+            && self.open_settings_select_owner_window_id != Some(window_id);
+        self.settings_select_anchors
+            .insert((window_id, anchor.id), anchor);
+        if is_open_select_in_other_window {
+            // The popup is mounted in the owning native window. Ignore a
+            // coincidental repaint from another window instead of replacing
+            // its coordinate space with foreign bounds.
+            return;
+        }
+        self.update_select_anchor(anchor, cx);
+    }
+
     pub(in crate::workspace) fn update_select_anchor(
         &mut self,
         anchor: OverlayAnchor,
@@ -594,6 +620,16 @@ impl WorkspaceApp {
                 && self.terminal.read(cx).project_panel_open())
             || (anchor.id == SelectAnchorId::SessionManagerViewMode
                 && self.session_manager.read(cx).view_mode_menu_open)
+            || (matches!(
+                anchor.id,
+                SelectAnchorId::AuditCategory
+                    | SelectAnchorId::AuditSeverity
+                    | SelectAnchorId::AuditSource
+                    | SelectAnchorId::AuditOutcome
+                    | SelectAnchorId::AuditTime
+                    | SelectAnchorId::AuditSearchField
+            ) && self.audit.open_filter.is_some())
+            || (anchor.id == SelectAnchorId::ActiveSessionSort && self.session_sort_menu_open)
             || (anchor.id == SelectAnchorId::SessionManagerSort
                 && self.session_manager.read(cx).sort_menu_open)
             || (anchor.id == SelectAnchorId::SessionManagerBatchMove
@@ -796,7 +832,11 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn blur_text_inputs(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = self.search.blur();
+        if changed {
+            self.ime_marked_text = None;
+            self.clear_ime_selection();
+        }
         if self.terminal_command_sender.read(cx).compact_focused() {
             self.terminal_command_sender.update(cx, |sender, cx| {
                 sender.set_compact_focused(false, cx);
@@ -856,8 +896,7 @@ impl WorkspaceApp {
             self.ime_marked_text = None;
             changed = true;
         }
-        if self.terminal.read(cx).quick_commands.has_open_or_pending() {
-            self.close_terminal_quick_commands_popover(cx);
+        if self.blur_terminal_quick_commands_input(cx) {
             changed = true;
         }
         if self.close_terminal_git_branch_picker(cx) {
@@ -891,7 +930,7 @@ impl WorkspaceApp {
             changed = true;
         }
         if self
-            .sftp_view
+            .sftp_view()
             .update(cx, |sftp, cx| sftp.clear_input_focus(cx))
         {
             self.ime_marked_text = None;
@@ -1012,15 +1051,15 @@ impl WorkspaceApp {
                 }
             }
             SettingsSlider::AppearanceWindowOpacity => {
-                let Some(value) = self.settings_slider_value_from_position(
+                let Some(position) = self.settings_slider_value_from_position(
                     SelectAnchorId::SettingsAppearanceWindowOpacitySlider,
                     x,
-                    (MIN_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
-                    (MAX_WINDOW_OPACITY * SETTINGS_PERCENT_SCALE) as f32,
+                    0.0,
+                    1.0,
                 ) else {
                     return;
                 };
-                let value = value.round() as f64 / SETTINGS_PERCENT_SCALE;
+                let value = super::appearance::window_opacity_from_slider_position(position);
                 if self.settings_store.settings().appearance.window_opacity != value {
                     self.edit_settings(|settings| settings.appearance.window_opacity = value, cx);
                     // Detached windows consume the same setting on their next frame.
@@ -1157,10 +1196,25 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn close_settings_select(&mut self) {
+        self.settings_theme_preview = None;
         browser_behavior::close_browser_trigger_select(
             &mut self.open_settings_select,
             &mut self.settings_select_focus_origin,
         );
+        self.open_settings_select_owner_window_id = None;
+    }
+
+    pub(in crate::workspace) fn release_settings_select_window(
+        &mut self,
+        window_id: gpui::WindowId,
+    ) -> bool {
+        self.settings_select_anchors
+            .retain(|(anchor_window_id, _), _| *anchor_window_id != window_id);
+        if self.open_settings_select_owner_window_id == Some(window_id) {
+            self.close_settings_select();
+            return true;
+        }
+        false
     }
 
     pub(in crate::workspace) fn clear_settings_input_draft(&mut self, input: SettingsInput) {
@@ -1283,6 +1337,10 @@ impl WorkspaceApp {
             | SettingsInput::ManagedKeyRenameName
             | SettingsInput::ConnectionImportTargetGroup => String::new(),
             SettingsInput::LocalPrivilegeLabel
+            | SettingsInput::TotpName
+            | SettingsInput::TotpSecret
+            | SettingsInput::TotpPattern
+            | SettingsInput::TotpPeriod
             | SettingsInput::LocalPrivilegeUsernameHint
             | SettingsInput::LocalPrivilegeSecret
             | SettingsInput::LocalPrivilegePromptPatterns => String::new(),
@@ -1400,6 +1458,10 @@ impl WorkspaceApp {
             | SettingsInput::ManagedKeyRenameName
             | SettingsInput::ConnectionImportTargetGroup => {}
             SettingsInput::LocalPrivilegeLabel
+            | SettingsInput::TotpName
+            | SettingsInput::TotpSecret
+            | SettingsInput::TotpPattern
+            | SettingsInput::TotpPeriod
             | SettingsInput::LocalPrivilegeUsernameHint
             | SettingsInput::LocalPrivilegeSecret
             | SettingsInput::LocalPrivilegePromptPatterns => {}
@@ -1623,7 +1685,14 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
     // can open or drag them.
     matches!(
         anchor_id,
-        SelectAnchorId::SettingsAppearanceUiFontSizeSlider
+        SelectAnchorId::ActiveSessionSort
+            | SelectAnchorId::AuditCategory
+            | SelectAnchorId::AuditSeverity
+            | SelectAnchorId::AuditSource
+            | SelectAnchorId::AuditOutcome
+            | SelectAnchorId::AuditTime
+                    | SelectAnchorId::AuditSearchField
+            | SelectAnchorId::SettingsAppearanceUiFontSizeSlider
             | SelectAnchorId::SettingsAppearanceBorderRadiusSlider
             | SelectAnchorId::OnboardingBorderRadiusSlider
             | SelectAnchorId::SettingsAppearanceWindowOpacitySlider
@@ -1643,6 +1712,8 @@ pub(in crate::workspace) fn select_anchor_tracks_while_closed(anchor_id: SelectA
             | SelectAnchorId::NewConnectionGroup
             | SelectAnchorId::NewConnectionKeyAuthSource
             | SelectAnchorId::NewConnectionManagedKey
+            | SelectAnchorId::NewConnectionTotp
+            | SelectAnchorId::NewConnectionJumpTotp
             | SelectAnchorId::NewConnectionJumpSavedConnection
             | SelectAnchorId::NewConnectionRemoteDesktopSshGateway
             | SelectAnchorId::NewConnectionJumpKeyAuthSource

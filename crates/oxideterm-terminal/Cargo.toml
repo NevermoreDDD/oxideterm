@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "oxideterm-terminal"
 edition.workspace = true
@@ -5,6 +8,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+oxideterm-audit = { path = "../oxideterm-audit" }
 alacritty_terminal.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
@@ -15,6 +19,7 @@ memchr.workspace = true
 oxideterm-ssh = { path = "../oxideterm-ssh" }
 oxideterm-modem-transfer = { path = "../oxideterm-modem-transfer" }
 oxideterm-mosh = { path = "../oxideterm-mosh" }
+oxideterm-network-proxy = { path = "../oxideterm-network-proxy" }
 oxideterm-terminal-encoding = { path = "../oxideterm-terminal-encoding" }
 oxideterm-terminal-graphics = { path = "../oxideterm-terminal-graphics" }
 oxideterm-terminal-model = { path = "../oxideterm-terminal-model" }
@@ -34,7 +39,7 @@ zeroize.workspace = true
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
-russh = { path = "../russh" }
+russh.workspace = true
 rand10.workspace = true
 criterion.workspace = true
 

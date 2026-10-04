@@ -110,11 +110,13 @@
       "auth_key": "SSH 키",
       "auth_agent": "Agent",
       "saved_password": "저장된 비밀번호",
-      "password_placeholder": "시스템 키체인에 저장됨",
+      "password_placeholder": "클릭하여 저장된 비밀번호 보기",
       "password_required": "연결하려면 비밀번호를 입력하세요.",
       "show_password": "저장된 비밀번호 표시",
       "hide_password": "저장된 비밀번호 숨기기",
-      "password_load_failed": "저장된 비밀번호를 읽을 수 없습니다. 자격 증명 저장소의 접근 권한을 확인하고 다시 시도하세요.",
+      "password_load_failed": "자격 증명 저장소를 읽을 수 없습니다. 다시 시도하거나 비밀번호를 다시 입력하고 저장하세요.",
+      "password_not_found": "이 연결이 참조하는 비밀번호가 자격 증명 저장소에 없습니다. 비밀번호를 다시 입력하고 저장하세요.",
+      "password_store_locked": "포터블 보관함이 잠겨 있습니다. OxideTerm을 다시 시작하고 포터블 모드 비밀번호로 잠금을 해제한 후 다시 시도하세요.",
       "password_hint": "눈 모양 버튼으로 저장된 비밀번호를 확인할 수 있습니다. 보기만 하면 변경되지 않습니다. 값을 편집하면 교체되고, 비워 두면 기존 비밀번호가 유지됩니다.",
       "key_path": "키 파일 경로",
       "browse": "찾아보기",
@@ -125,6 +127,9 @@
       "choose_icon": "아이콘 변경",
       "hide_icons": "아이콘 접기",
       "default_icon": "기본 아이콘",
+      "auto_icon": "자동 감지",
+      "custom_icon": "아이콘 지정",
+      "auto_icon_hint": "연결 후 활성 세션에 감지된 시스템의 아이콘이 표시됩니다. 일치하는 아이콘이 없으면 일반 서버 아이콘이 사용됩니다.",
       "color": "색상",
       "icon_color": "아이콘 색상",
       "icon_background_color": "아이콘 배경색",
@@ -132,7 +137,8 @@
       "cancel": "취소",
       "save": "저장",
       "saving": "저장 중...",
-      "passphrase_hint": "키 경로가 변경되지 않은 경우 비워 두면 저장된 패스프레이즈를 유지합니다."
+      "passphrase_hint": "키 경로가 변경되지 않은 경우 비워 두면 저장된 패스프레이즈를 유지합니다.",
+      "brand_icon_hint": "배포판 로고는 원래 색상과 비율을 유지합니다."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "저장된 세션",
       "expand_all": "모두 펼치기",
       "collapse_all": "모두 접기"
+    },
+    "local_terminal_profiles": {
+      "delete": "로컬 세션 삭제",
+      "delete_failed": "로컬 세션을 삭제하지 못했습니다",
+      "confirm_delete": "로컬 세션 “{{name}}”을 삭제할까요? 실행 중인 터미널은 유지됩니다."
     }
   }
 }

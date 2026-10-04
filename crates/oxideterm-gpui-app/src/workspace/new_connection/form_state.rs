@@ -1,3 +1,4 @@
+use super::password_prompt::SavedPasswordLoadError;
 use std::fmt;
 
 use oxideterm_connections::{
@@ -149,6 +150,8 @@ pub(in crate::workspace) fn connection_icon_field_visible(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum NewConnectionSelect {
+    Totp,
+    JumpTotp,
     Group,
     KeyAuthSource,
     ManagedKey,
@@ -201,6 +204,7 @@ pub(in crate::workspace) enum ConnectionRouteTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(in crate::workspace) enum NewConnectionField {
     Name,
+    LocalCwd,
     Host,
     Port,
     Username,
@@ -364,6 +368,7 @@ pub(in crate::workspace) fn toggle_remote_desktop_feature(
 }
 
 pub(in crate::workspace) struct NewConnectionProxyHop {
+    pub(in crate::workspace) totp_credential_id: Option<String>,
     pub(in crate::workspace) saved_connection_id: String,
     pub(in crate::workspace) persisted_proxy_hop_index: Option<usize>,
     pub(in crate::workspace) host: String,
@@ -371,6 +376,7 @@ pub(in crate::workspace) struct NewConnectionProxyHop {
     pub(in crate::workspace) username: String,
     pub(in crate::workspace) auth_tab: SshAuthTab,
     pub(in crate::workspace) password: String,
+    pub(in crate::workspace) empty_password: bool,
     pub(in crate::workspace) key_path: String,
     pub(in crate::workspace) managed_key_id: String,
     pub(in crate::workspace) cert_path: String,
@@ -426,6 +432,7 @@ impl fmt::Debug for NewConnectionProxyHop {
 impl NewConnectionProxyHop {
     pub(in crate::workspace) fn new() -> Self {
         Self {
+            totp_credential_id: None,
             saved_connection_id: String::new(),
             persisted_proxy_hop_index: None,
             host: String::new(),
@@ -433,6 +440,7 @@ impl NewConnectionProxyHop {
             username: String::new(),
             auth_tab: SshAuthTab::SshKey,
             password: String::new(),
+            empty_password: false,
             key_path: String::new(),
             managed_key_id: String::new(),
             cert_path: String::new(),
@@ -454,6 +462,7 @@ impl NewConnectionProxyHop {
     ) -> Self {
         // Reopen only route metadata; protected credentials stay in their current owner.
         Self {
+            totp_credential_id: hop.totp_credential_id.clone(),
             saved_connection_id: String::new(),
             persisted_proxy_hop_index: Some(persisted_proxy_hop_index),
             host: hop.host.clone(),
@@ -461,6 +470,7 @@ impl NewConnectionProxyHop {
             username: hop.username.clone(),
             auth_tab: ssh_auth_tab_from_saved_auth(&hop.auth),
             password: String::new(),
+            empty_password: hop.auth.uses_empty_password(),
             key_path: hop.auth.key_path().unwrap_or_default().to_string(),
             managed_key_id: hop.auth.managed_key_id().unwrap_or_default().to_string(),
             cert_path: hop.auth.cert_path().unwrap_or_default().to_string(),
@@ -489,7 +499,7 @@ impl NewConnectionProxyHop {
 
     pub(in crate::workspace) fn has_explicit_secret_draft(&self) -> bool {
         match self.auth_tab {
-            SshAuthTab::Password => !self.password.is_empty(),
+            SshAuthTab::Password => self.empty_password || !self.password.is_empty(),
             SshAuthTab::DefaultKey
             | SshAuthTab::SshKey
             | SshAuthTab::ManagedKey
@@ -505,10 +515,12 @@ impl NewConnectionProxyHop {
         // A saved secret is reusable only while every authentication endpoint field still
         // matches the selected connection, preventing credentials from reaching an edited host.
         self.saved_connection_id == connection.id
+            && self.totp_credential_id == connection.options.totp_credential_id
             && self.host.trim() == connection.host
             && self.port.trim().parse::<u16>().ok() == Some(connection.port)
             && self.username.trim() == connection.username
             && self.auth_tab == ssh_auth_tab_from_saved_auth(&connection.auth)
+            && self.empty_password == connection.auth.uses_empty_password()
             && self.key_path.trim() == connection.auth.key_path().unwrap_or_default()
             && self.cert_path.trim() == connection.auth.cert_path().unwrap_or_default()
             && self.managed_key_id.trim() == connection.auth.managed_key_id().unwrap_or_default()
@@ -531,7 +543,9 @@ impl NewConnectionProxyHop {
     }
 
     pub(in crate::workspace) fn apply_saved_connection(&mut self, connection: &ConnectionInfo) {
+        self.totp_credential_id = connection.totp_credential_id.clone();
         self.saved_connection_id = connection.id.clone();
+        self.empty_password = connection.empty_password;
         self.persisted_proxy_hop_index = None;
         self.host = connection.host.clone();
         self.port = connection.port.to_string();
@@ -600,6 +614,7 @@ pub(in crate::workspace) struct StandaloneSftpSecondaryForm {
     pub(in crate::workspace) username: String,
     pub(in crate::workspace) auth_tab: SshAuthTab,
     pub(in crate::workspace) password: String,
+    pub(in crate::workspace) empty_password: bool,
     pub(in crate::workspace) password_keychain_id: Option<String>,
     pub(in crate::workspace) password_visible: bool,
     pub(in crate::workspace) key_path: String,
@@ -644,6 +659,7 @@ impl Default for StandaloneSftpSecondaryForm {
             username: "root".to_string(),
             auth_tab: SshAuthTab::Password,
             password: String::new(),
+            empty_password: false,
             password_keychain_id: None,
             password_visible: false,
             key_path: String::new(),
@@ -754,10 +770,13 @@ impl Drop for StandaloneSftpSecondaryForm {
 }
 
 pub(in crate::workspace) struct NewConnectionForm {
+    pub(in crate::workspace) totp_credential_id: Option<String>,
     // Reauthentication submits into the existing logical session, never a second sidebar row.
     pub(in crate::workspace) standalone_connection_id: Option<String>,
     pub(in crate::workspace) transport: NewConnectionTransport,
-    /// Selects one discovered shell for this one-shot local terminal launch.
+    pub(in crate::workspace) local_profile_id: Option<String>,
+    pub(in crate::workspace) local_cwd: String,
+    /// Selects a discovered shell without retaining environment credentials.
     pub(in crate::workspace) local_shell_id: Option<String>,
     pub(in crate::workspace) name: String,
     pub(in crate::workspace) host: String,
@@ -770,6 +789,7 @@ pub(in crate::workspace) struct NewConnectionForm {
     pub(in crate::workspace) gssapi_credentials_available: Option<bool>,
     pub(in crate::workspace) gssapi_credentials_check_pending: bool,
     pub(in crate::workspace) password: String,
+    pub(in crate::workspace) empty_password: bool,
     pub(in crate::workspace) remote_desktop_session_options: RemoteDesktopSessionOptions,
     /// Identifies an existing RDP/VNC asset without overloading SSH edit state.
     pub(in crate::workspace) remote_desktop_profile_id: Option<String>,
@@ -781,6 +801,9 @@ pub(in crate::workspace) struct NewConnectionForm {
     pub(in crate::workspace) serial_profile_id: Option<String>,
     /// Identifies an existing Telnet asset without changing a live Telnet session.
     pub(in crate::workspace) telnet_profile_id: Option<String>,
+    pub(in crate::workspace) ftp_profile_id: Option<String>,
+    pub(in crate::workspace) ftp_tls: bool,
+    pub(in crate::workspace) ftp_attempt: Option<(uuid::Uuid, tokio_util::sync::CancellationToken)>,
     /// Identifies an independent SFTP asset without creating a NodeRouter node.
     pub(in crate::workspace) standalone_sftp_profile_id: Option<String>,
     /// Controls whether the dual-pane SFTP surface has one or two authenticated remotes.
@@ -792,7 +815,7 @@ pub(in crate::workspace) struct NewConnectionForm {
     // A revealed value is presentation state until the user edits it.
     pub(in crate::workspace) password_from_store: bool,
     pub(in crate::workspace) password_load_id: Option<u64>,
-    pub(in crate::workspace) password_load_failed: bool,
+    pub(in crate::workspace) password_load_error: Option<SavedPasswordLoadError>,
     pub(in crate::workspace) password_visible: bool,
     pub(in crate::workspace) key_path: String,
     pub(in crate::workspace) managed_key_id: String,
@@ -852,6 +875,8 @@ pub(in crate::workspace) struct NewConnectionForm {
     pub(in crate::workspace) legacy_ssh_compatibility: bool,
     pub(in crate::workspace) ssh_algorithms: SshAlgorithmPreferences,
     pub(in crate::workspace) ssh_algorithm_editor_open: bool,
+    pub(in crate::workspace) ssh_algorithm_selected: Option<String>,
+    pub(in crate::workspace) ssh_algorithm_menu: Option<(String, gpui::Point<gpui::Pixels>)>,
     pub(in crate::workspace) ssh_algorithm_editor_category: oxideterm_ssh::SshAlgorithmCategory,
     pub(in crate::workspace) connect_timeout_seconds: u64,
     /// Preserves transient invalid input while the numeric value fails closed at zero.
@@ -1062,9 +1087,12 @@ impl fmt::Debug for NewConnectionForm {
 impl Default for NewConnectionForm {
     fn default() -> Self {
         Self {
+            totp_credential_id: None,
             standalone_connection_id: None,
             transport: NewConnectionTransport::Ssh,
             local_shell_id: None,
+            local_profile_id: None,
+            local_cwd: String::new(),
             name: String::new(),
             host: String::new(),
             port: SSH_DEFAULT_PORT_TEXT.to_string(),
@@ -1076,12 +1104,16 @@ impl Default for NewConnectionForm {
             gssapi_credentials_available: None,
             gssapi_credentials_check_pending: false,
             password: String::new(),
+            empty_password: false,
             remote_desktop_session_options: RemoteDesktopSessionOptions::default(),
             remote_desktop_profile_id: None,
             remote_desktop_ssh_gateway_connection_id: None,
             mosh_profile_id: None,
             serial_profile_id: None,
             telnet_profile_id: None,
+            ftp_profile_id: None,
+            ftp_tls: true,
+            ftp_attempt: None,
             standalone_sftp_profile_id: None,
             standalone_sftp_transfer_mode: StandaloneSftpTransferMode::LocalRemote,
             standalone_sftp_secondary: StandaloneSftpSecondaryForm::default(),
@@ -1089,7 +1121,7 @@ impl Default for NewConnectionForm {
             password_loaded: true,
             password_from_store: false,
             password_load_id: None,
-            password_load_failed: false,
+            password_load_error: None,
             password_visible: false,
             key_path: String::new(),
             managed_key_id: String::new(),
@@ -1145,6 +1177,8 @@ impl Default for NewConnectionForm {
             legacy_ssh_compatibility: false,
             ssh_algorithms: oxideterm_connections::SshAlgorithmPreferences::default(),
             ssh_algorithm_editor_open: false,
+            ssh_algorithm_selected: None,
+            ssh_algorithm_menu: None,
             ssh_algorithm_editor_category: oxideterm_ssh::SshAlgorithmCategory::Kex,
             connect_timeout_seconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
             connect_timeout_seconds_text: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS.to_string(),
@@ -1210,6 +1244,9 @@ impl NewConnectionForm {
 
 impl Drop for NewConnectionForm {
     fn drop(&mut self) {
+        if let Some((_, cancel)) = &self.ftp_attempt {
+            cancel.cancel();
+        }
         // GPUI inputs require plain String drafts, so scrub them at owner teardown.
         self.zeroize_secret_drafts();
     }
@@ -1232,36 +1269,7 @@ pub(in crate::workspace) fn form_from_remote_desktop_profile(
     form.remote_desktop_session_options = profile.session_options;
     form.remote_desktop_profile_id = Some(profile.id.clone());
     form.remote_desktop_ssh_gateway_connection_id = profile.ssh_gateway_connection_id.clone();
-    match &profile.upstream_proxy {
-        oxideterm_connections::SavedUpstreamProxyPolicy::Direct => {
-            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Direct
-        }
-        oxideterm_connections::SavedUpstreamProxyPolicy::UseGlobal => {
-            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::UseGlobal
-        }
-        oxideterm_connections::SavedUpstreamProxyPolicy::Custom { proxy } => {
-            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Custom;
-            form.upstream_proxy_protocol = proxy.protocol;
-            form.upstream_proxy_host = proxy.host.clone();
-            form.upstream_proxy_port = proxy.port.to_string();
-            form.upstream_proxy_remote_dns = proxy.remote_dns;
-            form.upstream_proxy_no_proxy = proxy.no_proxy.clone();
-            match &proxy.auth {
-                oxideterm_connections::SavedUpstreamProxyAuth::None => {
-                    form.upstream_proxy_auth = NewConnectionUpstreamProxyAuth::None
-                }
-                oxideterm_connections::SavedUpstreamProxyAuth::Password {
-                    username,
-                    keychain_id,
-                    ..
-                } => {
-                    form.upstream_proxy_auth = NewConnectionUpstreamProxyAuth::Password;
-                    form.upstream_proxy_username = username.clone();
-                    form.upstream_proxy_password_keychain_id = keychain_id.clone();
-                }
-            }
-        }
-    }
+    apply_saved_upstream_proxy_to_form(&mut form, &profile.upstream_proxy);
     form.saved_password_keychain_id = profile.credential_ref.clone();
     form.save_password = profile.credential_ref.is_some();
     form.group = profile.group.clone().unwrap_or(ungrouped_label);
@@ -1417,6 +1425,42 @@ pub(in crate::workspace) fn form_from_serial_profile(
     form
 }
 
+pub(super) fn apply_saved_upstream_proxy_to_form(
+    form: &mut NewConnectionForm,
+    policy: &oxideterm_connections::SavedUpstreamProxyPolicy,
+) {
+    match policy {
+        oxideterm_connections::SavedUpstreamProxyPolicy::Direct => {
+            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Direct
+        }
+        oxideterm_connections::SavedUpstreamProxyPolicy::UseGlobal => {
+            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::UseGlobal
+        }
+        oxideterm_connections::SavedUpstreamProxyPolicy::Custom { proxy } => {
+            form.upstream_proxy_policy = NewConnectionUpstreamProxyPolicy::Custom;
+            form.upstream_proxy_protocol = proxy.protocol;
+            form.upstream_proxy_host = proxy.host.clone();
+            form.upstream_proxy_port = proxy.port.to_string();
+            form.upstream_proxy_remote_dns = proxy.remote_dns;
+            form.upstream_proxy_no_proxy = proxy.no_proxy.clone();
+            match &proxy.auth {
+                oxideterm_connections::SavedUpstreamProxyAuth::None => {
+                    form.upstream_proxy_auth = NewConnectionUpstreamProxyAuth::None
+                }
+                oxideterm_connections::SavedUpstreamProxyAuth::Password {
+                    username,
+                    keychain_id,
+                    ..
+                } => {
+                    form.upstream_proxy_auth = NewConnectionUpstreamProxyAuth::Password;
+                    form.upstream_proxy_username = username.clone();
+                    form.upstream_proxy_password_keychain_id = keychain_id.clone();
+                }
+            }
+        }
+    }
+}
+
 pub(in crate::workspace) fn form_from_telnet_profile(
     profile: &TelnetProfile,
     ungrouped_label: String,
@@ -1425,6 +1469,7 @@ pub(in crate::workspace) fn form_from_telnet_profile(
     let mut form = NewConnectionForm::default();
     form.transport = NewConnectionTransport::Telnet;
     form.telnet_profile_id = Some(profile.id.clone());
+    apply_saved_upstream_proxy_to_form(&mut form, &profile.upstream_proxy);
     form.telnet_profile_name = profile.name.clone();
     form.group = profile.group.clone().unwrap_or(ungrouped_label);
     form.notes = profile.notes.clone().unwrap_or_default();
@@ -1551,11 +1596,20 @@ pub(in crate::workspace) fn next_connection_field(
     transport: NewConnectionTransport,
     upstream_proxy_policy: NewConnectionUpstreamProxyPolicy,
     upstream_proxy_auth: NewConnectionUpstreamProxyAuth,
+    empty_password: bool,
     forward: bool,
 ) -> NewConnectionField {
     if transport == NewConnectionTransport::LocalTerminal {
-        // A one-shot local terminal has no editable or persistable form fields.
-        return field;
+        let fields = [
+            NewConnectionField::Name,
+            NewConnectionField::LocalCwd,
+            NewConnectionField::Group,
+        ];
+        let index = fields
+            .iter()
+            .position(|candidate| *candidate == field)
+            .unwrap_or(0);
+        return fields[(index + if forward { 1 } else { fields.len() - 1 }) % fields.len()];
     }
     if transport == NewConnectionTransport::WslGraphics {
         return NewConnectionField::Name;
@@ -1579,12 +1633,42 @@ pub(in crate::workspace) fn next_connection_field(
         };
         return fields[next];
     }
-    if transport == NewConnectionTransport::Telnet {
-        let fields = [
-            NewConnectionField::TelnetProfileName,
-            NewConnectionField::Host,
-            NewConnectionField::Port,
-        ];
+    if matches!(
+        transport,
+        NewConnectionTransport::Telnet | NewConnectionTransport::Ftp
+    ) {
+        let mut fields = if transport == NewConnectionTransport::Ftp {
+            vec![
+                NewConnectionField::Name,
+                NewConnectionField::Host,
+                NewConnectionField::Port,
+                NewConnectionField::Notes,
+                NewConnectionField::Username,
+                NewConnectionField::Password,
+                NewConnectionField::InitialRemotePath,
+                NewConnectionField::ConnectTimeoutSeconds,
+            ]
+        } else {
+            vec![
+                NewConnectionField::TelnetProfileName,
+                NewConnectionField::Host,
+                NewConnectionField::Port,
+                NewConnectionField::Notes,
+            ]
+        };
+        if upstream_proxy_policy == NewConnectionUpstreamProxyPolicy::Custom {
+            fields.extend([
+                NewConnectionField::UpstreamProxyHost,
+                NewConnectionField::UpstreamProxyPort,
+                NewConnectionField::UpstreamProxyNoProxy,
+            ]);
+            if upstream_proxy_auth == NewConnectionUpstreamProxyAuth::Password {
+                fields.extend([
+                    NewConnectionField::UpstreamProxyUsername,
+                    NewConnectionField::UpstreamProxyPassword,
+                ]);
+            }
+        }
         let index = fields
             .iter()
             .position(|candidate| *candidate == field)
@@ -1607,6 +1691,7 @@ pub(in crate::workspace) fn next_connection_field(
             NewConnectionField::Group,
             NewConnectionField::Host,
             NewConnectionField::Port,
+            NewConnectionField::Notes,
             NewConnectionField::Username,
             NewConnectionField::Password,
         ];
@@ -1741,6 +1826,9 @@ pub(in crate::workspace) fn next_connection_field(
             ]);
         }
     }
+    if empty_password {
+        fields.retain(|field| *field != NewConnectionField::Password);
+    }
     let index = fields
         .iter()
         .position(|candidate| *candidate == field)
@@ -1759,6 +1847,7 @@ pub(in crate::workspace) fn next_jump_connection_field(
     field: NewConnectionField,
     auth_tab: SshAuthTab,
     gssapi_enabled: bool,
+    empty_password: bool,
     forward: bool,
 ) -> NewConnectionField {
     let mut fields: Vec<NewConnectionField> = match auth_tab {
@@ -1809,6 +1898,9 @@ pub(in crate::workspace) fn next_jump_connection_field(
     };
     if gssapi_enabled {
         fields.insert(3, NewConnectionField::JumpGssapiServerIdentity);
+    }
+    if empty_password {
+        fields.retain(|field| *field != NewConnectionField::JumpPassword);
     }
     let index = fields
         .iter()
@@ -1909,6 +2001,13 @@ pub(in crate::workspace) fn next_standalone_sftp_field(
         fields.push(NewConnectionField::StandaloneSftpSecondaryInitialRemotePath);
         fields.push(NewConnectionField::StandaloneSftpSecondaryConnectTimeoutSeconds);
     }
+    fields.retain(|field| match field {
+        NewConnectionField::Password => !form.empty_password,
+        NewConnectionField::StandaloneSftpSecondaryPassword => {
+            !form.standalone_sftp_secondary.empty_password
+        }
+        _ => true,
+    });
     let index = fields
         .iter()
         .position(|candidate| *candidate == form.focused_field)
@@ -1927,7 +2026,7 @@ pub(in crate::workspace) fn password_draft_mut(form: &mut NewConnectionForm) -> 
     // Typing supersedes any pending read, even if the replacement is later cleared.
     form.password_loaded = true;
     form.password_load_id = None;
-    form.password_load_failed = false;
+    form.password_load_error = None;
     form.password_from_store = false;
     &mut form.password
 }
@@ -1937,6 +2036,7 @@ pub(in crate::workspace) fn current_connection_field_mut(
 ) -> &mut String {
     match form.focused_field {
         NewConnectionField::Name => &mut form.name,
+        NewConnectionField::LocalCwd => &mut form.local_cwd,
         NewConnectionField::Host => &mut form.host,
         NewConnectionField::Port => &mut form.port,
         NewConnectionField::Username => &mut form.username,
@@ -2094,6 +2194,7 @@ pub(in crate::workspace) fn current_connection_field_mut(
 pub(in crate::workspace) fn current_connection_field(form: &NewConnectionForm) -> &str {
     match form.focused_field {
         NewConnectionField::Name => &form.name,
+        NewConnectionField::LocalCwd => &form.local_cwd,
         NewConnectionField::Host => &form.host,
         NewConnectionField::Port => &form.port,
         NewConnectionField::Username => &form.username,
@@ -2601,6 +2702,8 @@ mod tests {
             2222,
             "operator",
             SavedAuth::Password {
+                empty_password: false,
+
                 keychain_id: Some("mosh-password-owner".to_string()),
                 plaintext_password: None,
             },
@@ -2620,6 +2723,7 @@ mod tests {
         profile.prediction = MoshPredictionMode::Always;
         profile.locale = Some("en_US.UTF-8".to_string());
         profile.proxy_chain.push(SavedProxyHop {
+            totp_credential_id: None,
             host: "jump.example.com".to_string(),
             port: 2200,
             username: "jump".to_string(),
@@ -2701,6 +2805,20 @@ mod tests {
     #[test]
     fn telnet_profile_form_restores_endpoint_and_terminal_settings_for_editing() {
         let mut profile = TelnetProfile::new("Router console", "router.example.com", 2323);
+        profile.upstream_proxy = SavedUpstreamProxyPolicy::Custom {
+            proxy: oxideterm_connections::SavedUpstreamProxyConfig {
+                protocol: oxideterm_connections::SavedUpstreamProxyProtocol::HttpConnect,
+                host: "proxy.test".into(),
+                port: 8080,
+                remote_dns: false,
+                no_proxy: "router.local".into(),
+                auth: oxideterm_connections::SavedUpstreamProxyAuth::Password {
+                    username: "proxy-user".into(),
+                    keychain_id: Some("protected-proxy".into()),
+                    plaintext_password: None,
+                },
+            },
+        };
         profile.id = "telnet-1".to_string();
         profile.group = Some("Lab".to_string());
         profile.notes = Some("Legacy management plane".to_string());
@@ -2712,6 +2830,18 @@ mod tests {
             Some(oxideterm_connections::ConnectionTerminalBackspaceSequence::Delete);
 
         let form = form_from_telnet_profile(&profile, "Ungrouped".to_string());
+        assert_eq!(
+            form.upstream_proxy_policy,
+            super::NewConnectionUpstreamProxyPolicy::Custom
+        );
+        assert_eq!(form.upstream_proxy_host, "proxy.test");
+        assert_eq!(form.upstream_proxy_port, "8080");
+        assert_eq!(form.upstream_proxy_no_proxy, "router.local");
+        assert!(!form.upstream_proxy_remote_dns);
+        assert_eq!(
+            form.upstream_proxy_password_keychain_id.as_deref(),
+            Some("protected-proxy")
+        );
 
         assert_eq!(form.telnet_profile_id.as_deref(), Some("telnet-1"));
         assert_eq!(form.transport, NewConnectionTransport::Telnet);
@@ -2727,7 +2857,7 @@ mod tests {
     }
 
     #[test]
-    fn text_input_uses_platform_text_not_binding_key() {
+    fn text_input_uses_platform_text_and_ignores_shortcut_keystrokes() {
         let shifted = keystroke(
             "1",
             Some("!"),
@@ -2747,10 +2877,6 @@ mod tests {
 
         assert_eq!(text_from_keystroke(&shifted), Some("!"));
         assert_eq!(text_from_keystroke(&option_char), Some("ß"));
-    }
-
-    #[test]
-    fn text_input_ignores_shortcut_keystrokes() {
         let shortcut = keystroke(
             "v",
             None,
@@ -2842,6 +2968,8 @@ mod tests {
     #[test]
     fn jump_hop_uses_saved_connection_metadata_without_secrets() {
         let connection = ConnectionInfo {
+            totp_credential_id: None,
+            empty_password: false,
             id: "conn-1".to_string(),
             name: "Bastion".to_string(),
             group: Some("Prod".to_string()),

@@ -57,6 +57,7 @@ use crate::{
 };
 
 mod gssapi;
+mod totp;
 
 pub fn kerberos_credentials_available() -> bool {
     gssapi::credentials_available()
@@ -234,8 +235,13 @@ pub enum SshTransportError {
     Channel(String),
 }
 
+pub struct ManagedKeyMaterial {
+    pub private_key: Zeroizing<String>,
+    pub certificate: Option<String>,
+}
+
 pub type ManagedKeyResolver =
-    Arc<dyn Fn(&str) -> Result<Zeroizing<String>, SshTransportError> + Send + Sync>;
+    Arc<dyn Fn(&str) -> Result<ManagedKeyMaterial, SshTransportError> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SshAlgorithmKind {
@@ -422,6 +428,34 @@ pub struct KeyboardInteractivePromptRequest {
 
 pub type KeyboardInteractiveResponses = Zeroizing<Vec<String>>;
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct SshPasswordPrompt {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+}
+
+impl SshPasswordPrompt {
+    pub fn challenge(&self) -> KeyboardInteractivePromptRequest {
+        KeyboardInteractivePromptRequest {
+            flow_id: uuid::Uuid::new_v4().to_string(),
+            name: format!("{}@{}:{}", self.username, self.host, self.port),
+            instructions: String::new(),
+            prompts: vec![KeyboardInteractivePrompt {
+                prompt: "ssh.form.password".into(),
+                echo: false,
+            }],
+            chained: false,
+        }
+    }
+}
+
+pub struct SshPasswordResponse {
+    pub password: Zeroizing<String>,
+    // The authentication attempt owns this callback and secret until full authentication succeeds.
+    pub on_authenticated: Option<Box<dyn FnOnce(Zeroizing<String>) + Send>>,
+}
+
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum SshPromptError {
     #[error("keyboard-interactive authentication cancelled")]
@@ -433,6 +467,26 @@ pub enum SshPromptError {
 }
 
 pub trait SshPromptHandler: Send + Sync {
+    /// A successful login may bypass or replace configured credentials; persistence needs this distinction.
+    fn authentication_completed(&self, _configured_credentials_confirmed: bool) {}
+
+    fn password(
+        &self,
+        prompt: SshPasswordPrompt,
+    ) -> Pin<Box<dyn Future<Output = Result<SshPasswordResponse, SshPromptError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let mut responses = self.keyboard_interactive(prompt.challenge()).await?;
+            if responses.len() != 1 {
+                return Err(SshPromptError::Failed("Invalid password response".into()));
+            }
+            Ok(SshPasswordResponse {
+                password: Zeroizing::new(std::mem::take(&mut responses[0])),
+                on_authenticated: None,
+            })
+        })
+    }
+
     fn keyboard_interactive(
         &self,
         request: KeyboardInteractivePromptRequest,
@@ -442,6 +496,7 @@ pub trait SshPromptHandler: Send + Sync {
 }
 
 pub struct SshPtyHandle {
+    audit: Option<oxideterm_audit::AuditContext>,
     pub session_id: String,
     pub command_tx: mpsc::Sender<SshTransportCommand>,
     pub output_rx: SshOutputReceiver,
@@ -765,6 +820,10 @@ impl SshShellChannel {
 }
 
 impl SshPtyHandle {
+    pub fn audit_context(&self) -> Option<oxideterm_audit::AuditContext> {
+        self.audit.clone()
+    }
+
     pub fn shell_started(&self) -> bool {
         self.shell_started.load(Ordering::Acquire)
     }
@@ -788,6 +847,7 @@ impl Drop for SshPtyHandle {
 
 #[derive(Clone)]
 pub struct SshTransportClient {
+    audit: Option<oxideterm_audit::AuditContext>,
     config: SshConfig,
     prompt_handler: Option<Arc<dyn SshPromptHandler>>,
     managed_key_resolver: Option<ManagedKeyResolver>,
@@ -800,6 +860,7 @@ include!("transport/output.rs");
 include!("transport/x11.rs");
 include!("transport/client.rs");
 include!("transport/handler.rs");
+include!("transport/auth_audit.rs");
 include!("transport/auth.rs");
 include!("transport/paths.rs");
 include!("transport/proxy_command.rs");

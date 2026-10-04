@@ -409,36 +409,32 @@ mod tests {
     };
 
     #[test]
-    fn runtime_handle_debug_redacts_control_token() {
+    fn control_token_debug_is_redacted_and_runtime_handle_serializes() {
         let handle = RuntimeHandleId::new();
-        let raw = handle.as_str().to_string();
-
-        assert!(!format!("{handle:?}").contains(&raw));
+        let owner = RuntimeOwnerKey::new();
+        let tool_session = ToolSessionId::new();
+        for (debug, raw) in [
+            (format!("{handle:?}"), handle.as_str()),
+            (format!("{owner:?}"), owner.as_str()),
+            (format!("{tool_session:?}"), tool_session.0.as_str()),
+        ] {
+            assert!(!debug.contains(raw));
+        }
         assert_eq!(
             serde_json::to_string(&handle).expect("handle serializes"),
-            format!("\"{raw}\"")
+            format!("\"{}\"", handle.as_str())
         );
     }
 
     #[test]
     fn malformed_runtime_handle_is_rejected() {
-        assert!(RuntimeHandleId::parse("rt_not-a-uuid".to_string()).is_err());
-        assert!(RuntimeHandleId::parse("rt_".to_string()).is_err());
-    }
-
-    #[test]
-    fn oversized_runtime_handle_is_rejected_before_lookup() {
-        assert!(RuntimeHandleId::parse(format!("rt_{}", "a".repeat(512))).is_err());
-    }
-
-    #[test]
-    fn internal_owner_and_tool_session_debug_are_redacted() {
-        let owner = RuntimeOwnerKey::new();
-        let raw_owner = owner.as_str().to_string();
-        let tool_session = ToolSessionId::new();
-
-        assert!(!format!("{owner:?}").contains(&raw_owner));
-        assert!(!format!("{tool_session:?}").contains("tool_"));
+        for value in [
+            "rt_not-a-uuid".to_string(),
+            "rt_".to_string(),
+            format!("rt_{}", "a".repeat(512)),
+        ] {
+            assert!(RuntimeHandleId::parse(value).is_err());
+        }
     }
 
     #[test]
@@ -467,7 +463,7 @@ mod tests {
     #[test]
     fn stable_resource_wire_format_rejects_unknown_fields() {
         let decoded = serde_json::from_str::<StableResourceRef>(
-            r#"{\"kind\":\"settings_scope\",\"id\":\"app\",\"unexpected\":true}"#,
+            r#"{"kind":"settings_scope","id":"app","unexpected":true}"#,
         );
 
         assert!(decoded.is_err());

@@ -1,4 +1,5 @@
 struct PooledSshConnection {
+    audit: Option<oxideterm_audit::AuditContext>,
     target: client::Handle<NativeClientHandler>,
     _jump_handles: Vec<client::Handle<NativeClientHandler>>,
     remote_forward_handler: RemoteForwardHandlerSlot,
@@ -38,8 +39,10 @@ impl PooledSshConnection {
         x11_dispatcher: X11ForwardDispatcher,
         auth_banners: AuthBannerSink,
         agent_forwarding_accepted: Arc<AtomicBool>,
+        audit: Option<oxideterm_audit::AuditContext>,
     ) -> Self {
         Self {
+            audit,
             target: handle,
             _jump_handles: Vec::new(),
             remote_forward_handler,
@@ -58,8 +61,10 @@ impl PooledSshConnection {
         x11_dispatcher: X11ForwardDispatcher,
         auth_banners: AuthBannerSink,
         agent_forwarding_accepted: Arc<AtomicBool>,
+        audit: Option<oxideterm_audit::AuditContext>,
     ) -> Self {
         Self {
+            audit,
             target,
             _jump_handles: jump_handles,
             remote_forward_handler,
@@ -334,7 +339,7 @@ impl SshConnectionHandle {
                     ChannelMsg::Data { data } => {
                         output.extend_from_slice(&data);
                     }
-                    ChannelMsg::ExtendedData { data, ext } if ext == 1 => {
+                    ChannelMsg::ExtendedData { data, ext: 1 } => {
                         output.extend_from_slice(&data);
                     }
                     ChannelMsg::ExitStatus {
@@ -503,7 +508,7 @@ impl SshConnectionHandle {
                             &mut truncated,
                         );
                     }
-                    ChannelMsg::ExtendedData { data, ext } if ext == 1 => {
+                    ChannelMsg::ExtendedData { data, ext: 1 } => {
                         append_limited_command_output(
                             &mut stderr,
                             &data,

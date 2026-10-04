@@ -58,6 +58,7 @@ use oxideterm_terminal_recording::{
 mod image_cache;
 mod ime;
 mod interactions;
+mod paste;
 mod render;
 mod scrollbar;
 
@@ -101,6 +102,8 @@ pub enum TerminalShortcut {
     Paste,
     Terminate,
     Kill,
+    WordBackward,
+    WordForward,
     PageUp,
     PageDown,
     LineUp,
@@ -369,6 +372,18 @@ enum TerminalSchedulerWake {
     Maintenance,
 }
 
+fn terminal_output_coalescing_delay(
+    kind: TerminalSessionKind,
+    wake: TerminalSchedulerWake,
+    since_last_tick: Duration,
+) -> Duration {
+    if kind == TerminalSessionKind::Serial && wake == TerminalSchedulerWake::BackendActivity {
+        TERMINAL_ANIMATION_INTERVAL.saturating_sub(since_last_tick)
+    } else {
+        Duration::ZERO
+    }
+}
+
 fn viewport_needs_live_output_restore(
     display_offset: usize,
     smooth_scroll_offset_px: Pixels,
@@ -434,6 +449,7 @@ pub struct TerminalPane {
     session_kind: TerminalSessionKind,
     serial_session_config: Option<SerialSessionConfig>,
     serial_port_available: Option<bool>,
+    control_bar_expanded: bool,
     focus_handle: FocusHandle,
     preference_overrides: TerminalUiPreferenceOverrides,
     // The pane owns only its live-session highlight choice. Saved connection
@@ -463,8 +479,9 @@ pub struct TerminalPane {
     metrics: TerminalMetrics,
     metrics_dirty: bool,
     selection: Option<TerminalSelection>,
-    pending_paste: Option<String>,
-    pending_paste_prefix: Option<Vec<u8>>,
+    pending_paste: Option<Zeroizing<String>>,
+    pending_paste_prefix: Option<Zeroizing<Vec<u8>>>,
+    paste_editor: Option<paste::PasteEditor>,
     // The pane observes only its session's capability and never stores the sandbox path.
     kitty_file_transmission: Option<KittyFileTransmissionControl>,
     kitty_file_transmission_confirm_open: bool,
@@ -476,11 +493,14 @@ pub struct TerminalPane {
     context_action_requested: Option<TerminalContextAction>,
     pending_trigger_matches: VecDeque<oxideterm_terminal_triggers::TriggerMatched>,
     plugin_input_interceptor: Option<TerminalInputInterceptor>,
+    win32_pressed_keys: HashSet<String>,
     input_broadcaster: Option<TerminalInputBroadcaster>,
     #[cfg(test)]
     test_accepts_input: bool,
     input_locked: bool,
     marked_text: Option<String>,
+    /// IME caret inside `marked_text`, in UTF-16 units; only read while composing.
+    marked_text_caret_utf16: Option<usize>,
     privilege_prompt_inline_hint: Option<String>,
     privilege_prompt_submit_requested: bool,
     search_query: Option<String>,
@@ -489,6 +509,7 @@ pub struct TerminalPane {
     search_generation: Arc<AtomicU64>,
     search_task: Option<gpui::Task<()>>,
     selected_search_match: Option<usize>,
+    pending_search_reveal: bool,
     hovered_link: Option<TerminalLinkRange>,
     hovered_command_mark_id: Option<String>,
     selecting: bool,
@@ -513,11 +534,15 @@ pub struct TerminalPane {
     // Shell integration opens this boundary at a prompt and command submission closes it.
     autosuggest_prompt_active: bool,
     autosuggest_selected_index: Option<usize>,
+    autosuggest_scroll: gpui::ScrollHandle,
     autosuggest_dismissed_query: Option<String>,
     privilege_prompt_tracker: PrivilegePromptTracker,
     privilege_prompt_expiry_generation: u64,
     privilege_prompt_expiry_task: Option<gpui::Task<()>>,
     command_fact_ledger: CommandFactLedger,
+    broadcast_parent_id: Option<String>,
+    last_broadcast_mark_id: Option<String>,
+    ai_command_prompt: Option<AiCommandPrompt>,
     recorder: Option<TerminalRecorder>,
     session_log: Option<TerminalSessionLog>,
     last_session_log_path: Option<std::path::PathBuf>,
@@ -572,6 +597,10 @@ pub struct TerminalPane {
     pty_resize_generation: u64,
     trzsz_state: Arc<TrzszState>,
     trzsz_owner_id: String,
+    trzsz_audit_connection_lost: Arc<std::sync::atomic::AtomicBool>,
+    modem_audit_connection_lost: Arc<std::sync::atomic::AtomicBool>,
+    trzsz_audit_operation_id: Option<String>,
+    modem_audit_operation_id: Option<String>,
     trzsz_prompt_active: bool,
     trzsz_connection_lost: bool,
     modem_prompt_active: bool,
@@ -586,7 +615,7 @@ pub struct TerminalPane {
 pub(crate) struct TerminalContextMenu {
     pub x: f32,
     pub y: f32,
-    pub modem_submenu_open: bool,
+    pub serial_transfer_menu: bool,
     pub target: TerminalPoint,
     pub has_selection: bool,
     pub reference_line: usize,
@@ -724,6 +753,10 @@ fn privilege_prompt_input_tracking_available(mode: TermMode) -> bool {
     !mode.contains(TermMode::ALT_SCREEN)
 }
 
+fn shell_history_input_mode(mode: TermMode) -> bool {
+    !mode.intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE | TermMode::FOCUS_IN_OUT)
+}
+
 fn take_snapshot_line_id(next_line_id: &mut u64) -> u64 {
     let line_id = (*next_line_id).max(1);
     *next_line_id = line_id.wrapping_add(1).max(1);
@@ -820,24 +853,31 @@ impl TerminalPane {
     }
 
     pub fn new_local_with_config_and_preferences(
-        mut config: LocalPtyConfig,
+        config: LocalPtyConfig,
         preferences: TerminalUiPreferences,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
+        let terminal = Self::local_shared_session(config, &preferences)?;
+        Self::from_session(terminal, preferences, window, cx)
+    }
+
+    pub fn local_shared_session(
+        mut config: LocalPtyConfig,
+        preferences: &TerminalUiPreferences,
+    ) -> Result<SharedTerminalSession> {
         config.current_directory_shell_integration =
             preferences.current_directory_awareness_enabled;
-        let terminal = Arc::new(Mutex::new(
+        Ok(Arc::new(Mutex::new(
             TerminalSession::local_with_config_graphics_and_encoding(
                 DEFAULT_COLS,
                 DEFAULT_ROWS,
                 config,
-                graphics_options_from_preferences(&preferences),
+                graphics_options_from_preferences(preferences),
                 preferences.terminal_encoding,
                 preferences.scrollback_lines,
             )?,
-        ));
-        Self::from_session(terminal, preferences, window, cx)
+        )))
     }
 
     pub fn new_ssh(
@@ -878,12 +918,13 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Self> {
-        Self::new_telnet_with_login_preferences(config, None, preferences, window, cx)
+        Self::new_telnet_with_login_preferences(config, None, None, preferences, window, cx)
     }
 
     pub fn new_telnet_with_login_preferences(
         config: TelnetSessionConfig,
         login: Option<oxideterm_terminal::TelnetLoginCredentials>,
+        upstream_proxy: Option<oxideterm_ssh::UpstreamProxyConfig>,
         preferences: TerminalUiPreferences,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -891,6 +932,7 @@ impl TerminalPane {
         let terminal = Arc::new(Mutex::new(TerminalSession::telnet_with_login_and_encoding(
             config,
             login,
+            upstream_proxy,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             graphics_options_from_preferences(&preferences),
@@ -974,7 +1016,9 @@ impl TerminalPane {
             graphics_options_from_preferences(&preferences),
             preferences.scrollback_lines,
         )));
-        Self::from_session(terminal, preferences, window, cx)
+        let mut pane = Self::from_session(terminal, preferences, window, cx)?;
+        pane.command_fact_ledger.disable_audit();
+        Ok(pane)
     }
 
     fn from_session(
@@ -984,7 +1028,9 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Result<Self> {
         let (mut snapshot, session_kind, cwd_integration_launch_state, render_mode) = {
-            let terminal = terminal.lock();
+            let mut terminal = terminal.lock();
+            // The pane owns the visible theme; apply it before the first snapshot is taken.
+            terminal.set_palette(preferences.theme.palette());
             (
                 terminal.snapshot().with_generation(1),
                 terminal.kind(),
@@ -1003,6 +1049,7 @@ impl TerminalPane {
         if let Some(options) = preferences.session_log_options.as_mut() {
             populate_default_session_log_context(&mut options.context, session_kind);
         }
+        let audit_context = terminal.lock().audit_context();
         let focus_handle = cx.focus_handle();
         let metrics = TerminalMetrics::measure_with_preferences(window, &preferences);
         window.focus(&focus_handle, cx);
@@ -1031,6 +1078,7 @@ impl TerminalPane {
             let mut activity_receiver = terminal_activity;
             let mut maintenance_interval = Some(TERMINAL_ANIMATION_INTERVAL);
             let mut backend_activity_closed = false;
+            let mut last_tick = Instant::now();
             loop {
                 let activity = Box::pin(async {
                     match activity_receiver.as_ref() {
@@ -1053,10 +1101,26 @@ impl TerminalPane {
                         None => pending::<()>().await,
                     }
                 });
-                let wake = match select(terminal_wake, maintenance).await {
+                let mut wake = match select(terminal_wake, maintenance).await {
                     Either::Left((wake, _)) => wake,
                     Either::Right(((), _)) => TerminalSchedulerWake::Maintenance,
                 };
+                let delay =
+                    terminal_output_coalescing_delay(session_kind, wake, last_tick.elapsed());
+                if !delay.is_zero() {
+                    // Keep serial bytes in the bounded backend queue until the next
+                    // frame. User input and pane closure interrupt this wait.
+                    wake = match select(
+                        Box::pin(scheduler_wake_receiver.recv()),
+                        Box::pin(cx.background_executor().timer(delay)),
+                    )
+                    .await
+                    {
+                        Either::Left((Ok(()), _)) => TerminalSchedulerWake::PaneActivity,
+                        Either::Left((Err(_), _)) => TerminalSchedulerWake::PaneClosed,
+                        Either::Right(((), _)) => wake,
+                    };
+                }
                 if wake == TerminalSchedulerWake::PaneClosed {
                     break;
                 }
@@ -1082,6 +1146,7 @@ impl TerminalPane {
                 else {
                     break;
                 };
+                last_tick = Instant::now();
                 maintenance_interval = next_maintenance_interval;
                 activity_receiver = next_activity_receiver;
             }
@@ -1117,6 +1182,7 @@ impl TerminalPane {
             session_kind,
             serial_session_config: None,
             serial_port_available: None,
+            control_bar_expanded: true,
             focus_handle,
             preference_overrides: TerminalUiPreferenceOverrides::default(),
             session_highlight_override: None,
@@ -1140,6 +1206,7 @@ impl TerminalPane {
             selection: None,
             pending_paste: None,
             pending_paste_prefix: None,
+            paste_editor: None,
             kitty_file_transmission,
             kitty_file_transmission_confirm_open: false,
             tmux_prompt: None,
@@ -1149,11 +1216,13 @@ impl TerminalPane {
             context_action_requested: None,
             pending_trigger_matches: VecDeque::new(),
             plugin_input_interceptor: None,
+            win32_pressed_keys: HashSet::new(),
             input_broadcaster: None,
             #[cfg(test)]
             test_accepts_input: false,
             input_locked: false,
             marked_text: None,
+            marked_text_caret_utf16: None,
             privilege_prompt_inline_hint: None,
             privilege_prompt_submit_requested: false,
             search_query: None,
@@ -1162,6 +1231,7 @@ impl TerminalPane {
             search_generation: Arc::new(AtomicU64::new(0)),
             search_task: None,
             selected_search_match: None,
+            pending_search_reveal: false,
             hovered_link: None,
             hovered_command_mark_id: None,
             selecting: false,
@@ -1190,11 +1260,15 @@ impl TerminalPane {
             command_history: preferences.command_history.clone(),
             autosuggest_prompt_active: false,
             autosuggest_selected_index: None,
+            autosuggest_scroll: gpui::ScrollHandle::new(),
             autosuggest_dismissed_query: None,
             privilege_prompt_tracker: PrivilegePromptTracker::default(),
             privilege_prompt_expiry_generation: 0,
             privilege_prompt_expiry_task: None,
-            command_fact_ledger: CommandFactLedger::default(),
+            command_fact_ledger: CommandFactLedger::with_audit(audit_context),
+            broadcast_parent_id: None,
+            last_broadcast_mark_id: None,
+            ai_command_prompt: None,
             recorder: None,
             session_log,
             last_session_log_path: None,
@@ -1261,6 +1335,10 @@ impl TerminalPane {
             pty_resize_generation: 0,
             trzsz_state: TrzszState::new(),
             trzsz_owner_id,
+            trzsz_audit_connection_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            modem_audit_connection_lost: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            trzsz_audit_operation_id: None,
+            modem_audit_operation_id: None,
             trzsz_prompt_active: false,
             trzsz_connection_lost: false,
             modem_prompt_active: false,
@@ -1618,7 +1696,7 @@ impl TerminalPane {
             let terminal = self.terminal.lock();
             (terminal.mode(), terminal.is_interactive())
         };
-        if mode.contains(TermMode::ALT_SCREEN)
+        if !shell_history_input_mode(mode)
             || !self.terminal_accepts_input_with_interactive_state(terminal_interactive)
         {
             return Vec::new();
@@ -1643,20 +1721,27 @@ impl TerminalPane {
         append_enter: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let state = self.input_tracker.state();
-        let Some(suffix) = command.strip_prefix(&state.value) else {
+        let Some(state) = self.input_tracker.tracked_state() else {
             return false;
         };
-        let mut bytes =
-            Zeroizing::new(Vec::with_capacity(suffix.len() + usize::from(append_enter)));
-        bytes.extend_from_slice(suffix.as_bytes());
-        if append_enter {
-            bytes.push(b'\r');
-        }
+        let mode = self.terminal.lock().mode();
+        let Some(bytes) =
+            interactions::terminal_autosuggest_edit_bytes(&state, command, append_enter, mode)
+        else {
+            return false;
+        };
         self.autosuggest_selected_index = None;
         self.autosuggest_dismissed_query = Some(command.to_string());
         self.send_user_protocol_bytes(&bytes, cx);
         true
+    }
+
+    fn remove_terminal_autosuggest_command(&mut self, command: &str, cx: &mut Context<Self>) {
+        self.command_history.remove(command);
+        self.command_fact_ledger.remove_autosuggest_command(command);
+        self.autosuggest_selected_index = None;
+        self.autosuggest_scroll.scroll_to_top_of_item(0);
+        cx.notify();
     }
 
     fn terminal_ghost_text(&self) -> Option<String> {
@@ -1799,6 +1884,12 @@ impl TerminalPane {
                 .lock()
                 .set_trzsz_policy(preferences.trzsz_policy.clone());
         }
+        let palette = preferences.theme.palette();
+        if self.preferences.theme.palette() != palette {
+            self.terminal.lock().set_palette(palette);
+            // Rows resolved with the previous palette must be rebuilt even without new output.
+            self.snapshot_dirty = true;
+        }
         let metrics_changed = self.preferences.font_family != preferences.font_family
             || self.preferences.cjk_font_family != preferences.cjk_font_family
             || self.preferences.font_ligatures != preferences.font_ligatures
@@ -1829,6 +1920,7 @@ impl TerminalPane {
         self.background_image_cache
             .set_byte_limit(preferences.render_policy.image_cache_bytes);
         self.preferences = preferences;
+        self.refresh_paste_editor(cx);
         // Font resolution is stable across output frames and changes only with typography
         // preferences, so defer the next measurement until the pane is rendered again.
         self.metrics_dirty |= metrics_changed;
@@ -1961,6 +2053,10 @@ impl TerminalPane {
 
     pub fn session_kind(&self) -> TerminalSessionKind {
         self.session_kind
+    }
+
+    pub fn audit_context(&self) -> Option<oxideterm_audit::AuditContext> {
+        self.terminal.lock().audit_context()
     }
 
     pub fn is_tmux_control_mode(&self) -> bool {
@@ -2231,18 +2327,9 @@ impl TerminalPane {
     ) -> TerminalSearchStatus {
         self.search_query = query;
         self.search_cache = None;
+        self.selected_search_match = selected_match.or(Some(0));
+        self.pending_search_reveal = true;
         self.schedule_search_refresh(cx);
-        let match_count = self.search_match_count();
-        self.selected_search_match = if match_count == 0 {
-            None
-        } else {
-            selected_match
-                .or(Some(0))
-                .filter(|index| *index < match_count)
-        };
-        if self.selected_search_match.is_some() {
-            self.scroll_to_selected_search_match(cx);
-        }
         cx.notify();
         self.search_status()
     }
@@ -2300,6 +2387,7 @@ impl TerminalPane {
         else {
             self.search_cache = None;
             self.selected_search_match = None;
+            self.pending_search_reveal = false;
             return;
         };
         let Some(search_source) = self.terminal.lock().search_source() else {
@@ -2345,7 +2433,9 @@ impl TerminalPane {
                         .or(Some(0))
                         .filter(|index| *index < matches.len())
                 };
-                if this.selected_search_match.is_some() {
+                // Refreshing highlights must not override a user's viewport. Only a new
+                // query requests a reveal, and manual scrolling cancels that request.
+                if std::mem::take(&mut this.pending_search_reveal) {
                     this.scroll_to_selected_search_match(cx);
                 }
                 cx.emit(TerminalPaneEvent::SearchStatusChanged);
@@ -2423,28 +2513,76 @@ impl TerminalPane {
         false
     }
 
-    pub fn send_command_line(&mut self, command: &str, cx: &mut Context<Self>) {
+    pub fn send_command_line(&mut self, command: &str, cx: &mut Context<Self>) -> bool {
         if command.trim().is_empty() {
-            return;
+            return false;
         }
         let mut input = command.replace("\r\n", "\r").replace('\n', "\r");
         input.push('\r');
         self.observe_privilege_input("command-line", input.as_bytes(), Instant::now(), cx);
         self.observe_autosuggest_input_bytes(input.as_bytes(), cx);
-        self.send_text(&input, cx);
+        self.send_text(&input, cx)
+    }
+
+    pub fn send_command_line_with_mark(
+        &mut self,
+        command: &str,
+        source: TerminalCommandMarkDetectionSource,
+        parent_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let audit_source = match source {
+            TerminalCommandMarkDetectionSource::QuickCommand => {
+                oxideterm_audit::AuditSource::QuickCommand
+            }
+            TerminalCommandMarkDetectionSource::Broadcast => {
+                oxideterm_audit::AuditSource::Broadcast
+            }
+            TerminalCommandMarkDetectionSource::CommandBar => {
+                oxideterm_audit::AuditSource::CommandBar
+            }
+            TerminalCommandMarkDetectionSource::Ai => oxideterm_audit::AuditSource::Ai,
+            _ => oxideterm_audit::AuditSource::User,
+        };
+        let secret_reply = self.input_answers_privilege_prompt(command.as_bytes());
+        if !self.send_command_line(command, cx) {
+            self.command_fact_ledger
+                .set_audit_context(self.terminal.lock().audit_context());
+            self.command_fact_ledger
+                .record_dispatch(None, parent_id, audit_source, false);
+            return false;
+        }
+        if secret_reply {
+            return true;
+        }
+        let command_id = self.begin_command_mark_with_parent(command, source, parent_id, cx);
+        if command_id.is_none() {
+            let mut audit = self.terminal.lock().audit_context();
+            if let (Some(context), Some(parent_id)) = (&mut audit, parent_id) {
+                context.parent_id = Some(parent_id.to_string());
+            }
+            self.command_fact_ledger.set_audit_context(audit);
+        }
+        self.command_fact_ledger.record_dispatch(
+            command_id.as_deref(),
+            parent_id,
+            audit_source,
+            true,
+        );
+        true
     }
 
     pub fn send_command_sender_line(&mut self, line: &str, cx: &mut Context<Self>) -> bool {
         let mut input = zeroize::Zeroizing::new(line.replace("\r\n", "\r").replace('\n', "\r"));
         input.push('\r');
-        self.send_command_sender_text(&input, cx)
+        self.send_command_sender_text(&input, true, cx)
     }
 
     pub fn send_command_sender_text_chunk(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if text.is_empty() {
             return false;
         }
-        self.send_command_sender_text(text, cx)
+        self.send_command_sender_text(text, false, cx)
     }
 
     pub fn send_trigger_text(
@@ -2500,6 +2638,7 @@ impl TerminalPane {
             return false;
         };
         let bytes = zeroize::Zeroizing::new(bytes);
+        let secret_reply = self.input_answers_privilege_prompt(&bytes);
         // Hex input is an opaque protocol payload. Recheck lifecycle after the
         // plugin hook, then bypass text recording and command observation.
         let write_result = {
@@ -2507,10 +2646,20 @@ impl TerminalPane {
             if self.input_locked || self.terminal_exited || !terminal.is_interactive() {
                 return false;
             }
-            terminal.write_protocol_bytes(&bytes)
+            if terminal.kind() == TerminalSessionKind::Serial {
+                terminal.send_serial_bytes(&bytes)
+            } else {
+                terminal.write_protocol_bytes(&bytes)
+            }
         };
         if write_result.is_err() {
+            if !secret_reply {
+                self.audit_terminal_data_send("binary", bytes.len(), false);
+            }
             return false;
+        }
+        if !secret_reply {
+            self.audit_terminal_data_send("binary", bytes.len(), true);
         }
         self.last_terminal_input = Instant::now();
         self.reset_cursor_blink();
@@ -2519,7 +2668,12 @@ impl TerminalPane {
         true
     }
 
-    fn send_command_sender_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    fn send_command_sender_text(
+        &mut self,
+        text: &str,
+        whole_line: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if text.is_empty() || !self.terminal_accepts_input() {
             return false;
         }
@@ -2535,23 +2689,96 @@ impl TerminalPane {
                 return false;
             }
             match std::str::from_utf8(&bytes) {
+                Ok(text) if terminal.kind() == TerminalSessionKind::Serial => {
+                    terminal.send_serial_text(text)
+                }
                 Ok(text) => terminal.write_text(text),
+                Err(_) if terminal.kind() == TerminalSessionKind::Serial => {
+                    terminal.send_serial_bytes(&bytes)
+                }
                 Err(_) => terminal.write_protocol_bytes(&bytes),
             }
         };
         if write_result.is_err() {
+            if whole_line {
+                self.command_fact_ledger
+                    .set_audit_context(self.terminal.lock().audit_context());
+                self.command_fact_ledger.record_dispatch(
+                    None,
+                    None,
+                    oxideterm_audit::AuditSource::CommandBar,
+                    false,
+                );
+            } else {
+                self.audit_terminal_data_send("text_chunk", bytes.len(), false);
+            }
             return false;
         }
 
-        // Scheduled input does not prove that the remote prompt accepted or
-        // began a command. Keep it out of marks, AI facts, autosuggest, history,
-        // and asciicast input; only update the privilege prompt state safely.
-        self.observe_privilege_input("command-sender-text", &bytes, Instant::now(), cx);
+        // Only a complete, non-secret line gets a tentative command mark;
+        // partial and opaque sends remain dispatch records until the shell reports more.
+        let privilege =
+            self.observe_privilege_input("command-sender-text", &bytes, Instant::now(), cx);
+        let at_shell_prompt = self.shell_integration_status.detected
+            && self.shell_integration_status.state == ShellIntegrationLifecycleState::Prompt;
+        if whole_line && privilege != PrivilegeInputObservation::SecretEntry && at_shell_prompt {
+            let command = std::str::from_utf8(&bytes)
+                .ok()
+                .map(|text| text.trim_end_matches(['\r', '\n']))
+                .filter(|text| !text.trim().is_empty());
+            if let Some(command) = command {
+                let command_id = self.begin_command_mark(
+                    command,
+                    TerminalCommandMarkDetectionSource::CommandBar,
+                    cx,
+                );
+                self.command_fact_ledger
+                    .set_audit_context(self.terminal.lock().audit_context());
+                self.command_fact_ledger.record_dispatch(
+                    command_id.as_deref(),
+                    None,
+                    oxideterm_audit::AuditSource::CommandBar,
+                    true,
+                );
+            } else {
+                self.audit_terminal_data_send("text_line", bytes.len(), true);
+            }
+        } else if privilege != PrivilegeInputObservation::SecretEntry {
+            self.audit_terminal_data_send(
+                if whole_line {
+                    "text_line"
+                } else {
+                    "text_chunk"
+                },
+                bytes.len(),
+                true,
+            );
+        }
         self.last_terminal_input = Instant::now();
         self.reset_cursor_blink();
         self.restore_live_output_after_user_input();
         cx.notify();
         true
+    }
+
+    fn audit_terminal_data_send(&self, mode: &str, input_bytes: usize, sent: bool) {
+        let context = self.terminal.lock().audit_context();
+        oxideterm_audit::AuditOperation::in_request(
+            context.as_ref(),
+            oxideterm_audit::AuditCategory::Automation,
+            "terminal_data_send",
+            Some(&format!("mode={mode}; input_bytes={input_bytes}")),
+        )
+        .finish(
+            if sent {
+                oxideterm_audit::AuditOutcome::Sent
+            } else {
+                oxideterm_audit::AuditOutcome::Failed
+            },
+            oxideterm_audit::AuditEvidence::Dispatch,
+            None,
+            None,
+        );
     }
 
     pub fn send_internal_control_command_line(
@@ -2634,9 +2861,21 @@ impl TerminalPane {
         bytes: &[u8],
         cx: &mut Context<Self>,
     ) -> bool {
+        self.send_broadcast_input_with_parent(kind, bytes, None, cx)
+    }
+
+    pub fn send_broadcast_input_with_parent(
+        &mut self,
+        kind: TerminalBroadcastInputKind,
+        bytes: &[u8],
+        parent_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         // Mirrored input uses the target pane's normal interception and PTY
         // path, but never re-enters the broadcaster and creates a loop.
-        match kind {
+        self.broadcast_parent_id = Some(parent_id.unwrap_or_default().to_string());
+        self.last_broadcast_mark_id = None;
+        let sent = match kind {
             TerminalBroadcastInputKind::Protocol => {
                 self.send_user_protocol_bytes_without_broadcast(bytes, cx)
             }
@@ -2644,7 +2883,20 @@ impl TerminalPane {
                 .is_ok_and(|text| self.commit_text_without_broadcast(text, cx)),
             TerminalBroadcastInputKind::Paste => std::str::from_utf8(bytes)
                 .is_ok_and(|text| self.paste_text_without_broadcast(text, cx)),
+        };
+        let command_id = self.last_broadcast_mark_id.take();
+        self.broadcast_parent_id = None;
+        if parent_id.is_some() {
+            self.command_fact_ledger
+                .set_audit_context(self.terminal.lock().audit_context());
+            self.command_fact_ledger.record_dispatch(
+                command_id.as_deref(),
+                parent_id,
+                oxideterm_audit::AuditSource::Broadcast,
+                sent,
+            );
         }
+        sent
     }
 
     pub fn set_input_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
@@ -2706,8 +2958,9 @@ impl TerminalPane {
             return;
         }
         if self.settings.paste_protection && paste_needs_confirmation(&text) {
-            self.pending_paste = Some(text);
-            self.pending_paste_prefix = (!prefix.is_empty()).then(|| prefix.to_vec());
+            self.pending_paste = Some(Zeroizing::new(text));
+            self.pending_paste_prefix =
+                (!prefix.is_empty()).then(|| Zeroizing::new(prefix.to_vec()));
             cx.notify();
             return;
         }
@@ -3255,6 +3508,7 @@ impl TerminalPane {
                 TerminalEventEffect::notify()
             }
             TerminalEvent::StartupFailed => {
+                self.command_fact_ledger.interrupt_audit_commands();
                 self.cancel_pending_tmux_mouse();
                 self.notify_trzsz_connection_lost_if_active();
                 self.notify_modem_connection_lost_if_active();
@@ -3262,6 +3516,7 @@ impl TerminalPane {
                 TerminalEventEffect::notify()
             }
             TerminalEvent::ChildExited(code) => {
+                self.command_fact_ledger.interrupt_audit_commands();
                 self.cancel_pending_tmux_mouse();
                 self.notify_trzsz_connection_lost_if_active();
                 self.notify_modem_connection_lost_if_active();
@@ -3300,7 +3555,12 @@ impl TerminalPane {
                 TerminalEventEffect::notify()
             }
             TerminalEvent::ModemTransferPrompt { request, transfer } => {
-                self.handle_modem_transfer_prompt(request, transfer, cx);
+                self.handle_modem_transfer_prompt(
+                    request,
+                    transfer,
+                    oxideterm_audit::AuditSource::System,
+                    cx,
+                );
                 TerminalEventEffect::notify()
             }
             TerminalEvent::EncodingHint(hint) => {
@@ -3351,6 +3611,11 @@ impl TerminalPane {
                 TerminalEventEffect::default()
             }
             TerminalEvent::ShellIntegration(event) => {
+                if event.kind == oxideterm_terminal::ShellIntegrationEventKind::PromptStart {
+                    self.input_tracker.reset();
+                    self.autosuggest_selected_index = None;
+                    self.autosuggest_dismissed_query = None;
+                }
                 self.autosuggest_prompt_active = matches!(
                     event.kind,
                     oxideterm_terminal::ShellIntegrationEventKind::PromptStart
@@ -3416,6 +3681,8 @@ impl TerminalPane {
                                 cx,
                             );
                         }
+                        self.command_fact_ledger
+                            .set_audit_context(self.terminal.lock().audit_context());
                         self.command_fact_ledger.create_from_mark(&mark);
                         self.command_marks.push(mark);
                         self.trim_command_marks();
@@ -3468,9 +3735,18 @@ impl TerminalPane {
             TerminalEvent::CwdChanged { cwd, host } => {
                 self.cwd = Some(cwd);
                 self.cwd_source = Some(TerminalWorkingDirectorySource::ShellIntegration);
-                // Managed OSC 7 hooks emit at the shell prompt, which establishes the minimum
-                // reliable boundary for terminal-side history suggestions.
-                self.autosuggest_prompt_active = true;
+                // OSC 7 is also emitted by inline TUIs. It must not override a known
+                // command lifecycle or enable shell suggestions in application input modes.
+                if !self.shell_integration_status.detected
+                    && shell_history_input_mode(self.terminal.lock().mode())
+                {
+                    if !self.autosuggest_prompt_active {
+                        self.input_tracker.reset();
+                        self.autosuggest_selected_index = None;
+                        self.autosuggest_dismissed_query = None;
+                    }
+                    self.autosuggest_prompt_active = true;
+                }
                 // A prepared startup profile becomes active only after the
                 // terminal parser receives a valid directory report.
                 self.cwd_shell_integration_status = TerminalCwdShellIntegrationStatus::Active;
@@ -3500,6 +3776,14 @@ impl TerminalPane {
 
     fn handle_focus_change(&mut self, focused: bool, cx: &mut Context<Self>) {
         self.focused = focused;
+        if !focused {
+            self.win32_pressed_keys.clear();
+        }
+        if !focused && self.context_menu.take().is_some() {
+            // Menu actions refer to this pane's selection and command snapshot. Drop them
+            // immediately on focus transfer and invalidate any pending exit animation.
+            self.context_menu_presence.reopen();
+        }
         let _ = self.terminal.lock().set_focused(focused);
         self.reset_cursor_blink();
         // Focus changes must consume already queued output instead of waiting for an old deadline.
@@ -3537,15 +3821,38 @@ impl TerminalPane {
         bytes: &[u8],
         cx: &mut Context<Self>,
     ) -> bool {
+        self.send_user_encoded_key_without_broadcast(bytes, None, cx)
+    }
+
+    fn send_user_encoded_key_without_broadcast(
+        &mut self,
+        semantic_bytes: &[u8],
+        encoded_key: Option<(&str, &[u8])>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.terminal_accepts_input() {
             return false;
         }
-        let Some(bytes) = self.apply_plugin_input_interceptor(bytes) else {
+        let Some(bytes) = self.apply_plugin_input_interceptor(semantic_bytes) else {
             return false;
         };
         let bytes = Zeroizing::new(bytes);
-        self.observe_user_input("protocol", &bytes, cx);
-        if self.send_protocol_bytes(&bytes, cx) {
+        // Command/secret tracking and plugins consume the logical input. Only
+        // the PTY sees the negotiated Windows envelope; plugin replacements
+        // remain literal input, matching the existing hook contract.
+        let wire_bytes = if bytes.as_slice() == semantic_bytes {
+            encoded_key.map_or(bytes.as_slice(), |(_, encoded)| encoded)
+        } else {
+            &bytes
+        };
+        if self.send_protocol_bytes(wire_bytes, cx) {
+            if bytes.as_slice() == semantic_bytes
+                && let Some((key, _)) = encoded_key
+            {
+                // Only delivered Win32 presses own a future release, including repeats.
+                self.win32_pressed_keys.insert(key.to_owned());
+            }
+            self.observe_user_input("protocol", &bytes, cx);
             self.restore_live_output_after_user_input();
             return true;
         }
@@ -3566,9 +3873,9 @@ impl TerminalPane {
         broadcaster(kind, bytes, cx);
     }
 
-    fn send_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn send_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if !self.terminal_accepts_input() {
-            return;
+            return false;
         }
 
         if self.terminal.lock().write_text(text).is_ok() {
@@ -3579,7 +3886,9 @@ impl TerminalPane {
             self.last_terminal_input = Instant::now();
             self.reset_cursor_blink();
             cx.notify();
+            return true;
         }
+        false
     }
 
     fn restore_live_output_after_user_input(&mut self) {
@@ -3626,15 +3935,27 @@ impl TerminalPane {
         };
         self.observe_current_directory_submitted_command(&command, cx);
         if self.shell_integration_status.detected
-            || !self.settings.command_marks_user_input_observed
+            || (!self.settings.command_marks_user_input_observed
+                && !self.command_fact_ledger.audit_enabled())
         {
             return;
         }
-        self.begin_command_mark(
-            &command,
-            TerminalCommandMarkDetectionSource::UserInputObserved,
-            cx,
-        );
+        let broadcast = self.broadcast_parent_id.is_some();
+        let parent_id = self
+            .broadcast_parent_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        let source = if broadcast {
+            TerminalCommandMarkDetectionSource::Broadcast
+        } else {
+            TerminalCommandMarkDetectionSource::UserInputObserved
+        };
+        let mark_id =
+            self.begin_command_mark_with_parent(&command, source, parent_id.as_deref(), cx);
+        if broadcast {
+            self.last_broadcast_mark_id = mark_id;
+        }
     }
 
     fn observe_privilege_input(
@@ -3672,10 +3993,24 @@ impl TerminalPane {
         bytes: &[u8],
         _cx: &mut Context<Self>,
     ) -> Option<String> {
+        if !self.autosuggest_prompt_active || !shell_history_input_mode(self.terminal.lock().mode())
+        {
+            self.input_tracker.reset();
+            self.autosuggest_prompt_active = false;
+            self.autosuggest_selected_index = None;
+            self.autosuggest_dismissed_query = None;
+            return None;
+        }
         let previous_state = self.input_tracker.state();
         let command = self.input_tracker.apply_bytes(bytes);
+        // History navigation and completion invalidate the reconstructed command,
+        // but Enter still transfers input ownership away from the shell prompt.
+        if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
+            self.autosuggest_prompt_active = false;
+        }
         let next_state = self.input_tracker.state();
         if next_state != previous_state {
+            self.autosuggest_scroll.scroll_to_top_of_item(0);
             self.autosuggest_selected_index = None;
             self.autosuggest_dismissed_query = None;
         }
@@ -3758,17 +4093,31 @@ impl TerminalPane {
         let bytes = Zeroizing::new(bytes);
         let mode = self.terminal.lock().mode();
         self.delete_free_type_selection_if_active(mode, cx);
-        self.observe_user_input("text", &bytes, cx);
         if self.send_protocol_bytes(&bytes, cx) {
+            self.observe_user_input("text", &bytes, cx);
             self.restore_live_output_after_user_input();
             return true;
         }
         false
     }
 
-    fn set_marked_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn set_marked_text(
+        &mut self,
+        text: &str,
+        selected_range_utf16: Option<Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
         self.marked_text = (!text.is_empty()).then(|| text.to_string());
+        self.marked_text_caret_utf16 = selected_range_utf16.map(|range| range.end);
+        // Composition edits are typing; keep the caret solid like other key input.
+        self.reset_cursor_blink();
         cx.notify();
+    }
+
+    fn marked_text_cells_before_utf16(&self, utf16_offset: usize) -> usize {
+        self.marked_text
+            .as_deref()
+            .map_or(0, |text| marked_text_cells_before_utf16(text, utf16_offset))
     }
 
     fn clear_marked_text(&mut self, cx: &mut Context<Self>) {
@@ -3839,7 +4188,12 @@ impl TerminalPane {
         let cell_height_px = (line_height * scale_factor).ceil().max(1.0) as u16;
         let resize = (cols, rows, cell_width_px, cell_height_px);
 
-        if self.last_pty_resize == Some(resize) || self.pending_pty_resize == Some(resize) {
+        if self.last_pty_resize == Some(resize) {
+            // Returning to the settled viewport must discard any intermediate animation size.
+            self.pending_pty_resize = None;
+            return;
+        }
+        if self.pending_pty_resize == Some(resize) {
             return;
         }
 
@@ -4156,6 +4510,131 @@ mod tests {
     use gpui::{AppContext, IntoElement, Render, TestAppContext, div};
     use oxideterm_terminal::{TerminalAttrs, TerminalCell, TerminalColor, TerminalCursorShape};
 
+    #[gpui::test]
+    fn modem_failure_notice_includes_localized_reason(cx: &mut TestAppContext) {
+        let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = notices.clone();
+        let mut preferences = TerminalUiPreferences::default();
+        preferences.modem_labels.timeout = "等待对端响应超时".into();
+        preferences.modem_labels.file_error = "无法读写传输文件".into();
+        preferences.notice_sink = Some(Arc::new(move |notice| {
+            captured.lock().unwrap().push(notice.description);
+        }));
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            TerminalPane::new_recording_playback(80, 24, preferences, window, cx).unwrap()
+        });
+        pane.update(cx, |pane, cx| {
+            pane.handle_modem_worker_event(ModemWorkerEvent::Failed(ModemFailure::Timeout), cx);
+            pane.handle_modem_worker_event(ModemWorkerEvent::Failed(ModemFailure::FileIo), cx);
+        });
+        assert_eq!(
+            *notices.lock().unwrap(),
+            vec![
+                Some("等待对端响应超时".to_string()),
+                Some("无法读写传输文件".to_string())
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn context_menu_is_discarded_when_keyboard_focus_leaves_the_pane(cx: &mut TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            TerminalPane::new_recording_playback(80, 24, Default::default(), window, cx).unwrap()
+        });
+        cx.simulate_resize(gpui::size(px(800.0), px(600.0)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let other_focus = cx.update(|_, cx| cx.focus_handle());
+        for serial_transfer_menu in [false, true] {
+            cx.update(|window, cx| {
+                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            });
+            cx.run_until_parked();
+            pane.update(cx, |pane, cx| {
+                pane.bounds = Some(gpui::Bounds::new(
+                    gpui::point(px(0.0), px(0.0)),
+                    gpui::size(px(800.0), px(600.0)),
+                ));
+                pane.open_terminal_context_menu(
+                    &gpui::MouseDownEvent {
+                        position: gpui::point(px(100.0), px(100.0)),
+                        button: gpui::MouseButton::Right,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+                pane.context_menu.as_mut().unwrap().serial_transfer_menu = serial_transfer_menu;
+            });
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                window.focus(&other_focus, cx);
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+            pane.read_with(cx, |pane, _| {
+                assert!(
+                    pane.context_menu.is_none(),
+                    "a background pane must not retain its menu"
+                );
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_launch_returns_missing_directory_error_before_creating_a_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = LocalPtyConfig {
+            shell: Some(oxideterm_terminal::ShellInfo::new("sh", "sh", "/bin/sh")),
+            cwd: Some(directory.path().join("missing-project")),
+            ..Default::default()
+        };
+        assert!(
+            TerminalPane::local_shared_session(config, &TerminalUiPreferences::default()).is_err()
+        );
+    }
+
+    #[test]
+    fn serial_output_is_coalesced_without_delaying_input_or_other_backends() {
+        let elapsed = Duration::from_millis(5);
+        assert_eq!(
+            terminal_output_coalescing_delay(
+                TerminalSessionKind::Serial,
+                TerminalSchedulerWake::BackendActivity,
+                elapsed
+            ),
+            Duration::from_millis(11)
+        );
+        assert_eq!(
+            terminal_output_coalescing_delay(
+                TerminalSessionKind::Serial,
+                TerminalSchedulerWake::BackendActivity,
+                Duration::from_millis(20)
+            ),
+            Duration::ZERO
+        );
+        for wake in [
+            TerminalSchedulerWake::PaneActivity,
+            TerminalSchedulerWake::PaneClosed,
+            TerminalSchedulerWake::BackendClosed,
+            TerminalSchedulerWake::Maintenance,
+        ] {
+            assert_eq!(
+                terminal_output_coalescing_delay(TerminalSessionKind::Serial, wake, elapsed),
+                Duration::ZERO
+            );
+        }
+        assert_eq!(
+            terminal_output_coalescing_delay(
+                TerminalSessionKind::SshPty,
+                TerminalSchedulerWake::BackendActivity,
+                elapsed
+            ),
+            Duration::ZERO
+        );
+    }
+
     #[test]
     fn idle_terminal_has_no_maintenance_deadline() {
         assert_eq!(
@@ -4305,6 +4784,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn viewport_returning_to_committed_size_cancels_pending_resize(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .expect("test terminal pane")
+            })
+        });
+        let bounds = gpui::Bounds::new(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(640.0), px(320.0)),
+        );
+        pane.update(cx, |pane, cx| pane.apply_viewport_bounds(bounds, 1.0, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE);
+        cx.run_until_parked();
+        let original_grid = pane.read_with(cx, |pane, _| (pane.snapshot.cols, pane.snapshot.rows));
+
+        pane.update(cx, |pane, cx| {
+            let mut expanded = bounds;
+            expanded.size.height += px(80.0);
+            pane.apply_viewport_bounds(expanded, 1.0, cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE / 2);
+        pane.update(cx, |pane, cx| pane.apply_viewport_bounds(bounds, 1.0, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(PTY_RESIZE_DEBOUNCE);
+        cx.run_until_parked();
+
+        pane.read_with(cx, |pane, _| {
+            assert_eq!((pane.snapshot.cols, pane.snapshot.rows), original_grid);
+            let backend = pane.terminal.lock().snapshot();
+            assert_eq!((backend.cols, backend.rows), original_grid);
+            assert!(
+                pane.snapshot.rows as f32 * pane.metrics.line_height_f32()
+                    <= f32::from(bounds.size.height) - TERMINAL_CONTENT_PADDING * 2.0
+            );
+        });
+    }
+
+    #[gpui::test]
     fn terminal_padding_updates_layout_grid_and_input_coordinates(cx: &mut TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             TerminalPane::new_recording_playback(
@@ -4395,6 +4922,110 @@ mod tests {
     }
 
     #[gpui::test]
+    fn win32_input_releases_only_delivered_keys_after_modifiers_change(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.test_accepts_input = true;
+            pane.terminal.lock().feed_recording_output(b"\x1b[?9001h");
+            pane.recorder = Some(TerminalRecorder::start(
+                DEFAULT_COLS,
+                DEFAULT_ROWS,
+                TerminalRecordingOptions {
+                    capture_input: true,
+                    title: None,
+                    theme: None,
+                },
+            ));
+            for (pressed, released) in [("ctrl-j", "j"), ("alt-j", "j"), ("ctrl-space", "space")] {
+                assert!(pane.handle_key(
+                    &gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse(pressed).unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    cx
+                ));
+                pane.handle_key_up(
+                    &gpui::KeyUpEvent {
+                        keystroke: gpui::Keystroke::parse(released).unwrap(),
+                    },
+                    cx,
+                );
+            }
+            // Platform text commits and plugin replacements own their own input delivery.
+            assert!(!pane.handle_key(
+                &gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("j").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                cx
+            ));
+            pane.handle_key_up(
+                &gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("j").unwrap(),
+                },
+                cx,
+            );
+            for replacement in [None, Some(b"replacement".to_vec())] {
+                pane.set_plugin_input_interceptor(Some(Arc::new(move |_| match &replacement {
+                    Some(bytes) => TerminalInputInterceptorResult::Continue(bytes.clone()),
+                    None => TerminalInputInterceptorResult::Suppress,
+                })));
+                pane.handle_key(
+                    &gpui::KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse("ctrl-j").unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    cx,
+                );
+                pane.handle_key_up(
+                    &gpui::KeyUpEvent {
+                        keystroke: gpui::Keystroke::parse("ctrl-j").unwrap(),
+                    },
+                    cx,
+                );
+            }
+            let recording = pane.recorder.take().unwrap().stop();
+            let input = recording
+                .lines()
+                .skip(1)
+                .map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).unwrap()[2]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                input,
+                [
+                    "\x1b[74;0;10;1;8;1_",
+                    "\x1b[74;0;106;0;0;1_",
+                    "\x1b[74;0;106;1;2;1_",
+                    "\x1b[74;0;106;0;0;1_",
+                    "\x1b[32;0;0;1;8;1_",
+                    "\x1b[32;0;32;0;0;1_",
+                    "replacement",
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
     fn direct_user_input_broadcasts_once_for_each_input_path(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
         let pane = cx.update(|window, cx| {
@@ -4426,6 +5057,21 @@ mod tests {
             pane.commit_text("x", cx);
             pane.send_user_protocol_bytes(b"\x1b[D", cx);
             pane.paste_text("y", cx);
+            pane.terminal.lock().feed_recording_output(b"\x1b[?9001h");
+            assert!(pane.handle_key(
+                &gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("ctrl-j").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                cx
+            ));
+            pane.handle_key_up(
+                &gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("ctrl-j").unwrap(),
+                },
+                cx,
+            );
         });
         let delivered = recorder.read_with(cx, |recorder, _cx| recorder.delivered.clone());
         assert_eq!(
@@ -4434,6 +5080,7 @@ mod tests {
                 (TerminalBroadcastInputKind::Text, b"x".to_vec()),
                 (TerminalBroadcastInputKind::Protocol, b"\x1b[D".to_vec()),
                 (TerminalBroadcastInputKind::Paste, b"y".to_vec()),
+                (TerminalBroadcastInputKind::Protocol, b"\n".to_vec()),
             ]
         );
 
@@ -4442,8 +5089,58 @@ mod tests {
         });
         assert_eq!(
             recorder.read_with(cx, |recorder, _cx| recorder.delivered.len()),
-            3
+            4
         );
+    }
+
+    #[gpui::test]
+    fn theme_change_repaints_existing_rows_with_the_new_palette(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        let light = TerminalUiTheme::from_tokens(oxideterm_theme::ThemeTokens::from_builtin(
+            oxideterm_theme::theme_by_id("solarized-light"),
+        ));
+        pane.update(cx, |pane, cx| {
+            let settled = {
+                let mut terminal = pane.terminal.lock();
+                // The cursor row is always damaged, so leave it below the colored row.
+                terminal.feed_recording_output(b"\x1b[41mAB\x1b[0m\r\n");
+                let first = terminal.snapshot_incremental(&terminal.snapshot());
+                terminal.snapshot_incremental(&first)
+            };
+            pane.snapshot = settled;
+            pane.snapshot_dirty = false;
+
+            let mut preferences = pane.preferences.clone();
+            preferences.theme = light.clone();
+            pane.set_preferences(preferences, cx);
+
+            assert!(pane.snapshot_dirty);
+            let (next, _, _) = pane
+                .terminal
+                .lock()
+                .try_render_snapshot(&pane.snapshot, false)
+                .unwrap();
+            let row = &next.lines[0].cells;
+            assert_eq!(
+                (row[0].bg, row[2].bg),
+                (
+                    terminal_color_from_hex(light.tokens.terminal.red),
+                    terminal_color_from_hex(light.background),
+                )
+            );
+        });
     }
 
     #[gpui::test]
@@ -4465,7 +5162,7 @@ mod tests {
         let received = events.clone();
         let _subscription = cx.update(|_, cx| {
             cx.subscribe(&pane, move |_, event, _| {
-                received.borrow_mut().push(event.clone());
+                received.borrow_mut().push(*event);
             })
         });
         pane.update(cx, |pane, cx| {
@@ -4637,6 +5334,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn broadcast_submit_marks_only_the_completed_target_command(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_window, _cx| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    DEFAULT_COLS,
+                    DEFAULT_ROWS,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.test_accepts_input = true;
+            pane.settings.command_marks_enabled = true;
+            pane.settings.command_marks_user_input_observed = true;
+            pane.autosuggest_prompt_active = true;
+            assert!(pane.send_broadcast_input(TerminalBroadcastInputKind::Text, b"l", cx));
+            assert!(pane.send_broadcast_input(TerminalBroadcastInputKind::Text, b"s", cx));
+            assert_eq!(pane.input_tracker.state().value, "ls");
+            assert!(pane.command_marks.is_empty());
+            assert!(pane.send_broadcast_input_with_parent(
+                TerminalBroadcastInputKind::Protocol,
+                b"\r",
+                Some("broadcast-batch-1"),
+                cx
+            ));
+            assert_eq!(pane.command_marks.len(), 1);
+            assert_eq!(pane.command_marks[0].command.as_deref(), Some("ls"));
+            assert_eq!(
+                pane.command_marks[0].detection_source,
+                TerminalCommandMarkDetectionSource::Broadcast
+            );
+        });
+    }
+
+    #[gpui::test]
     fn history_suggestions_follow_prompt_capability_without_requiring_direct_focus(
         cx: &mut TestAppContext,
     ) {
@@ -4665,6 +5401,7 @@ mod tests {
 
             assert!(pane.terminal_autosuggest_candidates().is_empty());
             pane.autosuggest_prompt_active = true;
+            pane.observe_autosuggest_input_bytes(b"dock", cx);
             assert_eq!(
                 pane.terminal_autosuggest_candidates()
                     .into_iter()
@@ -4694,6 +5431,208 @@ mod tests {
             pane.observe_autosuggest_input_bytes(b"\r", cx);
             assert!(!pane.autosuggest_prompt_active);
             assert!(pane.terminal_autosuggest_candidates().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn tui_input_does_not_reopen_or_populate_shell_history(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| TerminalTestRoot);
+        for launch_input in [b"\x1b[A\r".as_slice(), b"co\t\r", b"codex\r"] {
+            let pane = cx.update(|window, cx| {
+                let mut preferences = TerminalUiPreferences::default();
+                preferences.command_history =
+                    SharedTerminalCommandHistory::from_commands(vec!["docker ps".into()]);
+                cx.new(|cx| {
+                    TerminalPane::new_recording_playback(
+                        DEFAULT_COLS,
+                        DEFAULT_ROWS,
+                        preferences,
+                        window,
+                        cx,
+                    )
+                    .unwrap()
+                })
+            });
+            pane.update(cx, |pane, cx| {
+                pane.test_accepts_input = true;
+                pane.handle_terminal_event(
+                    TerminalEvent::CwdChanged {
+                        cwd: "/work".into(),
+                        host: None,
+                    },
+                    cx,
+                );
+                pane.observe_autosuggest_input_bytes(launch_input, cx);
+                assert!(
+                    !pane.autosuggest_prompt_active,
+                    "every submission leaves the shell prompt"
+                );
+                pane.observe_autosuggest_input_bytes(b"docker explain this\r", cx);
+                let commands: Vec<_> = pane
+                    .history_command_records()
+                    .into_iter()
+                    .map(|record| record.command)
+                    .collect();
+                if launch_input == b"codex\r" {
+                    assert_eq!(commands, ["docker ps", "codex"]);
+                } else {
+                    assert_eq!(commands, ["docker ps"]);
+                }
+
+                // Inline TUIs can report their cwd without entering the alternate screen.
+                pane.terminal.lock().feed_recording_output(b"\x1b[?1004h");
+                pane.handle_terminal_event(
+                    TerminalEvent::CwdChanged {
+                        cwd: "/work/project".into(),
+                        host: None,
+                    },
+                    cx,
+                );
+                pane.observe_autosuggest_input_bytes(b"dock", cx);
+                pane.snapshot.lines[pane.snapshot.cursor_row].active_input = true;
+                assert!(pane.terminal_autosuggest_candidates().is_empty());
+
+                pane.terminal.lock().feed_recording_output(b"\x1b[?1004l");
+                pane.handle_terminal_event(
+                    TerminalEvent::CwdChanged {
+                        cwd: "/work".into(),
+                        host: None,
+                    },
+                    cx,
+                );
+                pane.observe_autosuggest_input_bytes(b"dock", cx);
+                assert_eq!(
+                    pane.terminal_autosuggest_candidates()
+                        .into_iter()
+                        .map(|candidate| candidate.command)
+                        .collect::<Vec<_>>(),
+                    ["docker ps"]
+                );
+
+                pane.terminal
+                    .lock()
+                    .feed_recording_output(b"\x1b]133;C\x07\x1b]7;file:///work\x07");
+                pane.tick(cx);
+                pane.observe_autosuggest_input_bytes(b"dock", cx);
+                assert!(
+                    !pane.autosuggest_prompt_active,
+                    "cwd reports must not override command execution"
+                );
+                assert!(pane.terminal_autosuggest_candidates().is_empty());
+                pane.terminal
+                    .lock()
+                    .feed_recording_output(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+                pane.tick(cx);
+                pane.observe_autosuggest_input_bytes(b"dock", cx);
+                assert_eq!(
+                    pane.terminal_autosuggest_candidates()
+                        .into_iter()
+                        .map(|candidate| candidate.command)
+                        .collect::<Vec<_>>(),
+                    ["docker ps"]
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn ai_command_without_end_event_recovers_input_only_after_fresh_prompt(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) = cx.add_window_view(|_, _| TerminalTestRoot);
+        let pane = cx.update(|window, cx| {
+            cx.new(|cx| {
+                TerminalPane::new_recording_playback(
+                    80,
+                    4,
+                    TerminalUiPreferences::default(),
+                    window,
+                    cx,
+                )
+                .unwrap()
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            pane.test_accepts_input = true;
+            // The outer shell advertised integration before entering a nested host.
+            pane.terminal
+                .lock()
+                .feed_recording_output(b"\x1b]133;A\x07outer@jump:~$ \x1b]133;B\x07");
+            pane.tick(cx);
+            pane.terminal
+                .lock()
+                .feed_recording_output(b"ssh inner\r\ninner@host:~$ ");
+            pane.tick(cx);
+            assert!(pane.shell_integration_status().detected);
+            let id = pane
+                .begin_command_mark(
+                    "pip install example",
+                    TerminalCommandMarkDetectionSource::Ai,
+                    cx,
+                )
+                .unwrap();
+            pane.last_terminal_activity = Instant::now() - Duration::from_secs(1);
+            assert!(pane.ai_command_input_pending());
+            pane.terminal.lock().feed_recording_output(
+                b"pip install example\r\nInstalling /\rInstalling -\rInstalling \\",
+            );
+            pane.tick(cx);
+            pane.last_terminal_activity = Instant::now() - Duration::from_secs(1);
+            assert!(
+                pane.ai_command_input_pending(),
+                "quiet progress output must not free input"
+            );
+            pane.terminal
+                .lock()
+                .feed_recording_output(b"\r\ninner@host:~$");
+            pane.tick(cx);
+            // Recording injection bypasses the live PTY drain's activity clock.
+            pane.last_terminal_activity = Instant::now();
+            assert!(
+                !pane.ai_command_prompt_returned(&id),
+                "prompt must settle first"
+            );
+            pane.terminal.lock().feed_recording_output(b" ");
+            pane.tick(cx);
+            pane.last_terminal_activity = Instant::now() - Duration::from_secs(1);
+            assert!(pane.ai_command_prompt_returned(&id));
+            assert!(!pane.ai_command_input_pending());
+            let record = pane
+                .ai_command_records()
+                .into_iter()
+                .find(|record| record.command_id == id)
+                .unwrap();
+            assert_eq!(
+                (record.status, record.exit_code),
+                (crate::TerminalCommandFactStatus::Open, None)
+            );
+            // A later command owns a new prompt boundary; old evidence cannot release it.
+            let next = pane
+                .begin_command_mark("cd /tmp", TerminalCommandMarkDetectionSource::Ai, cx)
+                .unwrap();
+            assert!(!pane.ai_command_prompt_returned(&id));
+            assert!(pane.ai_command_input_pending());
+            pane.terminal
+                .lock()
+                .feed_recording_output(b"cd /tmp\r\ninner@host:/tmp$ ");
+            pane.tick(cx);
+            pane.last_terminal_activity = Instant::now() - Duration::from_secs(1);
+            assert!(pane.ai_command_prompt_returned(&next));
+            pane.terminal.lock().scroll_lines(1);
+            assert_eq!(pane.terminal.lock().snapshot().display_offset, 1);
+            assert!(
+                pane.ai_command_prompt_returned(&next),
+                "scrollback viewing must not hide the live prompt"
+            );
+            pane.terminal
+                .lock()
+                .feed_recording_output(b"\x1b[?1049hinner@host:/tmp$ ");
+            pane.tick(cx);
+            pane.last_terminal_activity = Instant::now() - Duration::from_secs(1);
+            assert!(
+                pane.ai_command_input_pending(),
+                "alternate-screen applications own their input"
+            );
         });
     }
 

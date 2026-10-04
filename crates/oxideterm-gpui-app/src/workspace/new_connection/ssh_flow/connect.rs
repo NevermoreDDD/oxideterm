@@ -148,7 +148,14 @@ impl WorkspaceApp {
             };
             let fallback_auth = match form.auth_tab {
                 SshAuthTab::Password => {
-                    AuthMethod::password_secret(secret_handoff.zeroizing(&mut form.password))
+                    if form.empty_password {
+                        form.password.zeroize();
+                        AuthMethod::password("")
+                    } else if form.password.is_empty() {
+                        AuthMethod::password_prompt()
+                    } else {
+                        AuthMethod::password_secret(secret_handoff.zeroizing(&mut form.password))
+                    }
                 }
                 SshAuthTab::Agent => AuthMethod::Agent,
                 SshAuthTab::DefaultKey => AuthMethod::key_secret(
@@ -186,9 +193,17 @@ impl WorkspaceApp {
             let proxy_chain = if proxy_command.is_some() {
                 None
             } else {
-                proxy_chain_from_form(form, secret_handoff, saved_proxy_hop_auth)
+                proxy_chain_from_form(
+                    &this.connection_store,
+                    form,
+                    secret_handoff,
+                    saved_proxy_hop_auth,
+                )
             };
             let config = SshConfig {
+                totp: this
+                    .connection_store
+                    .totp_binding(form.totp_credential_id.as_deref()),
                 host: host.clone(),
                 port: port.unwrap_or(22),
                 username: username.clone(),
@@ -412,6 +427,28 @@ impl WorkspaceApp {
                 } => {
                     self.open_keyboard_interactive_challenge(request, response_tx, window, cx);
                 }
+                SshConnectionWorkerResult::PasswordPrompt {
+                    node_id,
+                    prompt,
+                    response_tx,
+                } => {
+                    self.open_password_prompt(node_id, prompt, response_tx, window, cx);
+                }
+                SshConnectionWorkerResult::PasswordAuthenticated { target, password } => {
+                    self.save_authenticated_prompt_password(target, password, cx);
+                }
+                SshConnectionWorkerResult::AuthenticationCompleted {
+                    node_id,
+                    connection_id,
+                    configured_credentials_confirmed,
+                } => {
+                    self.save_confirmed_connection_auth(
+                        node_id,
+                        connection_id,
+                        configured_credentials_confirmed,
+                        cx,
+                    );
+                }
             }
         }
     }
@@ -478,7 +515,7 @@ impl WorkspaceApp {
         &mut self,
         mut config: SshConfig,
         title: String,
-        intent: SshConnectionIntent,
+        mut intent: SshConnectionIntent,
         save_after_open: Option<SaveConnectionRequest>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -493,7 +530,7 @@ impl WorkspaceApp {
         let upstream_proxy = config.upstream_proxy.take();
         let endpoints = proxy_session_tree_endpoints(&config);
         let expansion_id = match &intent {
-            SshConnectionIntent::ConnectSaved(id) => id.clone(),
+            SshConnectionIntent::ConnectSaved { id, .. } => id.clone(),
             _ => format!("manual-{}", self.next_ssh_node_id),
         };
         let expansion =
@@ -516,6 +553,12 @@ impl WorkspaceApp {
                 return;
             }
         };
+        if let SshConnectionIntent::ConnectSaved {
+            auth_save_target, ..
+        } = &mut intent
+        {
+            self.arm_saved_auth_save(&expansion.target_node_id, auth_save_target.take());
+        }
         let run = NativeProxyConnectRun {
             generation: 0,
             plan,
@@ -914,7 +957,7 @@ impl WorkspaceApp {
                     cx,
                 );
             }
-            SshConnectionIntent::ConnectSaved(id) => {
+            SshConnectionIntent::ConnectSaved { id, .. } => {
                 if let Some(connection_options) = self.connection_store.get(&id).map(|connection| {
                     (
                         connection.options.terminal.clone(),
@@ -949,6 +992,7 @@ impl WorkspaceApp {
                 );
             }
             SshConnectionIntent::Test
+            | SshConnectionIntent::ConnectTemporary
             | SshConnectionIntent::TestStandaloneSftp
             | SshConnectionIntent::DrillDown { .. }
             | SshConnectionIntent::Mosh(_)
@@ -1170,6 +1214,15 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         match intent {
+            SshConnectionIntent::ConnectTemporary => {
+                self.connection_flow
+                    .update(cx, |flow, cx| flow.clear_host_key_challenge(cx));
+                if let Err(error) = self.connect_verified_temporary_ssh(config, title, cx) {
+                    self.session_manager.update(cx, |manager, cx| {
+                        manager.set_status(Some(error.to_string()), cx);
+                    });
+                }
+            }
             SshConnectionIntent::Connect(connection_options) => {
                 self.update_connection_form_state(cx, ConnectionFormState::clear);
                 self.connection_flow.update(cx, |connection_flow, cx| {
@@ -1239,7 +1292,10 @@ impl WorkspaceApp {
                     cx,
                 );
             }
-            SshConnectionIntent::ConnectSaved(id) => {
+            SshConnectionIntent::ConnectSaved {
+                id,
+                auth_save_target,
+            } => {
                 self.connection_flow.update(cx, |connection_flow, cx| {
                     connection_flow.clear_host_key_challenge(cx);
                 });
@@ -1249,7 +1305,14 @@ impl WorkspaceApp {
                 self.session_manager.update(cx, |session_manager, cx| {
                     session_manager.set_status(None, cx);
                 });
-                let _ = self.open_or_create_saved_ssh_terminal_tab(id, config, title, window, cx);
+                let _ = self.open_or_create_saved_ssh_terminal_tab(
+                    id,
+                    config,
+                    title,
+                    auth_save_target,
+                    window,
+                    cx,
+                );
             }
             SshConnectionIntent::Mosh(options) => {
                 let public_mcp_open_token = options.public_mcp_open_token.clone();
@@ -1432,11 +1495,11 @@ impl WorkspaceApp {
                 let tx = self.ssh_worker_sender(cx);
                 let prompt_handler = Arc::new(NativeSshPromptHandler::new(tx.clone()));
                 let managed_key_resolver = managed_key_resolver_from_store(&self.connection_store);
-                let worker_consumer = consumer.clone();
-                let worker_endpoint_id = endpoint_id.clone();
-                let worker_title = title.clone();
-                let worker_saved_profile_id = saved_profile_id.clone();
-                let worker_initial_remote_path = initial_remote_path.clone();
+                let worker_consumer = consumer;
+                let worker_endpoint_id = endpoint_id;
+                let worker_title = title;
+                let worker_saved_profile_id = saved_profile_id;
+                let worker_initial_remote_path = initial_remote_path;
                 self.forwarding_runtime.spawn(async move {
                     let client = SshTransportClient::new(config)
                         .with_prompt_handler(prompt_handler)
@@ -1503,8 +1566,8 @@ impl WorkspaceApp {
                 let tx = self.ssh_worker_sender(cx);
                 let prompt_handler = Arc::new(NativeSshPromptHandler::new(tx.clone()));
                 let managed_key_resolver = managed_key_resolver_from_store(&self.connection_store);
-                let worker_primary_consumer = primary_consumer.clone();
-                let worker_secondary_consumer = secondary_consumer.clone();
+                let worker_primary_consumer = primary_consumer;
+                let worker_secondary_consumer = secondary_consumer;
                 self.forwarding_runtime.spawn(async move {
                     let primary_client = SshTransportClient::new(primary_config)
                         .with_prompt_handler(prompt_handler.clone())

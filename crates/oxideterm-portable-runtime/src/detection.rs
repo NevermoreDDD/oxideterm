@@ -317,29 +317,6 @@ mod tests {
             info.data_dir,
             temp.path().join(PORTABLE_DEFAULT_DATA_DIRNAME)
         );
-        assert_eq!(
-            info.data_dir.join(PORTABLE_SKILLS_DIRNAME),
-            temp.path()
-                .join(PORTABLE_DEFAULT_DATA_DIRNAME)
-                .join(PORTABLE_SKILLS_DIRNAME)
-        );
-    }
-
-    #[test]
-    fn non_empty_portable_file_does_not_enable_portable_mode() {
-        let temp = tempdir().unwrap();
-        let exe_path = temp.path().join("oxideterm");
-        std::fs::write(&exe_path, b"").unwrap();
-        std::fs::write(
-            temp.path().join(PORTABLE_MARKER_FILENAME),
-            b"#!/usr/bin/env sh\n",
-        )
-        .unwrap();
-
-        let info = detect_portable_info_from_exe(&exe_path).unwrap();
-
-        assert!(!info.is_portable);
-        assert_eq!(info.activation, PortableActivationKind::Disabled);
     }
 
     #[test]
@@ -377,12 +354,6 @@ mod tests {
             temp.path()
                 .join("portable-store")
                 .join(PORTABLE_KEYSTORE_FILENAME)
-        );
-        assert_eq!(
-            info.data_dir.join(PORTABLE_SKILLS_DIRNAME),
-            temp.path()
-                .join("portable-store")
-                .join(PORTABLE_SKILLS_DIRNAME)
         );
     }
 

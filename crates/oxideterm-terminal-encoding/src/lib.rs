@@ -4,6 +4,7 @@
 use std::{borrow::Cow, fmt};
 
 use encoding_rs::{BIG5, EUC_JP, EUC_KR, Encoding, GB18030, GBK, SHIFT_JIS, UTF_8, WINDOWS_1252};
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum TerminalEncoding {
@@ -166,19 +167,22 @@ impl TerminalInputEncoder {
     }
 
     pub fn encode_paste(self, text: &str, bracketed: bool) -> Vec<u8> {
-        let prepared = normalize_paste_line_endings(text);
+        let prepared = prepare_paste_text(text, bracketed);
+        let mut encoded = self.encode_text(&prepared);
 
-        if !bracketed || !prepared.contains('\r') {
-            let encoded = self.encode_text(&prepared);
+        if !bracketed {
             return encoded.into_owned();
         }
 
-        let sanitized = prepared.replace('\x1b', "");
-        let encoded = self.encode_text(&sanitized);
+        // Every paste needs boundaries so applications can distinguish text from key events.
         let mut bytes = Vec::with_capacity(encoded.len() + 12);
         bytes.extend_from_slice(b"\x1b[200~");
         bytes.extend_from_slice(&encoded);
         bytes.extend_from_slice(b"\x1b[201~");
+        // Legacy encodings may allocate a second temporary copy of clipboard text.
+        if let Cow::Owned(encoded) = &mut encoded {
+            encoded.zeroize();
+        }
         bytes
     }
 }
@@ -318,18 +322,22 @@ fn invalid_utf8_bytes(bytes: &[u8]) -> usize {
     invalid
 }
 
-fn normalize_paste_line_endings(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
+fn prepare_paste_text(text: &str, bracketed: bool) -> Zeroizing<String> {
+    let mut normalized = Zeroizing::new(String::with_capacity(text.len()));
+    // Bracketed content is text; plain terminal input retains shell submission semantics.
+    let newline = if bracketed { '\n' } else { '\r' };
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
             '\r' => {
-                normalized.push('\r');
+                normalized.push(newline);
                 if chars.peek() == Some(&'\n') {
                     chars.next();
                 }
             }
-            '\n' => normalized.push('\r'),
+            '\n' => normalized.push(newline),
+            // ESC can terminate the paste, and Ctrl-C can interrupt its application-side reader.
+            '\x1b' | '\x03' if bracketed => {}
             _ => normalized.push(ch),
         }
     }
@@ -412,29 +420,34 @@ mod tests {
     fn bracketed_paste_wraps_raw_protocol_and_encodes_only_content() {
         let encoded =
             TerminalInputEncoder::new(TerminalEncoding::Gbk).encode_paste("你好\n世界\x1b", true);
-        assert!(encoded.starts_with(b"\x1b[200~"));
-        assert!(encoded.ends_with(b"\x1b[201~"));
-        assert!(!encoded[6..encoded.len() - 6].contains(&0x1b));
-
-        let mut decoder = TerminalOutputDecoder::new(TerminalEncoding::Gbk);
-        let body = &encoded[6..encoded.len() - 6];
         assert_eq!(
-            String::from_utf8(decoder.decode_to_utf8_bytes(body).into_owned()).unwrap(),
-            "你好\r世界"
+            encoded,
+            b"\x1b[200~\xc4\xe3\xba\xc3\n\xca\xc0\xbd\xe7\x1b[201~"
         );
     }
 
     #[test]
-    fn paste_normalizes_line_endings_and_wraps_multiline_content() {
-        // The matrix keeps plain, bracketed multiline, and bracketed single-line semantics together.
-        let cases: [(&str, bool, &[u8]); 3] = [
+    fn paste_preserves_text_newlines_inside_bracketed_boundaries() {
+        let cases: [(&str, bool, &[u8]); 7] = [
             ("line 1\nline 2", false, b"line 1\rline 2"),
+            ("line 1\r\nline 2\rline 3", false, b"line 1\rline 2\rline 3"),
             (
-                "line 1\r\nline 2\nline 3",
+                "line 1\r\nline 2\nline 3\rline 4",
                 true,
-                b"\x1b[200~line 1\rline 2\rline 3\x1b[201~",
+                b"\x1b[200~line 1\nline 2\nline 3\nline 4\x1b[201~",
             ),
-            ("pwd", true, b"pwd"),
+            (
+                "line 1\n\nline 2\n",
+                true,
+                b"\x1b[200~line 1\n\nline 2\n\x1b[201~",
+            ),
+            ("pwd", true, b"\x1b[200~pwd\x1b[201~"),
+            ("literal\\n", true, b"\x1b[200~literal\\n\x1b[201~"),
+            (
+                "text\x1b[201~\x03\nnext",
+                true,
+                b"\x1b[200~text[201~\nnext\x1b[201~",
+            ),
         ];
 
         for (text, bracketed, expected) in cases {
@@ -445,22 +458,20 @@ mod tests {
     }
 
     #[test]
-    fn mismatch_detector_suggests_legacy_encoding_for_invalid_utf8() {
+    fn mismatch_detector_suggests_legacy_encoding_only_in_utf8_mode() {
         let encoded = TerminalInputEncoder::new(TerminalEncoding::Gbk)
             .encode_text("你好世界你好世界你好世界")
             .into_owned();
-        let mut detector = EncodingMismatchDetector::new(TerminalEncoding::Utf8);
-        let hint = detector.observe(&encoded.repeat(8)).unwrap();
-        assert!(hint.suggestions.contains(&TerminalEncoding::Gbk));
-        assert!(hint.invalid_bytes >= 4);
-    }
-
-    #[test]
-    fn mismatch_detector_disabled_for_non_utf8_mode() {
-        let encoded = TerminalInputEncoder::new(TerminalEncoding::Gbk)
-            .encode_text("你好世界")
-            .into_owned();
-        let mut detector = EncodingMismatchDetector::new(TerminalEncoding::Gbk);
-        assert!(detector.observe(&encoded.repeat(16)).is_none());
+        for mode in [TerminalEncoding::Utf8, TerminalEncoding::Gbk] {
+            let mut detector = EncodingMismatchDetector::new(mode);
+            let hint = detector.observe(&encoded.repeat(8));
+            if mode == TerminalEncoding::Utf8 {
+                let hint = hint.expect("invalid UTF-8 should produce an encoding hint");
+                assert!(hint.suggestions.contains(&TerminalEncoding::Gbk));
+                assert!(hint.invalid_bytes >= 4);
+            } else {
+                assert!(hint.is_none());
+            }
+        }
     }
 }

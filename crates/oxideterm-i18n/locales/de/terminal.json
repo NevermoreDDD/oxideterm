@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "Bedienelemente anzeigen",
+      "hide_controls": "Bedienelemente ausblenden"
+    },
+    "autosuggest": {
+      "matches": "{{count}} Treffer",
+      "navigation_hint": "{{select}} wählen · {{run}} ausführen · Klick einfügen",
+      "dismiss_hint": "{{dismiss}} schließen · {{remove}} entfernen"
+    },
     "processing_failed": "Die Terminalverarbeitung wurde angehalten. Verbinden Sie diese Sitzung erneut, um fortzufahren.",
     "local_terminal": "Lokales Terminal",
     "tmux": {
@@ -42,6 +51,11 @@
       "risk_configured": "konfiguriert"
     },
     "paste": {
+      "edit": "Bearbeiten",
+      "edit_title": "Vor dem Einfügen bearbeiten",
+      "strip_fence": "Codeblock-Markierungen entfernen",
+      "undo": "Rückgängig",
+      "redo": "Wiederholen",
       "title": "Mehrere Zeilen erkannt ({{count}} Zeilen)",
       "more_lines": "... {{count}} weitere Zeilen",
       "confirm": "Bestätigen",
@@ -75,6 +89,12 @@
       "clear_screen": "Bildschirm leeren"
     },
     "modem": {
+      "timeout": "Die Gegenstelle hat nicht rechtzeitig geantwortet. Starten Sie dort das Übertragungsprogramm und versuchen Sie es erneut.",
+      "protocol_error": "Die Gegenstelle hat ungültige oder unerwartete Übertragungsdaten gesendet.",
+      "file_error": "Die Datei kann nicht gelesen oder geschrieben werden. Prüfen Sie die Zugriffsrechte und den freien Speicherplatz.",
+      "file_too_large": "Die Datei überschreitet die Größenbegrenzung dieses Protokolls.",
+      "buffer_overflow": "Die Gegenstelle hat mehr Daten gesendet, als der Übertragungspuffer aufnehmen kann.",
+      "worker_stopped": "Die Übertragung wurde unerwartet beendet. Bitte versuchen Sie es erneut.",
       "binary_transfer": "Binärübertragung",
       "xmodem_upload": "XMODEM hochladen",
       "xmodem_receive": "XMODEM empfangen",
@@ -259,7 +279,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Befehle in „{{name}}“ werden vor dem Löschen in die Standardgruppe verschoben.",
+      "delete_group_description": "Befehle in „{{name}}“ werden vor dem Löschen dieser Gruppe nach „{{destination}}“ verschoben.",
+      "reorder_groups": "Gruppen am Griff ziehen, um sie neu anzuordnen",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -469,6 +490,7 @@
       "execute": "Ausführen"
     },
     "sender": {
+      "group_hint": "Gespeicherte Verbindungsgruppen wählen alle passenden Terminalfenster aus. Die Isolation bei interaktiver Synchronisation ändert diese expliziten Ziele nicht.",
       "task": "Sender",
       "placeholder": "Befehle oder Hexadezimalbytes eingeben...",
       "show": "Befehlssender anzeigen",
@@ -505,10 +527,18 @@
       "error_busy": "Ein Ziel wird von einem anderen Sender verwendet"
     },
     "broadcast": {
-      "groups": "Broadcast-Gruppen",
+      "members_hint": "Einzelne Terminals auswählen und dann die Synchronisation aktivieren. Neue Terminals treten nicht automatisch bei. Vor dem Wechsel ein Terminal aus seiner bisherigen Gruppe entfernen.",
+      "isolate_member": "Isolieren",
+      "resume_member": "Fortsetzen",
+      "pause_group": "Pausieren",
+      "start_group": "Synchronisieren",
+      "sync_isolated": "Isoliert",
+      "sync_disabled": "Pausiert",
+      "sync_enabled": "Synchronisiert",
+      "groups": "Synchronisationsgruppen",
       "create_group": "Neue Gruppe",
       "no_groups": "Noch keine benannten Gruppen",
-      "temporary_group": "Temporäre Auswahl",
+      "temporary_group": "Temporäre Synchronisationsgruppe",
       "group_name_placeholder": "Gruppenname",
       "group_members": "Gruppenmitglieder",
       "unsaved_target": "Nicht gespeichert",

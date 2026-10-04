@@ -28,9 +28,8 @@ impl WorkspaceApp {
     ) -> AnyElement {
         let theme = self.tokens.ui;
         let viewport = window.viewport_size();
-        let max_height = (f32::from(viewport.height) * 0.8)
-            .min(FILE_MANAGER_CONTEXT_MENU_MAX_HEIGHT)
-            .max(180.0);
+        let max_height =
+            (f32::from(viewport.height) * 0.8).clamp(180.0, FILE_MANAGER_CONTEXT_MENU_MAX_HEIGHT);
         let placement = browser_behavior::clamp_context_menu_position(
             menu.x,
             menu.y,
@@ -53,7 +52,7 @@ impl WorkspaceApp {
             )
         };
         let popup = context_menu_event_boundary(
-            div()
+            material_surface(&self.tokens, div(), MaterialRole::Popover)
                 .w(px(FILE_MANAGER_CONTEXT_MENU_WIDTH))
                 .max_h(px(max_height))
                 .overflow_hidden()
@@ -61,11 +60,6 @@ impl WorkspaceApp {
                 .rounded(px(self.tokens.radii.sm))
                 .border_1()
                 .border_color(file_manager_border(theme.border, has_background))
-                .bg(file_manager_panel_bg(
-                    theme.bg_elevated,
-                    has_background,
-                    0xf2,
-                ))
                 .shadow_lg(),
         )
         .when_some(menu.file.clone(), |menu_el, file| {
@@ -76,7 +70,6 @@ impl WorkspaceApp {
                     false,
                     has_background,
                     {
-                        let file = file;
                         move |this, _event, _window, cx| {
                             this.set_file_manager_path(file.path.clone(), cx);
                         }
@@ -111,7 +104,6 @@ impl WorkspaceApp {
                         false,
                         has_background,
                         {
-                            let file = file;
                             move |this, _event, _window, cx| {
                                 this.open_file_manager_preview(file.clone(), cx);
                             }
@@ -540,7 +532,7 @@ impl WorkspaceApp {
                 }),
             )
             .child(
-                div()
+                material_surface(&self.tokens, div(), MaterialRole::Dialog)
                     .w(px(width.min(f32::from(window.viewport_size().width) - 32.0)))
                     .max_h(px(
                         (f32::from(window.viewport_size().height) * 0.86).max(240.0)
@@ -561,11 +553,6 @@ impl WorkspaceApp {
                     .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                         cx.stop_propagation();
                     })
-                    .bg(file_manager_panel_bg(
-                        self.tokens.ui.bg_elevated,
-                        has_background,
-                        0xf2,
-                    ))
                     .shadow_lg()
                     .child(
                         div()
@@ -707,12 +694,7 @@ impl WorkspaceApp {
         let theme = self.tokens.ui;
         let width =
             FILE_MANAGER_DIALOG_WIDTH_SM.min(f32::from(window.viewport_size().width) - 32.0);
-        let (icon, icon_color) = file_icon_for_entry(&entry);
-        let icon_color = if icon_color == 0 {
-            theme.text_muted
-        } else {
-            icon_color
-        };
+        let icon = file_icon_for_entry(&entry);
         let form_visible = self.file_manager.read(cx).dialog_presence.phase()
             == oxideterm_gpui_ui::motion::ExitPhase::Visible;
         dismissible_dialog_backdrop()
@@ -726,7 +708,7 @@ impl WorkspaceApp {
             .child(oxideterm_gpui_ui::motion::form_transition(
                 &self.tokens,
                 "file-manager-properties-transition",
-                div()
+                material_surface(&self.tokens, div(), MaterialRole::Dialog)
                     .w(px(width.max(280.0)))
                     .max_h(px(
                         (f32::from(window.viewport_size().height) * 0.86).max(240.0)
@@ -745,11 +727,6 @@ impl WorkspaceApp {
                     .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
                         cx.stop_propagation();
                     })
-                    .bg(file_manager_panel_bg(
-                        theme.bg_elevated,
-                        has_background,
-                        0xf2,
-                    ))
                     .shadow_lg()
                     .child(
                         div()
@@ -760,11 +737,7 @@ impl WorkspaceApp {
                             .gap(px(8.0))
                             .border_b_1()
                             .border_color(file_manager_border(theme.border, has_background))
-                            .child(Self::render_lucide_icon(
-                                icon,
-                                FILE_MANAGER_ICON_MD,
-                                rgb(icon_color),
-                            ))
+                            .child(icon.render(FILE_MANAGER_ICON_MD, &self.tokens))
                             .child(
                                 div()
                                     .flex_1()

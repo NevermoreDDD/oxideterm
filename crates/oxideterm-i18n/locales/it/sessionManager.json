@@ -110,11 +110,13 @@
       "auth_key": "Chiave SSH",
       "auth_agent": "Agent",
       "saved_password": "Password salvata",
-      "password_placeholder": "Salvata nel portachiavi di sistema",
+      "password_placeholder": "Fai clic per visualizzare la password salvata",
       "password_required": "Inserisci la password per connetterti.",
       "show_password": "Mostra password salvata",
       "hide_password": "Nascondi password salvata",
-      "password_load_failed": "Impossibile leggere la password salvata. Verifica l’accesso all’archivio credenziali e riprova.",
+      "password_load_failed": "Impossibile leggere l’archivio credenziali. Riprova oppure inserisci di nuovo la password e salvala.",
+      "password_not_found": "La password a cui fa riferimento questa connessione non è presente nell’archivio credenziali. Inseriscila di nuovo e salvala.",
+      "password_store_locked": "L’archivio portatile è bloccato. Riavvia OxideTerm, sbloccalo con la password della modalità portatile e riprova.",
       "password_hint": "Il pulsante con l’occhio mostra la password salvata senza modificarla. Modifica il valore per sostituirla o lascia il campo vuoto per mantenerla.",
       "key_path": "Percorso file chiave",
       "browse": "Sfoglia",
@@ -125,6 +127,9 @@
       "choose_icon": "Cambia icona",
       "hide_icons": "Nascondi icone",
       "default_icon": "Icona predefinita",
+      "auto_icon": "Rileva automaticamente",
+      "custom_icon": "Scegli icona",
+      "auto_icon_hint": "Dopo la connessione, le sessioni attive mostrano l’icona del sistema rilevato. Se non è disponibile un’icona corrispondente, viene usata un’icona server generica.",
       "color": "Colore",
       "icon_color": "Colore dell’icona",
       "icon_background_color": "Colore di sfondo dell’icona",
@@ -132,7 +137,8 @@
       "cancel": "Annulla",
       "save": "Salva",
       "saving": "Salvataggio...",
-      "passphrase_hint": "Lascia vuoto per mantenere la passphrase salvata se il percorso della chiave non cambia."
+      "passphrase_hint": "Lascia vuoto per mantenere la passphrase salvata se il percorso della chiave non cambia.",
+      "brand_icon_hint": "I loghi delle distribuzioni mantengono i colori e le proporzioni originali."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "Sessioni salvate",
       "expand_all": "Espandi tutto",
       "collapse_all": "Comprimi tutto"
+    },
+    "local_terminal_profiles": {
+      "delete": "Elimina sessione locale",
+      "delete_failed": "Impossibile eliminare la sessione locale",
+      "confirm_delete": "Eliminare la sessione locale «{{name}}»? I terminali attivi resteranno aperti."
     }
   }
 }

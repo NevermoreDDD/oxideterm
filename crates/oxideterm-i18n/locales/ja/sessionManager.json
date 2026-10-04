@@ -110,11 +110,13 @@
       "auth_key": "SSHキー",
       "auth_agent": "Agent",
       "saved_password": "保存済みパスワード",
-      "password_placeholder": "システムキーチェーンに保存済み",
+      "password_placeholder": "クリックして保存済みパスワードを表示",
       "password_required": "接続するにはパスワードを入力してください。",
       "show_password": "保存済みパスワードを表示",
       "hide_password": "保存済みパスワードを非表示",
-      "password_load_failed": "保存されたパスワードを読み取れませんでした。資格情報ストアへのアクセス権を確認して再試行してください。",
+      "password_load_failed": "資格情報ストアを読み取れません。再試行するか、パスワードを再入力して保存してください。",
+      "password_not_found": "この接続が参照するパスワードが資格情報ストアにありません。パスワードを再入力して保存してください。",
+      "password_store_locked": "ポータブル保管庫がロックされています。OxideTerm を再起動し、ポータブルモードのパスワードで解除してから再試行してください。",
       "password_hint": "目のボタンで保存済みパスワードを表示できます。表示だけでは変更されません。編集すると置き換えられ、空欄のままなら元のパスワードが保持されます。",
       "key_path": "鍵ファイルパス",
       "browse": "参照",
@@ -125,6 +127,9 @@
       "choose_icon": "アイコンを変更",
       "hide_icons": "アイコンを隠す",
       "default_icon": "既定のアイコン",
+      "auto_icon": "自動検出",
+      "custom_icon": "アイコンを指定",
+      "auto_icon_hint": "接続後、アクティブなセッションには検出されたシステムのアイコンが表示されます。対応するアイコンがない場合は、汎用サーバーアイコンが使われます。",
       "color": "色",
       "icon_color": "アイコンの色",
       "icon_background_color": "アイコンの背景色",
@@ -132,7 +137,8 @@
       "cancel": "キャンセル",
       "save": "保存",
       "saving": "保存中...",
-      "passphrase_hint": "キーのパスが変わっていない場合、空のままにすると保存済みのパスフレーズを保持します。"
+      "passphrase_hint": "キーのパスが変わっていない場合、空のままにすると保存済みのパスフレーズを保持します。",
+      "brand_icon_hint": "ディストリビューションのロゴは元の色と縦横比を保持します。"
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "保存済みセッション",
       "expand_all": "すべて展開",
       "collapse_all": "すべて折りたたむ"
+    },
+    "local_terminal_profiles": {
+      "delete": "ローカルセッションを削除",
+      "delete_failed": "ローカルセッションを削除できませんでした",
+      "confirm_delete": "ローカルセッション「{{name}}」を削除しますか？実行中の端末は開いたままになります。"
     }
   }
 }

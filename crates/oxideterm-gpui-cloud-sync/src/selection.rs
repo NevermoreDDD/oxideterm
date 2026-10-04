@@ -442,6 +442,9 @@ pub fn cloud_sync_legacy_import_options(
             import_serial_profiles: selection.import_serial_profiles,
             import_telnet_profiles: selection.import_telnet_profiles,
             import_mosh_profiles: selection.import_mosh_profiles,
+            import_standalone_sftp_profiles: selection.import_connections,
+            import_remote_desktop_profiles: selection.import_remote_desktop_profiles,
+            restore_managed_key_passphrases: import_portable_secrets,
             import_portable_secrets,
             ..OxideImportOptions::default()
         },
@@ -470,9 +473,10 @@ impl CloudSyncPreviewSelection {
             CloudSyncPendingPreview::Legacy { .. } => None,
         };
         Self {
-            import_connections: structured_full_selection
-                .as_ref()
-                .map_or(summary.connections > 0, |selection| selection.connections),
+            import_connections: structured_full_selection.as_ref().map_or(
+                summary.connections > 0 || summary.standalone_sftp_profiles > 0,
+                |selection| selection.connections,
+            ),
             selected_connection_names: summary.connection_record_names(),
             selected_connection_ids: preview_connection_ids(preview),
             import_quick_commands: structured_full_selection
@@ -533,6 +537,9 @@ impl CloudSyncPreviewSelection {
     pub fn effective_import_connections(&self, summary: &CloudSyncPreviewSummary) -> bool {
         if !self.import_connections {
             return false;
+        }
+        if summary.standalone_sftp_profiles > 0 {
+            return true;
         }
         if summary.records.is_empty() && summary.connections > 0 {
             return !self.selected_connection_ids.is_empty();
@@ -604,7 +611,7 @@ impl CloudSyncPreviewSelection {
                         preview
                             .connections_snapshot
                             .as_ref()
-                            .map(|snapshot| snapshot.records.len()),
+                            .map(|snapshot| snapshot.record_count()),
                     )),
             forwards: self.import_forwards
                 && structured_record_section_selected(
@@ -737,6 +744,19 @@ impl CloudSyncPreviewSelection {
         summary: &CloudSyncPreviewSummary,
     ) -> Vec<CloudSyncPreviewSelectionRow> {
         let mut rows = Vec::new();
+        if summary.standalone_sftp_profiles > 0 {
+            rows.push(CloudSyncPreviewSelectionRow {
+                label: CloudSyncPreviewSelectionLabel::I18nCount {
+                    key: "plugin.cloud_sync.preview.standalone_sftp_profiles",
+                    count_name: "count",
+                    count: summary.standalone_sftp_profiles,
+                },
+                meta: None,
+                checked: self.import_connections,
+                disabled: false,
+                action: CloudSyncPreviewSelectionAction::ToggleConnections,
+            });
+        }
         if summary.connections > 0 {
             rows.push(CloudSyncPreviewSelectionRow {
                 label: CloudSyncPreviewSelectionLabel::I18nCount {
@@ -1003,8 +1023,8 @@ fn preview_connection_ids(preview: &CloudSyncPendingPreview) -> BTreeSet<String>
             .connections_snapshot
             .as_ref()
             .into_iter()
-            .flat_map(|snapshot| snapshot.records.iter())
-            .map(|record| record.id.clone())
+            .flat_map(|snapshot| snapshot.record_ids())
+            .map(ToOwned::to_owned)
             .collect(),
         CloudSyncPendingPreview::Legacy { .. } => BTreeSet::new(),
     }
@@ -1391,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_client_applies_empty_remote_sections_to_establish_the_baseline() {
+    fn fresh_client_selects_empty_sections_and_local_only_connections() {
         let mut manifest = create_manifest_base(
             "remote-revision",
             "2026-08-21T00:00:00Z",
@@ -1404,10 +1424,13 @@ mod tests {
             record_count: Some(0),
             content_type: "application/json".to_string(),
         });
-        let preview = CloudSyncPendingPreview::Structured(StructuredPreview {
+        let mut preview = CloudSyncPendingPreview::Structured(StructuredPreview {
             remote_metadata: Default::default(),
             manifest,
             connections_snapshot: Some(SavedConnectionsSyncSnapshot {
+                totp_credentials: Vec::new(),
+                local_terminal_profiles: Vec::new(),
+                local_terminal_tombstones: Vec::new(),
                 revision: "empty-connections".to_string(),
                 exported_at: "2026-08-21T00:00:00Z".to_string(),
                 records: Vec::new(),
@@ -1435,21 +1458,49 @@ mod tests {
             plugin_settings_counts: Default::default(),
         });
         let selection = CloudSyncPreviewSelection::from_preview(&preview, ConflictStrategy::Merge);
-        let CloudSyncPendingPreview::Structured(preview) = &preview else {
+        let CloudSyncPendingPreview::Structured(structured) = &preview else {
             unreachable!("fixture is structured");
         };
-        let applied = selection.structured_selection(preview);
+        let applied = selection.structured_selection(structured);
 
         assert!(selection.import_connections);
         assert!(applied.connections);
         assert!(structured_apply_covers_full_remote(
-            &preview.manifest,
+            &structured.manifest,
             &applied
         ));
+
+        let CloudSyncPendingPreview::Structured(structured) = &mut preview else {
+            unreachable!()
+        };
+        structured
+            .connections_snapshot
+            .as_mut()
+            .unwrap()
+            .local_terminal_profiles
+            .push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "local-project", "name": "Project", "cwd": "~/code",
+                    "created_at": "2026-08-21T00:00:00Z", "updated_at": "2026-08-21T00:00:00Z"
+                }))
+                .unwrap(),
+            );
+        let mut selection =
+            CloudSyncPreviewSelection::from_preview(&preview, ConflictStrategy::Merge);
+        assert_eq!(
+            selection.selected_connection_ids,
+            BTreeSet::from(["local-project".to_owned()])
+        );
+        let CloudSyncPendingPreview::Structured(structured) = &preview else {
+            unreachable!()
+        };
+        assert!(selection.structured_selection(structured).connections);
+        selection.selected_connection_ids.clear();
+        assert!(!selection.structured_selection(structured).connections);
     }
 
     #[test]
-    fn legacy_preview_selection_exports_selected_connection_names() {
+    fn legacy_preview_selection_tracks_partial_full_and_empty_selection() {
         let summary = summary_with_connections(&["Prod", "Staging"]);
         let mut selection = CloudSyncPreviewSelection {
             import_connections: true,
@@ -1469,17 +1520,8 @@ mod tests {
             .selected_connection_names
             .insert("Staging".to_string());
         assert!(legacy_apply_covers_full_remote(&summary, &selection));
-    }
 
-    #[test]
-    fn legacy_preview_selection_disables_connection_import_when_none_checked() {
-        let summary = summary_with_connections(&["Prod"]);
-        let selection = CloudSyncPreviewSelection {
-            import_connections: true,
-            conflict_strategy: ConflictStrategy::Rename,
-            ..CloudSyncPreviewSelection::default()
-        };
-
+        selection.selected_connection_names.clear();
         assert_eq!(
             selection.selected_connection_names_for_import(&summary),
             Some(Vec::new())
@@ -1489,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_import_options_bind_portable_secrets_to_sensitive_credentials() {
+    fn legacy_import_options_preserve_selected_scope() {
         let summary = CloudSyncPreviewSummary {
             connections: 1,
             sensitive_credentials: 1,
@@ -1509,5 +1551,12 @@ mod tests {
         selection.import_sensitive_credentials = false;
         let options = cloud_sync_legacy_import_options(&summary, &selection);
         assert!(!options.oxide_options.import_portable_secrets);
+        assert!(!options.oxide_options.import_remote_desktop_profiles);
+        assert!(!options.oxide_options.import_standalone_sftp_profiles);
+        selection.import_connections = true;
+        selection.import_remote_desktop_profiles = true;
+        let options = cloud_sync_legacy_import_options(&summary, &selection);
+        assert!(options.oxide_options.import_remote_desktop_profiles);
+        assert!(options.oxide_options.import_standalone_sftp_profiles);
     }
 }

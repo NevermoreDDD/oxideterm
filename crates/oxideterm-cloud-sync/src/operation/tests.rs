@@ -1,5 +1,46 @@
 use super::*;
 
+#[test]
+fn ftp_cloud_merge_keeps_independent_local_and_remote_edits() {
+    use oxideterm_connections::{FtpProfile, FtpProfilesSyncSnapshot, FtpSecurity};
+    let profile = FtpProfile::new(
+        "Files".into(),
+        "files.test".into(),
+        "user".into(),
+        FtpSecurity::ExplicitTls,
+    );
+    let now = Utc::now();
+    let base = StandaloneSftpProfilesSyncSnapshot {
+        revision: "base".into(),
+        exported_at: now.to_rfc3339(),
+        records: vec![],
+        ftp: Some(FtpProfilesSyncSnapshot {
+            revision: "base-ftp".into(),
+            exported_at: now.to_rfc3339(),
+            records: vec![profile],
+            tombstones: vec![],
+        }),
+    };
+    let mut local = base.clone();
+    local.ftp.as_mut().unwrap().records[0].name = "Local name".into();
+    let mut remote = base.clone();
+    remote.ftp.as_mut().unwrap().records[0].initial_path = "/remote/archive".into();
+    merge_standalone_sftp_profile_records(
+        &mut remote,
+        &base,
+        &local,
+        &ConflictStrategy::Merge,
+        now,
+    )
+    .unwrap();
+    let merged = &remote.ftp.as_ref().unwrap().records[0];
+    assert_eq!(
+        (&*merged.name, &*merged.initial_path),
+        ("Local name", "/remote/archive")
+    );
+    assert_eq!(merged.security, FtpSecurity::ExplicitTls);
+}
+
 fn connection_sync_record(
     options: oxideterm_connections::ConnectionOptions,
 ) -> oxideterm_connections::SavedConnectionSyncRecord {
@@ -9,6 +50,7 @@ fn connection_sync_record(
         updated_at: "2026-01-01T00:00:00Z".to_string(),
         deleted: false,
         payload: Some(oxideterm_connections::ConnectionInfo {
+            totp_credential_id: None,
             id: "conn-1".to_string(),
             name: "Production".to_string(),
             group: None,
@@ -17,6 +59,7 @@ fn connection_sync_record(
             port: 22,
             username: "ops".to_string(),
             auth_type: oxideterm_connections::AuthType::Agent,
+            empty_password: false,
             key_path: None,
             cert_path: None,
             managed_key_id: None,
@@ -90,6 +133,9 @@ fn remote_desktop_apply_preserves_local_credentials_and_valid_gateway_refs() {
         remote_desktop_snapshot(Some("untrusted-remote-keychain-entry"), "remote.test");
     incoming.records[0].ssh_gateway_connection_id = Some("conn-1".to_string());
     let incoming_connections = oxideterm_connections::SavedConnectionsSyncSnapshot {
+        totp_credentials: Vec::new(),
+        local_terminal_profiles: Vec::new(),
+        local_terminal_tombstones: Vec::new(),
         revision: "incoming-connections".to_string(),
         exported_at: "2026-07-26T00:00:00Z".to_string(),
         records: vec![connection_sync_record(
@@ -143,7 +189,7 @@ fn remote_desktop_three_way_merge_preserves_independent_changes() {
 }
 
 #[test]
-fn field_merge_preserves_independent_local_and_remote_changes() {
+fn field_merge_preserves_independent_edits_and_resolves_conflicts_by_strategy() {
     let base = serde_json::json!({
         "name": "Prod",
         "host": "old.example.test",
@@ -151,13 +197,13 @@ fn field_merge_preserves_independent_local_and_remote_changes() {
     });
     let local = serde_json::json!({
         "name": "Production",
-        "host": "old.example.test",
+        "host": "local.example.test",
         "username": "ops"
     });
     let remote = serde_json::json!({
         "name": "Prod",
         "host": "new.example.test",
-        "username": "ops"
+        "username": "remote-ops"
     });
 
     let merged = merge_structured_model_fields(&base, &local, &remote, &ConflictStrategy::Merge)
@@ -165,26 +211,24 @@ fn field_merge_preserves_independent_local_and_remote_changes() {
         .expect("independent local field should be preserved");
 
     assert_eq!(merged["name"], "Production");
-    assert_eq!(merged["host"], "new.example.test");
-    assert_eq!(merged["username"], "ops");
-}
+    assert_eq!(merged["host"], "local.example.test");
+    assert_eq!(merged["username"], "remote-ops");
+    let replace_result =
+        merge_structured_model_fields(&base, &local, &remote, &ConflictStrategy::Replace)
+            .expect("replace strategy should succeed")
+            .expect("independent local name should still be preserved");
 
-#[test]
-fn field_merge_uses_strategy_for_same_field_conflicts() {
+    assert_eq!(replace_result["name"], "Production");
+    assert_eq!(replace_result["host"], "new.example.test");
+    assert_eq!(replace_result["username"], "remote-ops");
     let base = serde_json::json!({ "host": "old.example.test" });
     let local = serde_json::json!({ "host": "local.example.test" });
     let remote = serde_json::json!({ "host": "remote.example.test" });
-
-    let merge_result =
-        merge_structured_model_fields(&base, &local, &remote, &ConflictStrategy::Merge)
-            .expect("merge strategy should succeed")
-            .expect("merge strategy should preserve local conflict");
-    let replace_result =
+    assert!(
         merge_structured_model_fields(&base, &local, &remote, &ConflictStrategy::Replace)
-            .expect("replace strategy should succeed");
-
-    assert_eq!(merge_result["host"], "local.example.test");
-    assert!(replace_result.is_none());
+            .expect("replace strategy should leave a remote-only conflict unchanged")
+            .is_none()
+    );
 }
 
 #[test]
@@ -199,16 +243,25 @@ fn connection_merge_preserves_independent_full_option_changes() {
     remote_record.options.as_mut().unwrap().ssh_algorithms.mac =
         vec!["hmac-sha2-512-etm@openssh.com".to_string()];
     let base = SavedConnectionsSyncSnapshot {
+        totp_credentials: Vec::new(),
+        local_terminal_profiles: Vec::new(),
+        local_terminal_tombstones: Vec::new(),
         revision: "base".to_string(),
         exported_at: "2026-01-01T00:00:00Z".to_string(),
         records: vec![base_record],
     };
     let local = SavedConnectionsSyncSnapshot {
+        totp_credentials: Vec::new(),
+        local_terminal_profiles: Vec::new(),
+        local_terminal_tombstones: Vec::new(),
         revision: "local".to_string(),
         exported_at: "2026-01-01T00:00:00Z".to_string(),
         records: vec![local_record],
     };
     let mut remote = SavedConnectionsSyncSnapshot {
+        totp_credentials: Vec::new(),
+        local_terminal_profiles: Vec::new(),
+        local_terminal_tombstones: Vec::new(),
         revision: "remote".to_string(),
         exported_at: "2026-01-01T00:00:00Z".to_string(),
         records: vec![remote_record],
@@ -343,7 +396,9 @@ fn legacy_preview_selection_respects_connection_scope() {
 #[tokio::test]
 async fn profile_credentials_upload_obeys_resource_selection_without_ssh_sync() {
     use oxideterm_connections::oxide_file::decrypt_oxide_file;
-    use oxideterm_connections::{CredentialOwner, CredentialTarget, MoshProfile, SavedAuth};
+    use oxideterm_connections::{
+        CredentialOwner, CredentialTarget, MoshProfile, SavedAuth, TelnetProfile,
+    };
     let directory = std::env::temp_dir().join(format!(
         "cloud-profile-credentials-{}",
         uuid::Uuid::new_v4()
@@ -355,9 +410,20 @@ async fn profile_credentials_upload_obeys_resource_selection_without_ssh_sync() 
         profile.id = id.into();
         data.mosh_profiles.push(profile);
     }
+    for id in ["selected-telnet", "excluded-telnet"] {
+        let mut profile = TelnetProfile::new(id, "router.test", 23);
+        profile.id = id.into();
+        data.telnet_profiles.push(profile);
+    }
     let mut raw = serde_json::to_value(data).unwrap();
     for profile in raw["mosh_profiles"].as_array_mut().unwrap() {
         profile["auth"] = serde_json::json!({"type":"password", "password":"synthetic-password"});
+    }
+    for profile in raw["telnet_profiles"].as_array_mut().unwrap() {
+        profile["upstream_proxy"] = serde_json::json!({"mode":"custom", "proxy":{
+            "protocol":"socks5", "host":"proxy.test", "port":1080,
+            "auth":{"type":"password", "username":"proxy-user", "password":"telnet-secret"}
+        }});
     }
     let path = directory.join("connections.json");
     std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
@@ -368,6 +434,7 @@ async fn profile_credentials_upload_obeys_resource_selection_without_ssh_sync() 
     let service = CloudSyncOperationService::new();
     let filter = StructuredUploadItemFilter {
         mosh_profile_ids: Some(BTreeSet::from(["selected-mosh".into()])),
+        telnet_profile_ids: Some(BTreeSet::from(["selected-telnet".into()])),
         ..Default::default()
     };
     for enabled in [true, false] {
@@ -375,6 +442,7 @@ async fn profile_credentials_upload_obeys_resource_selection_without_ssh_sync() 
             sync_connections: Some(false),
             sync_sensitive_credentials: Some(enabled),
             sync_mosh_profiles: Some(true),
+            sync_telnet_profiles: Some(true),
             sync_app_settings: Some(false),
             sync_plugin_settings: Some(false),
             ..Default::default()
@@ -405,7 +473,7 @@ async fn profile_credentials_upload_obeys_resource_selection_without_ssh_sync() 
                 .sensitive_credentials
                 .as_ref()
                 .unwrap();
-            assert_eq!(entry.record_count, Some(1));
+            assert_eq!(entry.record_count, Some(2));
             let object = plan
                 .objects
                 .iter()
@@ -417,13 +485,78 @@ async fn profile_credentials_upload_obeys_resource_selection_without_ssh_sync() 
             )
             .unwrap();
             assert!(payload.connections.is_empty());
-            assert_eq!(payload.portable_secrets.len(), 1);
-            let target: CredentialTarget =
-                serde_json::from_str(&payload.portable_secrets[0].id).unwrap();
-            assert_eq!(target.owner, CredentialOwner::Mosh("selected-mosh".into()));
+            let targets = payload
+                .portable_secrets
+                .iter()
+                .map(|secret| {
+                    let target: CredentialTarget = serde_json::from_str(&secret.id).unwrap();
+                    (target.owner, secret.secret.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                targets,
+                vec![
+                    (
+                        CredentialOwner::Mosh("selected-mosh".into()),
+                        "synthetic-password"
+                    ),
+                    (
+                        CredentialOwner::Telnet("selected-telnet".into()),
+                        "telnet-secret"
+                    ),
+                ]
+            );
         } else {
             assert!(plan.manifest.sections.sensitive_credentials.is_none());
         }
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn local_profile_cloud_merge_and_selection_preserve_independent_edits() {
+    let now = Utc::now();
+    let profile = oxideterm_connections::LocalTerminalProfile {
+        id: "project".into(),
+        icon: None,
+        color: None,
+        icon_background_color: None,
+        name: "Project".into(),
+        group: None,
+        shell_id: Some("zsh".into()),
+        cwd: Some("~/base".into()),
+        created_at: now,
+        updated_at: now,
+        last_used_at: None,
+    };
+    let base = SavedConnectionsSyncSnapshot {
+        revision: "base".into(),
+        totp_credentials: Vec::new(),
+        exported_at: now.to_rfc3339(),
+        records: vec![],
+        local_terminal_profiles: vec![profile],
+        local_terminal_tombstones: vec![],
+    };
+    let mut local = base.clone();
+    local.local_terminal_profiles[0].name = "Local name".into();
+    let mut remote = base.clone();
+    remote.local_terminal_profiles[0].cwd = Some("~/remote".into());
+    merge_connection_records(
+        &mut remote,
+        &base,
+        &local,
+        &ConflictStrategy::Merge,
+        &now.to_rfc3339(),
+    )
+    .unwrap();
+    assert_eq!(remote.local_terminal_profiles[0].name, "Local name");
+    assert_eq!(
+        remote.local_terminal_profiles[0].cwd.as_deref(),
+        Some("~/remote")
+    );
+    let mut excluded = remote.local_terminal_profiles[0].clone();
+    excluded.id = "excluded".into();
+    remote.local_terminal_profiles.push(excluded);
+    filter_saved_connection_snapshot(&mut remote, Some(&BTreeSet::from(["project".into()])));
+    assert_eq!(remote.record_ids().collect::<Vec<_>>(), ["project"]);
 }

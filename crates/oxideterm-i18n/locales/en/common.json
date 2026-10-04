@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} is still running (possibly in the system tray), or its files are in use by another application. Save your work before continuing. Click OK to close the applications using these files and continue installing, or Cancel to stop. Installation folder: {{path}}",
+    "application_close_failed": "Unable to release or verify the files in {{path}}. Exit {{app}} from the system tray and close other applications using this folder, then click Retry. Cancel stops installation without replacing files."
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Shell Launcher"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "Unsupported Mermaid diagram",
-    "mermaid_expand": "Expand"
+    "mermaid_expand": "Expand",
+    "mermaid_loading": "Rendering diagram…",
+    "html_details": "Details"
   },
   "layout": {
     "empty": {
@@ -196,8 +202,29 @@
     "compatibility_title": "Compatibility",
     "manager_compatibility_notice": "Native plugins can use a manifest, WASM, or a separate process. Legacy JavaScript plugins from the Tauri version remain available for inspection or removal, but cannot run in the native version.",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "Update your sync server to a version that supports the new cloud sync protocol, then synchronize again.",
+        "password_change_pending": "A password change is pending. Retry with the same new password.",
+        "change_password": "Change sync password",
+        "change_password_description": "Create a new sync space with the new password and switch after the upload is verified. The previous space stays available.",
+        "password_change_separate_settings": "Save other setting changes before changing the sync password.",
+        "password_too_short": "Use a password of at least 6 characters.",
+        "sync": "Synchronize",
+        "cleanup_pending": "Cleanup is pending. Synchronize again to finish.",
+        "keep": "Keep",
+        "preview": "Sync preview",
+        "changes": "Changed fields",
+        "upgrade": "Existing cloud data will be upgraded. The original files will be kept.",
+        "candidate": "Version",
+        "apply": "Apply and synchronize",
+        "configuration": "Configuration",
+        "protected": "Protected value",
+        "current": "Current device",
+        "conflict_hint": "Choose a version for conflicting fields. Unselected conflicts keep this device’s current value."
+      },
       "panel_title": "Oxide Cloud Sync",
       "backend": {
+        "local_file": "Local file",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -270,6 +297,7 @@
         "sync_scope": "Sync Scope",
         "conflict_recovery": "Conflict Recovery",
         "import_preview": "Import Preview",
+        "export_preview": "Export preview",
         "upload_preview": "Upload Preview",
         "rollback_preview": "Rollback Preview",
         "rollback_backups": "Rollback Backups",
@@ -328,6 +356,7 @@
         "google_drive_permission_warning": "If Google reports access_denied, admin_policy_enforced, invalid_client, or Drive API not enabled, recheck the consent screen, desktop client type, API status, admin policy, and test users."
       },
       "settings": {
+        "sync_method": "Sync method",
         "backend_type": "Backend Type",
         "auth_mode": "Authentication",
         "endpoint": "Endpoint",
@@ -430,6 +459,7 @@
         "summary_line": "{{connections}} connections, {{forwards}} forwards, {{quickCommands}} quick commands, {{serialProfiles}} serial profiles, {{telnetProfiles}} Telnet profiles, {{pluginSettingsCount}} plugin settings, {{sensitiveCredentials}} sensitive credentials"
       },
       "errors": {
+        "local_forward_requires_connection": "Select the connections that own the selected forwarding rules before exporting a local file.",
         "operation_in_progress": "Another cloud sync operation is already running.",
         "missing_endpoint": "Configure the backend endpoint before syncing.",
         "missing_namespace": "Configure the namespace or path prefix before syncing.",
@@ -560,6 +590,7 @@
         "downloading": "Downloading objects"
       },
       "preview": {
+        "standalone_sftp_profiles": "File transfer connections ({{count}})",
         "summary_header": "Remote preview summary",
         "apply_plan_title": "Apply plan",
         "upload_scope_title": "Upload scope",
@@ -1171,6 +1202,12 @@
     "hint_other": "Zen Mode — Press Ctrl+Shift+Z to exit"
   },
   "tabbar": {
+    "drag_to_dock": "Drag to dock",
+    "workspace": "Workspace",
+    "merge_into_horizontal": "Merge into “{{title}}” (side by side)",
+    "merge_into_vertical": "Merge into “{{title}}” (stacked)",
+    "move_pane_to_tab": "Move to new tab",
+    "move_pane_to_window": "Move to new window",
     "offline": "Offline",
     "cancel_reconnect": "Cancel reconnect",
     "reconnect": "Reconnect",
@@ -1287,5 +1324,13 @@
     "setup_pending": "Creating portable keystore...",
     "unlock_submit": "Unlock & continue",
     "unlock_pending": "Unlocking portable data..."
+  },
+  "local_session": {
+    "directory": "Startup directory",
+    "inherit_directory": "Use the default directory from Settings",
+    "inherit_shell": "Use the default shell from Settings",
+    "shell_unavailable": "The saved shell is unavailable on this device. Edit the session to choose an installed shell.",
+    "directory_unavailable": "The startup directory is unavailable. Edit the session to choose an existing directory.",
+    "name_required": "Enter a name to save this local session."
   }
 }

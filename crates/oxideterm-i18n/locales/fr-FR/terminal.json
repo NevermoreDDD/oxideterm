@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "Afficher les commandes",
+      "hide_controls": "Masquer les commandes"
+    },
+    "autosuggest": {
+      "matches": "{{count}} résultats",
+      "navigation_hint": "{{select}} sélectionner · {{run}} exécuter · Clic insérer",
+      "dismiss_hint": "{{dismiss}} fermer · {{remove}} supprimer"
+    },
     "processing_failed": "Le traitement du terminal s’est arrêté. Reconnectez cette session pour continuer.",
     "local_terminal": "Terminal local",
     "tmux": {
@@ -42,6 +51,11 @@
       "risk_configured": "configuré"
     },
     "paste": {
+      "edit": "Modifier",
+      "edit_title": "Modifier avant de coller",
+      "strip_fence": "Retirer les délimiteurs du bloc de code",
+      "undo": "Annuler",
+      "redo": "Rétablir",
       "title": "Lignes multiples détectées ({{count}} lignes)",
       "more_lines": "... {{count}} lignes supplémentaires",
       "confirm": "Confirmer",
@@ -75,6 +89,12 @@
       "clear_screen": "Effacer l'écran"
     },
     "modem": {
+      "timeout": "Le correspondant n’a pas répondu à temps. Lancez son programme de transfert, puis réessayez.",
+      "protocol_error": "Le correspondant a envoyé des données de transfert invalides ou inattendues.",
+      "file_error": "Impossible de lire ou d’écrire le fichier. Vérifiez les permissions et l’espace disponible.",
+      "file_too_large": "Le fichier dépasse la taille maximale autorisée par ce protocole.",
+      "buffer_overflow": "Le correspondant a envoyé plus de données que le tampon de transfert ne peut en contenir.",
+      "worker_stopped": "Le processus de transfert s’est arrêté de façon inattendue. Veuillez réessayer.",
       "binary_transfer": "Transfert binaire",
       "xmodem_upload": "Envoi XMODEM",
       "xmodem_receive": "Réception XMODEM",
@@ -259,7 +279,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Les commandes de « {{name}} » seront déplacées vers le groupe par défaut avant sa suppression.",
+      "delete_group_description": "Les commandes de « {{name}} » seront déplacées vers « {{destination}} » avant la suppression de ce groupe.",
+      "reorder_groups": "Faites glisser la poignée pour réorganiser les groupes",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -469,6 +490,7 @@
       "execute": "Exécuter"
     },
     "sender": {
+      "group_hint": "Les groupes de connexions enregistrés ciblent tous les terminaux correspondants. L’isolation de la synchronisation interactive ne modifie pas ces cibles explicites.",
       "task": "Émetteur",
       "placeholder": "Saisissez des commandes ou des octets hexadécimaux...",
       "show": "Afficher l’émetteur de commandes",
@@ -505,10 +527,18 @@
       "error_busy": "Une cible est utilisée par un autre émetteur"
     },
     "broadcast": {
-      "groups": "Groupes de diffusion",
+      "members_hint": "Sélectionnez les terminaux, puis activez la synchronisation. Les nouveaux terminaux ne sont pas ajoutés automatiquement. Retirez un terminal de son groupe actuel avant de le déplacer.",
+      "isolate_member": "Isoler",
+      "resume_member": "Reprendre",
+      "pause_group": "Suspendre",
+      "start_group": "Activer",
+      "sync_isolated": "Isolé",
+      "sync_disabled": "En pause",
+      "sync_enabled": "Synchronisation active",
+      "groups": "Groupes de synchronisation",
       "create_group": "Nouveau groupe",
       "no_groups": "Aucun groupe nommé",
-      "temporary_group": "Sélection temporaire",
+      "temporary_group": "Groupe temporaire",
       "group_name_placeholder": "Nom du groupe",
       "group_members": "Membres du groupe",
       "unsaved_target": "Non enregistrée",

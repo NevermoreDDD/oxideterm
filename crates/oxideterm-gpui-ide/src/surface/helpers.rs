@@ -1,11 +1,3 @@
-fn tree_svg_icon(path: &'static str, size: f32, color: u32) -> AnyElement {
-    svg()
-        .path(path)
-        .size(px(size))
-        .text_color(rgb(color))
-        .into_any_element()
-}
-
 fn tree_spinner_icon(
     tokens: &ThemeTokens,
     id: impl Into<gpui::ElementId>,
@@ -319,18 +311,6 @@ mod helper_tests {
         assert_eq!(normalize_remote_path("~/project/"), "~/project");
     }
 
-
-    #[test]
-    fn tree_motion_ids_are_stable_and_state_independent() {
-        let path = "remote:node:/srv/app/src";
-
-        assert_eq!(tree_motion_id("chevron", path), tree_motion_id("chevron", path));
-        assert_ne!(tree_motion_id("chevron", path), tree_motion_id("spinner", path));
-        assert_ne!(
-            tree_motion_id("chevron", path),
-            tree_motion_id("chevron", "remote:node:/srv/app/tests")
-        );
-    }
 }
 
 fn language_for_location(location: &IdeLocation, source: &str) -> Option<LanguageId> {

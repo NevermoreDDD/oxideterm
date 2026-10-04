@@ -110,11 +110,13 @@
       "auth_key": "Chave SSH",
       "auth_agent": "Agent",
       "saved_password": "Senha salva",
-      "password_placeholder": "Salva no chaveiro do sistema",
+      "password_placeholder": "Clique para ver a senha salva",
       "password_required": "Digite a senha para conectar.",
       "show_password": "Mostrar senha salva",
       "hide_password": "Ocultar senha salva",
-      "password_load_failed": "Não foi possível ler a senha salva. Verifique o acesso ao armazenamento de credenciais e tente novamente.",
+      "password_load_failed": "Não foi possível ler o armazenamento de credenciais. Tente novamente ou digite a senha novamente e salve.",
+      "password_not_found": "A senha referenciada por esta conexão não está no armazenamento de credenciais. Digite-a novamente e salve.",
+      "password_store_locked": "O cofre portátil está bloqueado. Reinicie o OxideTerm, desbloqueie-o com sua senha do modo portátil e tente novamente.",
       "password_hint": "O botão do olho mostra a senha salva sem alterá-la. Edite o valor para substituí-la ou deixe o campo vazio para mantê-la.",
       "key_path": "Caminho do arquivo de chave",
       "browse": "Procurar",
@@ -125,6 +127,9 @@
       "choose_icon": "Alterar ícone",
       "hide_icons": "Ocultar ícones",
       "default_icon": "Ícone padrão",
+      "auto_icon": "Detectar automaticamente",
+      "custom_icon": "Escolher ícone",
+      "auto_icon_hint": "Após a conexão, as sessões ativas exibem o ícone do sistema detectado. Se não houver um ícone correspondente, será usado um ícone de servidor genérico.",
       "color": "Cor",
       "icon_color": "Cor do ícone",
       "icon_background_color": "Cor de fundo do ícone",
@@ -132,7 +137,8 @@
       "cancel": "Cancelar",
       "save": "Salvar",
       "saving": "Salvando...",
-      "passphrase_hint": "Deixe em branco para manter a frase secreta salva quando o caminho da chave não mudar."
+      "passphrase_hint": "Deixe em branco para manter a frase secreta salva quando o caminho da chave não mudar.",
+      "brand_icon_hint": "Os logotipos das distribuições mantêm suas cores e proporções originais."
     },
     "serial_profiles": {
       "title": "Serial Profiles",
@@ -198,6 +204,11 @@
       "list_header": "Sessões salvas",
       "expand_all": "Expandir tudo",
       "collapse_all": "Recolher tudo"
+    },
+    "local_terminal_profiles": {
+      "delete": "Excluir sessão local",
+      "delete_failed": "Não foi possível excluir a sessão local",
+      "confirm_delete": "Excluir a sessão local “{{name}}”? Os terminais em execução permanecerão abertos."
     }
   }
 }

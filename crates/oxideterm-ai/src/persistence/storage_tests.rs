@@ -23,76 +23,7 @@ fn put(index: usize, revision: u64) -> HistoryMutation {
 }
 
 #[test]
-fn explicit_mutations_keep_newer_indices_and_deleted_histories_closed() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = ConversationStore::open(dir.path().join("v4.redb")).unwrap();
-    store
-        .apply(vec![
-            HistoryMutation::Create {
-                conversation: empty_conversation(),
-                revision: 1,
-            },
-            put(0, 2),
-            put(1, 3),
-        ])
-        .unwrap();
-    store
-        .apply(vec![HistoryMutation::Rename {
-            conversation_id: "history".into(),
-            title: "Latest".into(),
-            updated_at: 3,
-            revision: 4,
-        }])
-        .unwrap();
-    store
-        .apply(vec![
-            put(0, 2),
-            HistoryMutation::Rename {
-                conversation_id: "history".into(),
-                title: "Stale".into(),
-                updated_at: 1,
-                revision: 1,
-            },
-        ])
-        .unwrap();
-    let page = store.page("history", "main", None, 50).unwrap();
-    assert_eq!(
-        page.messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>(),
-        vec!["text-0", "text-1"]
-    );
-    assert_eq!(
-        store
-            .conversation_head("history")
-            .unwrap()
-            .unwrap()
-            .conversation
-            .title,
-        "Latest"
-    );
-    store
-        .apply(vec![HistoryMutation::DeleteConversation {
-            conversation_id: "history".into(),
-            revision: 5,
-        }])
-        .unwrap();
-    store
-        .apply(vec![
-            put(2, 6),
-            HistoryMutation::Create {
-                conversation: empty_conversation(),
-                revision: 1,
-            },
-        ])
-        .unwrap();
-    assert!(store.conversation_head("history").unwrap().is_none());
-    assert!(store.list_heads(None, 10).unwrap().is_empty());
-}
-
-#[test]
-fn independent_late_message_updates_survive_newer_metadata_and_deleted_ids_stay_closed() {
+fn independent_revisions_reject_stale_updates_and_keep_deleted_messages_and_histories_closed() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConversationStore::open(dir.path().join("v4.redb")).unwrap();
     store
@@ -145,6 +76,27 @@ fn independent_late_message_updates_survive_newer_metadata_and_deleted_ids_stay_
     );
     store
         .apply(vec![
+            put(0, 2),
+            HistoryMutation::Rename {
+                conversation_id: "history".into(),
+                title: "Stale".into(),
+                updated_at: 1,
+                revision: 1,
+            },
+        ])
+        .unwrap();
+    assert_eq!(
+        store
+            .page("history", "main", None, 50)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["late but current message revision", "text-1"]
+    );
+    store
+        .apply(vec![
             HistoryMutation::DeleteMessage {
                 conversation_id: "history".into(),
                 branch_id: "main".into(),
@@ -167,6 +119,23 @@ fn independent_late_message_updates_survive_newer_metadata_and_deleted_ids_stay_
     let head = store.conversation_head("history").unwrap().unwrap();
     assert_eq!(head.conversation.title, "Renamed");
     assert_eq!(head.conversation.turn_count, 1);
+    store
+        .apply(vec![HistoryMutation::DeleteConversation {
+            conversation_id: "history".into(),
+            revision: 53,
+        }])
+        .unwrap();
+    store
+        .apply(vec![
+            put(2, 54),
+            HistoryMutation::Create {
+                conversation: empty_conversation(),
+                revision: 1,
+            },
+        ])
+        .unwrap();
+    assert!(store.conversation_head("history").unwrap().is_none());
+    assert!(store.list_heads(None, 10).unwrap().is_empty());
 }
 
 #[test]
@@ -262,7 +231,7 @@ fn chunked_unicode_is_shared_and_replacing_content_reclaims_old_chunks() {
             HistoryMutation::PutMessage {
                 conversation_id: "history".into(),
                 branch_id: "main".into(),
-                message: item.clone(),
+                message: item,
                 revision: 2,
             },
         ])
@@ -396,7 +365,7 @@ fn agent_messages_and_communication_use_independent_incremental_history() {
         .apply(vec![
             HistoryMutation::PutMessage {
                 conversation_id: "history".into(),
-                branch_id: branch.clone(),
+                branch_id: branch,
                 message: record.messages[1].clone(),
                 revision: 8,
             },
@@ -727,6 +696,10 @@ impl redb::StorageBackend for FailingDisk {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "Hold the database guard deliberately while asserting that asynchronous recovery and shutdown remain blocked; release it before awaiting their completion."
+)]
 async fn failed_disk_write_retains_the_batch_until_storage_retry_commits_it() {
     for large in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -1343,7 +1316,7 @@ fn content_windows_page_unicode_and_seek_tool_parts_without_decoding_other_entri
         drop(arrays);
         tx.commit().unwrap();
     }
-    let mut part = cursor.clone();
+    let mut part = cursor;
     part.path = vec!["turn".into(), "parts".into(), "99".into()];
     assert_eq!(
         store.content_page(&part).unwrap().value,
@@ -1393,6 +1366,10 @@ fn history_cache_evicts_old_chunks_without_changing_live_readers() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "Keep a write transaction and its database guard alive to saturate the writer queue, then release them before awaiting the producer."
+)]
 async fn large_messages_stream_through_the_writer_without_a_storage_size_cap() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConversationStore::open(dir.path().join("v4.redb")).unwrap();
@@ -2130,76 +2107,7 @@ fn import_uses_bounded_byte_batches_without_reordering_equal_timestamps() {
 }
 
 #[test]
-fn activity_windows_keep_text_and_tool_cards_together_live_and_after_reload() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = ConversationStore::open(dir.path().join("v4.redb")).unwrap();
-    let mut item = message(0);
-    item.role = AiChatRole::Assistant;
-    item.content.clear();
-    item.tool_calls = vec![serde_json::json!({
-        "id":"lookup", "name":"search", "arguments":"{}", "status":"success",
-        "result":{"data":"found"}
-    })];
-    let parts = serde_json::json!([
-        {"type":"text", "text":"I will check."},
-        {"type":"tool_call", "id":"lookup"},
-        {"type":"tool_result", "toolCallId":"lookup", "output":"found"},
-        {"type":"text", "text":"Here is the answer."}
-    ]);
-    store
-        .apply(vec![HistoryMutation::Create {
-            conversation: empty_conversation(),
-            revision: 1,
-        }])
-        .unwrap();
-    for structured in [false, true] {
-        let revision = if structured { 3 } else { 2 };
-        item.turn = structured.then(|| serde_json::json!({"parts":parts}));
-        store
-            .apply(vec![HistoryMutation::PutMessage {
-                conversation_id: "history".into(),
-                branch_id: "main".into(),
-                message: item.clone(),
-                revision,
-            }])
-            .unwrap();
-        let descriptor = store
-            .message_page("history", "main", None, 1)
-            .unwrap()
-            .messages
-            .remove(0);
-        let live = live_message_view(&item, "history", revision, None).unwrap();
-        let stored = store
-            .message_view("history", &descriptor.storage_id, revision, None)
-            .unwrap();
-        for (view, historical) in [(&live, false), (&*stored, true)] {
-            assert_eq!(view.first_section, 0);
-            let expected = if historical {
-                serde_json::json!({"id":"lookup", "name":"search", "arguments":"{}", "status":"success", "result":{"data":"found"}, "historical":true, "actionable":false})
-            } else {
-                serde_json::json!({"id":"lookup", "name":"search", "arguments":"{}", "status":"success", "result":{"data":"found"}})
-            };
-            assert_eq!(view.message.tool_calls, vec![expected]);
-            assert!(view.more.is_empty());
-            if structured {
-                assert_eq!(
-                    view.message.turn.as_ref().unwrap()["parts"],
-                    serde_json::json!([
-                        {"type":"text", "text":"I will check."},
-                        {"type":"tool_call", "id":"lookup"},
-                        {"type":"text", "text":"Here is the answer."}
-                    ])
-                );
-            } else {
-                assert_eq!(view.message.content, "");
-                assert!(view.message.turn.is_none());
-            }
-        }
-    }
-}
-
-#[test]
-fn default_message_views_include_all_activity_and_complete_tool_output() {
+fn default_message_views_keep_complete_activity_and_tool_cards_live_and_after_reload() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConversationStore::open(dir.path().join("v4.redb")).unwrap();
     let mut item = message(0);
@@ -2216,53 +2124,73 @@ fn default_message_views_include_all_activity_and_complete_tool_output() {
     parts.push(serde_json::json!({"type":"tool_call", "id":"read"}));
     parts.push(serde_json::json!({"type":"tool_result", "toolCallId":"read", "output":output}));
     parts.push(serde_json::json!({"type":"text", "text":item.content}));
-    item.turn = Some(serde_json::json!({"parts":parts}));
     store
-        .apply(vec![
-            HistoryMutation::Create {
-                conversation: empty_conversation(),
-                revision: 1,
-            },
-            HistoryMutation::PutMessage {
+        .apply(vec![HistoryMutation::Create {
+            conversation: empty_conversation(),
+            revision: 1,
+        }])
+        .unwrap();
+
+    for (revision, structured, empty_content) in
+        [(2, true, false), (3, false, false), (4, false, true)]
+    {
+        item.turn = structured.then(|| serde_json::json!({"parts":parts}));
+        if empty_content {
+            item.content.clear();
+        }
+        store
+            .apply(vec![HistoryMutation::PutMessage {
                 conversation_id: "history".into(),
                 branch_id: "main".into(),
                 message: item.clone(),
-                revision: 2,
-            },
-        ])
-        .unwrap();
-    let description = store
-        .message_page("history", "main", None, 1)
-        .unwrap()
-        .messages
-        .remove(0);
-    let live = live_message_view(&item, "history", 2, None).unwrap();
-    let stored = store
-        .message_view("history", &description.storage_id, 2, None)
-        .unwrap();
-    for view in [&live, &*stored] {
-        assert_eq!(view.first_section, 0);
-        let mut expected = (0..40)
-            .map(|index| serde_json::json!({"type":"text", "text":format!("activity {index}")}))
-            .collect::<Vec<_>>();
-        expected.push(serde_json::json!({"type":"tool_call", "id":"read"}));
-        expected.push(serde_json::json!({"type":"text", "text":"正文🙂".repeat(30_000)}));
-        assert_eq!(
-            view.message.turn.as_ref().unwrap()["parts"],
-            Value::Array(expected)
-        );
-        assert_eq!(
-            view.message.tool_calls[0]["result"],
-            serde_json::json!({"output":"完整输出🙂".repeat(30_000), "entries":(0..80).collect::<Vec<_>>()})
-        );
-        assert!(
-            view.more.is_empty(),
-            "default display must not require continuation controls"
-        );
+                revision,
+            }])
+            .unwrap();
+        let description = store
+            .message_page("history", "main", None, 1)
+            .unwrap()
+            .messages
+            .remove(0);
+        let live = live_message_view(&item, "history", revision, None).unwrap();
+        let stored = store
+            .message_view("history", &description.storage_id, revision, None)
+            .unwrap();
+        for (view, historical) in [(&live, false), (&*stored, true)] {
+            assert_eq!(view.first_section, 0);
+            let mut expected_call = serde_json::json!({
+                "id":"read", "name":"read_file", "arguments":"{}", "status":"success",
+                "result":{"output":"完整输出🙂".repeat(30_000), "entries":(0..80).collect::<Vec<_>>()}
+            });
+            if historical {
+                expected_call["historical"] = Value::Bool(true);
+                expected_call["actionable"] = Value::Bool(false);
+            }
+            assert_eq!(view.message.tool_calls, vec![expected_call]);
+            if structured {
+                let mut expected = (0..40)
+                    .map(|index| serde_json::json!({"type":"text", "text":format!("activity {index}")}))
+                    .collect::<Vec<_>>();
+                expected.push(serde_json::json!({"type":"tool_call", "id":"read"}));
+                expected.push(serde_json::json!({"type":"text", "text":"正文🙂".repeat(30_000)}));
+                assert_eq!(
+                    view.message.turn.as_ref().unwrap()["parts"],
+                    Value::Array(expected)
+                );
+            } else {
+                let expected = if empty_content {
+                    String::new()
+                } else {
+                    "正文🙂".repeat(30_000)
+                };
+                assert_eq!(view.message.content, expected);
+                assert!(view.message.turn.is_none());
+            }
+            assert!(
+                view.more.is_empty(),
+                "default display must not require continuation controls"
+            );
+        }
     }
-    item.turn = None;
-    let view = live_message_view(&item, "history", 3, None).unwrap();
-    assert_eq!(view.message.content, "正文🙂".repeat(30_000));
 }
 
 #[test]

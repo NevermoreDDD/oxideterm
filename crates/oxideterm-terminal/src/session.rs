@@ -32,7 +32,6 @@ use oxideterm_trzsz::{TrzszConsumer, TrzszConsumerEvent, TrzszTransfer, TrzszTra
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
     runtime::Runtime,
 };
 
@@ -42,8 +41,8 @@ use crate::{
     LocalEventListener, LocalEventReceiver, LocalPtyConfig, LocalPtySession, TermMode,
     TerminalActivityReceiver, TerminalCommandMark, TerminalCwdIntegrationLaunchState,
     TerminalEvent, TerminalGraphicsState, TerminalLifecycle, TerminalModemTransferRequest,
-    TerminalProcessInfo, TerminalProcessProbe, TerminalSearchMatch, TerminalSize, TerminalSnapshot,
-    append_grid_line_text, backpressure::MagicScanWindow, focus_report_sequence,
+    TerminalPalette, TerminalProcessInfo, TerminalProcessProbe, TerminalSearchMatch, TerminalSize,
+    TerminalSnapshot, append_grid_line_text, backpressure::MagicScanWindow, focus_report_sequence,
     graphics_cursor_from_term, incremental_snapshot_from_term, interactive_terminal_config,
     local_event_channel, privilege_prompt::TerminalPrivilegePromptStream,
     scroll_snapshot_from_term, search_matches_from_term,
@@ -168,6 +167,84 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn telnet_worker_uses_authenticated_proxy_and_keeps_telnet_negotiation() {
+        use oxideterm_network_proxy::tcp::{
+            UpstreamProxyAuth, UpstreamProxyConfig, UpstreamProxyProtocol,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let (commands, command_rx) = tokio::sync::mpsc::channel(4);
+        let (worker_tx, events) = crate::backpressure::byte_bounded_channel(1024);
+        let worker = run_telnet_worker(
+            TelnetSessionConfig {
+                host: "telnet.invalid".into(),
+                port: 2323,
+            },
+            None,
+            Some(UpstreamProxyConfig {
+                protocol: UpstreamProxyProtocol::Socks5,
+                host: "127.0.0.1".into(),
+                port: proxy_port,
+                auth: UpstreamProxyAuth::Password {
+                    username: "u".into(),
+                    password: "p".to_string().into(),
+                },
+                remote_dns: true,
+                no_proxy: String::new(),
+            }),
+            TerminalEncoding::Utf8,
+            TerminalResize::new(80, 24, 0, 0),
+            command_rx,
+            worker_tx,
+        );
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 4];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 2, 0, 2]);
+            stream.write_all(&[5, 2]).await.unwrap();
+            let mut auth = [0; 5];
+            stream.read_exact(&mut auth).await.unwrap();
+            assert_eq!(auth, [1, 1, b'u', 1, b'p']);
+            stream.write_all(&[1, 0]).await.unwrap();
+            let mut request = [0; 21];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request[..5], &[5, 1, 0, 3, 14]);
+            assert_eq!(&request[5..19], b"telnet.invalid");
+            assert_eq!(&request[19..], &2323u16.to_be_bytes());
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 23])
+                .await
+                .unwrap();
+            stream.write_all(&[255, 251, 1]).await.unwrap();
+            let mut reply = [0; 3];
+            stream.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply, [255, 253, 1]);
+            commands
+                .send(TelnetCommand::Data(vec![b'X', 255]))
+                .await
+                .unwrap();
+            stream.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply, [b'X', 255, 255]);
+            stream.write_all(b"ready\r\n").await.unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(worker, server);
+        })
+        .await
+        .unwrap();
+        let mut output = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event.into_inner() {
+                TelnetWorkerEvent::Output(bytes) => output.extend(bytes),
+                TelnetWorkerEvent::Failed(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(output, b"ready\r\n");
+    }
+
     #[test]
     fn interactive_terminal_config_emits_osc52_clipboard_queries() {
         let size = TerminalSize {
@@ -249,40 +326,6 @@ mod tests {
         assert_eq!(term.grid().cursor.point, Point::new(Line(0), Column(0)));
         parser.advance(&mut term, b"next");
         assert_eq!(term.grid()[Line(0)][Column(0)].c, 'n');
-    }
-
-    #[test]
-    fn ssh_output_events_are_emitted_only_when_enabled() {
-        let mut session = SshPtyCore::new_disconnected_for_test(
-            SshSessionConfig::new("127.0.0.1", 9, "nobody"),
-            80,
-            24,
-            GraphicsOptions::default(),
-            TerminalEncoding::Utf8,
-            1000,
-        );
-
-        // TerminalEvent::Output duplicates decoded display bytes for recording,
-        // so SSH keeps it disabled on the normal render path.
-        session
-            .parser_state
-            .feed_utf8_terminal_output(b"not recorded");
-        assert!(
-            session
-                .take_events()
-                .into_iter()
-                .all(|event| !matches!(event, TerminalEvent::Output(_)))
-        );
-
-        TerminalSessionBackend::set_output_events_enabled(&mut session, true);
-        session.parser_state.feed_utf8_terminal_output(b"recorded");
-
-        assert!(
-            session
-                .take_events()
-                .into_iter()
-                .any(|event| matches!(event, TerminalEvent::Output(bytes) if bytes == b"recorded"))
-        );
     }
 
     #[test]

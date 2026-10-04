@@ -54,6 +54,7 @@ pub struct ShellIntegrationEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalCommandMarkDetectionSource {
     CommandBar,
+    QuickCommand,
     Ai,
     Broadcast,
     UserInputObserved,
@@ -208,6 +209,19 @@ impl OscCapture {
             self.payload.push(byte);
             self.private = is_private_oxideterm_osc(&self.payload);
         }
+    }
+
+    fn push_payload(&mut self, mut bytes: &[u8]) {
+        // Identify the private prefix before copying a run into recordable bytes.
+        while self.payload.len() <= OXIDETERM_REMOTE_METADATA_OSC.len() && !bytes.is_empty() {
+            self.push_payload_byte(bytes[0]);
+            bytes = &bytes[1..];
+        }
+        if !self.private {
+            self.raw.extend_from_slice(bytes);
+        }
+        let retained = bytes.len().min(OSC_LIMIT - self.payload.len());
+        self.payload.extend_from_slice(&bytes[..retained]);
     }
 
     fn finish(&mut self, terminator: &[u8]) {
@@ -422,13 +436,7 @@ impl TerminalShellIntegration {
         }
 
         if normal_start < bytes.len() {
-            self.advance_terminal_bytes(
-                parser,
-                term,
-                &bytes[normal_start..],
-                recordable.as_deref_mut(),
-                emit,
-            );
+            self.advance_terminal_bytes(parser, term, &bytes[normal_start..], recordable, emit);
         }
 
         changed
@@ -576,6 +584,13 @@ impl TerminalShellIntegration {
             }
         }
         while index < bytes.len() && !terminated {
+            let run_len =
+                memchr::memchr2(0x07, 0x1b, &bytes[index..]).unwrap_or(bytes.len() - index);
+            capture.push_payload(&bytes[index..index + run_len]);
+            index += run_len;
+            if index == bytes.len() {
+                break;
+            }
             let byte = bytes[index];
             if byte == 0x07 {
                 capture.finish(&[byte]);
@@ -618,7 +633,7 @@ impl TerminalShellIntegration {
             .is_some_and(|capture| !capture.private && capture.raw.len() > OSC_LIMIT + 8)
             && let Some(capture) = self.pending_osc.take()
         {
-            if let Some(recordable) = recordable.as_deref_mut() {
+            if let Some(recordable) = recordable {
                 recordable.extend_from_slice(&capture.raw);
             }
             parser.advance(term, &capture.raw);

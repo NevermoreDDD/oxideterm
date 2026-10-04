@@ -6,20 +6,107 @@ use oxideterm_terminal_triggers::{
 };
 
 pub(in crate::workspace) const SETTINGS_ROW_LABEL_MIN_WIDTH: f32 = 180.0; // Keep localized labels readable before controls wrap.
+const KNOWLEDGE_SCOPE_SELECT_MAX_HEIGHT: f32 = 320.0;
+
+enum ThemeSelectEntry {
+    Group(&'static str),
+    Theme(String),
+}
+
+fn appearance_theme_entries(settings: &PersistedSettings) -> Vec<ThemeSelectEntry> {
+    let mut entries = Vec::new();
+    if !settings.custom_themes.is_empty() {
+        entries.push(ThemeSelectEntry::Group(
+            "settings_view.appearance.theme_group_custom",
+        ));
+        let mut ids: Vec<_> = settings.custom_themes.keys().cloned().collect();
+        ids.sort();
+        entries.extend(ids.into_iter().map(ThemeSelectEntry::Theme));
+    }
+    entries.push(ThemeSelectEntry::Group(
+        "settings_view.appearance.theme_group_oxide",
+    ));
+    entries.extend(
+        OXIDE_THEME_IDS
+            .iter()
+            .filter(|id| built_in_theme_exists(id))
+            .map(|id| ThemeSelectEntry::Theme((*id).to_string())),
+    );
+    entries.push(ThemeSelectEntry::Group(
+        "settings_view.appearance.theme_group_classic",
+    ));
+    let mut classic: Vec<_> = BUILT_IN_THEMES
+        .iter()
+        .filter(|theme| !is_oxide_theme(theme.id))
+        .collect();
+    classic.sort_by_key(|theme| theme.id);
+    entries.extend(
+        classic
+            .into_iter()
+            .map(|theme| ThemeSelectEntry::Theme(theme.id.to_string())),
+    );
+    entries
+}
+
+fn next_theme_option<'a>(
+    entries: &'a [ThemeSelectEntry],
+    current: Option<&str>,
+    key: &str,
+) -> Option<(usize, &'a str)> {
+    let options: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            if let ThemeSelectEntry::Theme(id) = entry {
+                Some((index, id.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let current = options
+        .iter()
+        .position(|(_, id)| Some(*id) == current)
+        .unwrap_or(0);
+    let next = match key {
+        "up" | "arrowup" => current.saturating_sub(1),
+        "home" => 0,
+        "end" => options.len().saturating_sub(1),
+        "down" | "arrowdown" => (current + 1).min(options.len().saturating_sub(1)),
+        _ => return None,
+    };
+    options.get(next).copied()
+}
 
 impl WorkspaceApp {
     pub(in crate::workspace) fn render_settings_select_overlay(
         &self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         // Select content follows the logical open state directly. Dropdowns
         // never retain a second render-only state for exit animation.
         let open_select = self.open_settings_select?;
-        let anchor = self.select_anchors.get(&open_select.anchor_id()).copied()?;
+        let window_id = window.window_handle().window_id();
+        if self.open_settings_select_owner_window_id != Some(window_id) {
+            return None;
+        }
+        let anchor = self
+            .settings_select_anchors
+            .get(&(window_id, open_select.anchor_id()))
+            .copied()?;
         let width =
             f32::from(anchor.bounds.size.width).max(self.tokens.metrics.ui_select_min_width);
         let settings = self.settings_store.settings();
-        let active_tab = self.settings_workspace.read(cx).route_snapshot().active_tab;
+        let knowledge_dialog_visible = self
+            .ai_entity
+            .read(cx)
+            .knowledge_document_dialog_owned_by(window_id);
+        let active_tab = if knowledge_dialog_visible {
+            SettingsTab::Knowledge
+        } else {
+            self.settings_workspace.read(cx).route_snapshot().active_tab
+        };
 
         let popup = match (active_tab, open_select) {
             (SettingsTab::General, SettingsSelect::Language) => {
@@ -155,99 +242,93 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Appearance, SettingsSelect::AppearanceTheme) => {
+            (
+                SettingsTab::Appearance,
+                select
+                @ (SettingsSelect::AppearanceTheme | SettingsSelect::AppearanceTerminalTheme),
+            ) => {
+                let target = select.theme_target().expect("theme selector");
                 let mut popup = select_panel_overlay_popup_with_max_height(
                     &self.tokens,
                     width,
                     self.tokens.metrics.settings_theme_select_popup_max_height,
-                );
-
-                if !settings.custom_themes.is_empty() {
-                    popup = popup.child(select_label(
-                        &self.tokens,
-                        self.i18n.t("settings_view.appearance.theme_group_custom"),
-                    ));
-                    let mut custom_theme_ids: Vec<_> =
-                        settings.custom_themes.keys().cloned().collect();
-                    custom_theme_ids.sort();
-                    for theme_id in custom_theme_ids {
-                        let label = custom_theme_display_name(settings, &theme_id);
-                        let selected = theme_id == settings.terminal.theme;
-                        popup = popup.child(select_option_action(
-                            select_option(&self.tokens, label, selected),
-                            false,
-                            false,
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.close_settings_select();
-                                this.edit_settings(
-                                    |settings| settings.terminal.theme = theme_id.clone(),
-                                    cx,
-                                );
-                                cx.stop_propagation();
-                            }),
-                        ));
+                )
+                .w(px(width))
+                .track_scroll(&self.settings_theme_scroll);
+                for entry in appearance_theme_entries(settings) {
+                    match entry {
+                        ThemeSelectEntry::Group(key) => {
+                            popup = popup.child(select_label(&self.tokens, self.i18n.t(key)));
+                        }
+                        ThemeSelectEntry::Theme(theme_id) => {
+                            let label = custom_theme_display_name(settings, &theme_id);
+                            let preview_id = theme_id.clone();
+                            let palette =
+                                super::appearance::appearance_theme_palette(settings, &theme_id);
+                            let row = oxideterm_gpui_ui::select::select_option_highlighted(
+                                &self.tokens,
+                                "",
+                                theme_id == target.selected_id(settings),
+                                self.settings_theme_preview.as_deref() == Some(theme_id.as_str()),
+                            )
+                            .h_auto()
+                            .min_h(px(self.tokens.metrics.ui_control_height))
+                            .flex_none()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .pr(px(self.tokens.metrics.ui_select_check_size))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .child(div().truncate().child(label))
+                                    .child(
+                                        match target {
+                                            ThemeTarget::Application => {
+                                                let ui = oxideterm_settings_model::theme_ui_colors(settings, &theme_id);
+                                                div()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(self.tokens.spacing.one))
+                                                    .child(
+                                                        div()
+                                                            .whitespace_normal()
+                                                            .text_size(px(self.tokens.metrics.ui_text_xs))
+                                                            .text_color(rgb(self.tokens.ui.text_muted))
+                                                            .child(oxideterm_gpui_settings_view::application_theme_description(&theme_id, ui, &self.i18n)),
+                                                    )
+                                                    .child(oxideterm_gpui_settings_view::settings_application_palette_swatch(&self.tokens, ui))
+                                                    .into_any_element()
+                                            }
+                                            ThemeTarget::Terminal => oxideterm_gpui_settings_view::settings_theme_palette_swatch(&self.tokens, palette).into_any_element(),
+                                        },
+                                    ),
+                            )
+                            .on_mouse_move(cx.listener(
+                                move |this, _, _, cx| {
+                                    if this.settings_theme_preview.as_ref() != Some(&preview_id) {
+                                        this.settings_theme_preview = Some(preview_id.clone());
+                                        cx.notify();
+                                    }
+                                },
+                            ));
+                            popup = popup.child(select_option_action(
+                                row,
+                                false,
+                                false,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.close_settings_select();
+                                    this.edit_settings(
+                                        |settings| target.apply(settings, theme_id.clone()),
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }),
+                            ));
+                        }
                     }
-                    popup = popup.child(select_separator(&self.tokens));
-                }
-
-                popup = popup.child(select_label(
-                    &self.tokens,
-                    self.i18n.t("settings_view.appearance.theme_group_oxide"),
-                ));
-                for &theme_id in OXIDE_THEME_IDS {
-                    if !built_in_theme_exists(theme_id) {
-                        continue;
-                    }
-                    let next_theme = theme_id.to_string();
-                    popup = popup.child(select_option_action(
-                        select_option(
-                            &self.tokens,
-                            theme_display_name(theme_id),
-                            theme_id == settings.terminal.theme.as_str(),
-                        ),
-                        false,
-                        false,
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.close_settings_select();
-                            this.edit_settings(
-                                |settings| settings.terminal.theme = next_theme.clone(),
-                                cx,
-                            );
-                            cx.stop_propagation();
-                        }),
-                    ));
-                }
-
-                popup = popup
-                    .child(select_separator(&self.tokens))
-                    .child(select_label(
-                        &self.tokens,
-                        self.i18n.t("settings_view.appearance.theme_group_classic"),
-                    ));
-                let mut classic_themes: Vec<_> = BUILT_IN_THEMES
-                    .iter()
-                    .filter(|theme| !is_oxide_theme(theme.id))
-                    .collect();
-                classic_themes.sort_by_key(|theme| theme.id);
-                for theme in classic_themes {
-                    let theme_id = theme.id.to_string();
-                    popup = popup.child(select_option_action(
-                        select_option(
-                            &self.tokens,
-                            theme_display_name(theme.id),
-                            theme.id == settings.terminal.theme.as_str(),
-                        ),
-                        false,
-                        false,
-                        cx.listener(move |this, _event, _window, cx| {
-                            this.close_settings_select();
-                            this.edit_settings(
-                                |settings| settings.terminal.theme = theme_id.clone(),
-                                cx,
-                            );
-                            cx.stop_propagation();
-                        }),
-                    ));
                 }
                 Some(popup)
             }
@@ -435,6 +516,8 @@ impl WorkspaceApp {
             (SettingsTab::Ide, SettingsSelect::IdeCjkFontFamily) => {
                 let mut popup = select_overlay_popup(&self.tokens, width);
                 let current_family = settings.ide.cjk_font_family.as_deref().map(str::trim);
+                let custom = self.settings_workspace.read(cx).ide_cjk_font_custom
+                    || current_family.is_some_and(cjk_font_is_custom);
                 for family in std::iter::once(None)
                     .chain(terminal_cjk_font_options().iter().copied().map(Some))
                 {
@@ -446,12 +529,15 @@ impl WorkspaceApp {
                                 .unwrap_or_else(|| {
                                     self.i18n.t("settings_view.ide.follow_terminal")
                                 }),
-                            family == current_family,
+                            !custom && family == current_family,
                         ),
                         false,
                         false,
                         cx.listener(move |this, _event, _window, cx| {
                             this.close_settings_select();
+                            this.settings_workspace.update(cx, |state, _| {
+                                state.ide_cjk_font_custom = false;
+                            });
                             this.edit_settings(
                                 |settings| {
                                     settings.ide.cjk_font_family = family.map(str::to_string)
@@ -462,6 +548,30 @@ impl WorkspaceApp {
                         }),
                     ));
                 }
+                popup = popup.child(select_option_action(
+                    select_option(
+                        &self.tokens,
+                        self.i18n.t("settings_view.terminal.cjk_font_custom"),
+                        custom,
+                    ),
+                    false,
+                    false,
+                    cx.listener(|this, _, window, cx| {
+                        this.settings_workspace.update(cx, |state, _| {
+                            state.ide_cjk_font_custom = true;
+                        });
+                        let value = this
+                            .settings_store
+                            .settings()
+                            .ide
+                            .cjk_font_family
+                            .clone()
+                            .unwrap_or_default();
+                        this.focus_settings_input(SettingsInput::IdeCjkFontFamily, value, cx);
+                        window.focus(&this.focus_handle, cx);
+                        cx.stop_propagation();
+                    }),
+                ));
                 Some(popup)
             }
             (SettingsTab::Terminal, SettingsSelect::TerminalFontFamily) => {
@@ -490,17 +600,22 @@ impl WorkspaceApp {
             (SettingsTab::Terminal, SettingsSelect::TerminalCjkFontFamily) => {
                 let mut popup = select_overlay_popup(&self.tokens, width);
                 let current_family = settings.terminal.cjk_font_family.trim();
+                let custom = self.settings_workspace.read(cx).terminal_cjk_font_custom
+                    || cjk_font_is_custom(current_family);
                 for &family in terminal_cjk_font_options() {
                     popup = popup.child(select_option_action(
                         select_option(
                             &self.tokens,
                             terminal_cjk_font_label(family, &self.i18n),
-                            family == current_family,
+                            !custom && family == current_family,
                         ),
                         false,
                         false,
                         cx.listener(move |this, _event, _window, cx| {
                             this.close_settings_select();
+                            this.settings_workspace.update(cx, |state, _| {
+                                state.terminal_cjk_font_custom = false;
+                            });
                             this.edit_settings(
                                 |settings| settings.terminal.cjk_font_family = family.to_string(),
                                 cx,
@@ -509,6 +624,29 @@ impl WorkspaceApp {
                         }),
                     ));
                 }
+                popup = popup.child(select_option_action(
+                    select_option(
+                        &self.tokens,
+                        self.i18n.t("settings_view.terminal.cjk_font_custom"),
+                        custom,
+                    ),
+                    false,
+                    false,
+                    cx.listener(|this, _, window, cx| {
+                        this.settings_workspace.update(cx, |state, _| {
+                            state.terminal_cjk_font_custom = true;
+                        });
+                        let value = this
+                            .settings_store
+                            .settings()
+                            .terminal
+                            .cjk_font_family
+                            .clone();
+                        this.focus_settings_input(SettingsInput::TerminalCjkFontFamily, value, cx);
+                        window.focus(&this.focus_handle, cx);
+                        cx.stop_propagation();
+                    }),
+                ));
                 Some(popup)
             }
             (SettingsTab::Terminal, SettingsSelect::TerminalEncoding) => {
@@ -1676,27 +1814,68 @@ impl WorkspaceApp {
                 Some(popup)
             }
             (SettingsTab::Knowledge, SettingsSelect::KnowledgeCollectionScope) => {
-                let popup = select_overlay_popup(&self.tokens, width.max(220.0)).child(
-                    select_option_action(
-                        select_option(
-                            &self.tokens,
-                            self.i18n.t("settings_view.knowledge.scope_global"),
-                            true,
-                        ),
+                let selected_connection_id = self
+                    .ai_entity
+                    .read(cx)
+                    .knowledge_new_collection_connection_id()
+                    .map(str::to_string);
+                let connection_options = self
+                    .connection_store
+                    .connections()
+                    .iter()
+                    .map(|connection| (connection.id.clone(), connection.name.clone()))
+                    .collect::<Vec<_>>();
+                let mut popup = select_panel_overlay_popup_with_max_height(
+                    &self.tokens,
+                    width.max(220.0),
+                    KNOWLEDGE_SCOPE_SELECT_MAX_HEIGHT,
+                )
+                .child(select_option_action(
+                    select_option(
+                        &self.tokens,
+                        self.i18n.t("settings_view.knowledge.scope_global"),
+                        selected_connection_id.is_none(),
+                    ),
+                    false,
+                    false,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_settings_select();
+                        this.ai_entity.update(cx, |entity, cx| {
+                            entity.set_knowledge_collection_connection_id(None);
+                            cx.notify();
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ));
+                for (connection_id, connection_name) in connection_options {
+                    let selected = selected_connection_id.as_deref() == Some(&connection_id);
+                    popup = popup.child(select_option_action(
+                        select_option(&self.tokens, connection_name, selected),
                         false,
                         false,
-                        cx.listener(|this, _event, _window, cx| {
+                        cx.listener(move |this, _event, _window, cx| {
                             this.close_settings_select();
+                            this.ai_entity.update(cx, |entity, cx| {
+                                entity.set_knowledge_collection_connection_id(Some(
+                                    connection_id.clone(),
+                                ));
+                                cx.notify();
+                            });
                             cx.stop_propagation();
                             cx.notify();
                         }),
-                    ),
-                );
+                    ));
+                }
                 Some(popup)
             }
             (SettingsTab::Knowledge, SettingsSelect::KnowledgeDocumentFormat) => {
                 let mut popup = select_overlay_popup(&self.tokens, width.max(220.0));
-                for (format, label) in [("markdown", "Markdown"), ("plaintext", "Plain Text")] {
+                for format in ["markdown", "plaintext"] {
+                    let label = match format {
+                        "plaintext" => self.i18n.t("settings_view.knowledge.format_plain_text"),
+                        _ => self.i18n.t("settings_view.knowledge.format_markdown"),
+                    };
                     let selected =
                         self.ai_entity.read(cx).knowledge_new_document_format() == format;
                     popup = popup.child(select_option_action(
@@ -1956,18 +2135,84 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn open_settings_select_from_pointer(
         &mut self,
         select_id: SettingsSelect,
-        _cx: &mut Context<Self>,
+        owner_window_id: gpui::WindowId,
+        cx: &mut Context<Self>,
     ) {
         // Browser select triggers opened by pointer do not show a focus-visible
         // ring. Keep the origin and open/toggle rule in one place so settings,
         // AI provider, and knowledge selects do not drift apart.
         self.focused_settings_input = None;
-        if self.open_settings_select == Some(select_id) {
+        self.ai_entity.update(cx, |entity, cx| {
+            entity.blur_settings_input(cx);
+        });
+        if self.open_settings_select == Some(select_id)
+            && self.open_settings_select_owner_window_id == Some(owner_window_id)
+        {
             self.close_settings_select();
             return;
         }
+        self.settings_theme_preview = None;
+        if let Some(target) = select_id.theme_target() {
+            let selected = target.selected_id(self.settings_store.settings());
+            self.settings_theme_preview = Some(selected.to_string());
+            self.settings_theme_scroll = ScrollHandle::new();
+            if let Some(row) = appearance_theme_entries(self.settings_store.settings())
+                .iter()
+                .position(|entry| matches!(entry, ThemeSelectEntry::Theme(id) if id == selected))
+            {
+                self.settings_theme_scroll.scroll_to_item(row);
+            }
+        }
         self.open_settings_select = Some(select_id);
+        self.open_settings_select_owner_window_id = Some(owner_window_id);
         self.settings_select_focus_origin = Some(browser_behavior::BrowserFocusOrigin::Pointer);
+    }
+
+    pub(in crate::workspace) fn handle_appearance_theme_select_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(target) = self
+            .open_settings_select
+            .and_then(SettingsSelect::theme_target)
+        else {
+            return false;
+        };
+        if event.keystroke.modifiers.platform
+            || event.keystroke.modifiers.control
+            || event.keystroke.modifiers.alt
+        {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" | "tab" => {
+                self.close_settings_select();
+                cx.notify();
+                true
+            }
+            "enter" | "space" | " " => {
+                if let Some(id) = self.settings_theme_preview.clone() {
+                    self.close_settings_select();
+                    self.edit_settings(|settings| target.apply(settings, id), cx);
+                }
+                true
+            }
+            "up" | "arrowup" | "down" | "arrowdown" | "home" | "end" => {
+                let entries = appearance_theme_entries(self.settings_store.settings());
+                if let Some((row, id)) = next_theme_option(
+                    &entries,
+                    self.settings_theme_preview.as_deref(),
+                    &event.keystroke.key,
+                ) {
+                    self.settings_theme_preview = Some(id.to_string());
+                    self.settings_theme_scroll.scroll_to_item(row);
+                    cx.notify();
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     pub(in crate::workspace) fn language_select_row(
@@ -2097,5 +2342,36 @@ impl WorkspaceApp {
             )
             .child(control)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod theme_select_tests {
+    use super::*;
+
+    #[test]
+    fn theme_navigation_skips_groups_and_scrolls_to_the_actual_row() {
+        let entries = [
+            ThemeSelectEntry::Group("custom"),
+            ThemeSelectEntry::Theme("custom:one".into()),
+            ThemeSelectEntry::Group("oxide"),
+            ThemeSelectEntry::Theme("azurite".into()),
+            ThemeSelectEntry::Group("classic"),
+            ThemeSelectEntry::Theme("tokyo-night".into()),
+        ];
+        for (current, key, expected) in [
+            ("custom:one", "down", (3, "azurite")),
+            ("azurite", "up", (1, "custom:one")),
+            ("azurite", "end", (5, "tokyo-night")),
+            ("tokyo-night", "home", (1, "custom:one")),
+            ("custom:one", "up", (1, "custom:one")),
+            ("tokyo-night", "down", (5, "tokyo-night")),
+        ] {
+            assert_eq!(
+                next_theme_option(&entries, Some(current), key),
+                Some(expected),
+                "{current}: {key}"
+            );
+        }
     }
 }

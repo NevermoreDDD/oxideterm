@@ -74,8 +74,10 @@ async fn authenticate_proxy_hop(
     hop: &ProxyHopConfig,
     prompt_handler: Option<&dyn SshPromptHandler>,
     managed_key_resolver: Option<&ManagedKeyResolver>,
+    audit: Option<&oxideterm_audit::AuditContext>,
 ) -> Result<(), SshTransportError> {
     let config = SshConfig {
+        totp: hop.totp.clone(),
         host: hop.host.clone(),
         port: hop.port,
         username: hop.username.clone(),
@@ -98,11 +100,13 @@ async fn authenticate_proxy_hop(
         // Proxy hops use the same KBI prompt and fallback rules as target
         // hosts so bastions and MFA jump boxes do not become a special case.
         AuthenticationOptions::default(),
+        audit,
     )
     .await
 }
 
 struct NativeClientHandler {
+    audit: Option<oxideterm_audit::AuditContext>,
     host: String,
     port: u16,
     strict: bool,
@@ -146,6 +150,7 @@ impl NativeClientHandler {
             None
         };
         Ok(Self {
+            audit: None,
             host,
             port,
             strict,
@@ -166,68 +171,10 @@ impl NativeClientHandler {
         })
     }
 
-    fn with_connection_progress(
-        mut self,
-        connection_progress: Option<ConnectionProgressReporter>,
-    ) -> Self {
-        self.connection_progress = connection_progress;
-        self
-    }
-
-    fn auth_banners(&self) -> AuthBannerSink {
-        self.auth_banners.clone()
-    }
-
-    fn agent_forwarding_acceptance(&self) -> Arc<AtomicBool> {
-        self.agent_forwarding_accepted.clone()
-    }
-
-    fn x11_dispatcher(&self) -> X11ForwardDispatcher {
-        self.x11_dispatcher.clone()
-    }
-}
-
-impl client::Handler for NativeClientHandler {
-    type Error = SshTransportError;
-
-    fn kex_done(
-        &mut self,
-        _shared_secret: Option<&[u8]>,
-        names: &russh::Names,
-        _session: &mut client::Session,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        tracing::debug!(
-            kex = names.kex.as_ref(),
-            host_key_algorithm = names.key.as_str(),
-            cipher = names.cipher.as_ref(),
-            client_mac = names.client_mac.as_ref(),
-            server_mac = names.server_mac.as_ref(),
-            client_compression = compression_algorithm_label(&names.client_compression),
-            server_compression = compression_algorithm_label(&names.server_compression),
-            strict_kex = names.strict_kex(),
-            "SSH key exchange completed"
-        );
-        async { Ok(()) }
-    }
-
-    async fn auth_banner(
-        &mut self,
-        banner: &str,
-        _session: &mut client::Session,
-    ) -> Result<(), Self::Error> {
-        // Authentication banners are server-auth messages. They are stored
-        // separately from shell output so the first visible terminal can show
-        // them once, matching Tauri's pending-auth-banner boundary.
-        if let Some(sanitized) = sanitize_auth_banner(banner) {
-            self.auth_banners.lock().push(sanitized);
-        }
-        Ok(())
-    }
-
-    async fn check_server_key(
+    fn check_server_key_policy(
         &mut self,
         server_key: &russh::keys::PublicKeyOrCertificate,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<bool, SshTransportError> {
         // Host-key progress is an initial-handshake signal and must not retain the attempt sink.
         if let Some(reporter) = self.connection_progress.take() {
             reporter.report(ConnectionTraceStage::HostKey);
@@ -349,6 +296,105 @@ impl client::Handler for NativeClientHandler {
                 })
             }
         }
+    }
+
+    fn with_audit_context(mut self, audit: Option<oxideterm_audit::AuditContext>) -> Self {
+        self.audit = audit;
+        self
+    }
+
+    fn with_connection_progress(
+        mut self,
+        connection_progress: Option<ConnectionProgressReporter>,
+    ) -> Self {
+        self.connection_progress = connection_progress;
+        self
+    }
+
+    fn auth_banners(&self) -> AuthBannerSink {
+        self.auth_banners.clone()
+    }
+
+    fn agent_forwarding_acceptance(&self) -> Arc<AtomicBool> {
+        self.agent_forwarding_accepted.clone()
+    }
+
+    fn x11_dispatcher(&self) -> X11ForwardDispatcher {
+        self.x11_dispatcher.clone()
+    }
+}
+
+impl client::Handler for NativeClientHandler {
+    type Error = SshTransportError;
+
+    fn kex_done(
+        &mut self,
+        _shared_secret: Option<&[u8]>,
+        names: &russh::Names,
+        _session: &mut client::Session,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        tracing::debug!(
+            kex = names.kex.as_ref(),
+            host_key_algorithm = names.key.as_str(),
+            cipher = names.cipher.as_ref(),
+            client_mac = names.client_mac.as_ref(),
+            server_mac = names.server_mac.as_ref(),
+            client_compression = compression_algorithm_label(&names.client_compression),
+            server_compression = compression_algorithm_label(&names.server_compression),
+            strict_kex = names.strict_kex(),
+            "SSH key exchange completed"
+        );
+        async { Ok(()) }
+    }
+
+    async fn auth_banner(
+        &mut self,
+        banner: &str,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // Authentication banners are server-auth messages. They are stored
+        // separately from shell output so the first visible terminal can show
+        // them once, matching Tauri's pending-auth-banner boundary.
+        if let Some(sanitized) = sanitize_auth_banner(banner) {
+            self.auth_banners.lock().push(sanitized);
+        }
+        Ok(())
+    }
+
+    async fn check_server_key(
+        &mut self,
+        server_key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        let fingerprint = match server_key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => {
+                Some(public_key_fingerprint(key))
+            }
+            _ => None,
+        };
+        let detail = serde_json::json!({"fingerprint": fingerprint, "strict": self.strict,
+            "trust_requested": self.trust_host_key, "expected_fingerprint": self.expected_host_key_fingerprint}).to_string();
+        let operation = oxideterm_audit::AuditOperation::in_context(
+            self.audit.as_ref(),
+            oxideterm_audit::AuditCategory::Security,
+            "ssh_host_key",
+            Some(&detail),
+        );
+        let result = self.check_server_key_policy(server_key);
+        let outcome = match &result {
+            Ok(true) => oxideterm_audit::AuditOutcome::Succeeded,
+            Ok(false)
+            | Err(
+                SshTransportError::HostKeyUnknown { .. } | SshTransportError::HostKeyChanged { .. },
+            ) => oxideterm_audit::AuditOutcome::Denied,
+            Err(_) => oxideterm_audit::AuditOutcome::Failed,
+        };
+        operation.finish(
+            outcome,
+            oxideterm_audit::AuditEvidence::Protocol,
+            None,
+            None,
+        );
+        result
     }
 
     async fn server_channel_open_agent_forward(
@@ -484,6 +530,7 @@ async fn authenticate(
     prompt_handler: Option<&dyn SshPromptHandler>,
     managed_key_resolver: Option<&ManagedKeyResolver>,
     connection_progress: Option<&ConnectionProgressReporter>,
+    audit: Option<&oxideterm_audit::AuditContext>,
 ) -> Result<(), SshTransportError> {
     authenticate_with_options(
         handle,
@@ -492,6 +539,7 @@ async fn authenticate(
         managed_key_resolver,
         connection_progress,
         AuthenticationOptions::default(),
+        audit,
     )
     .await
 }
@@ -518,16 +566,67 @@ async fn authenticate_with_options(
     managed_key_resolver: Option<&ManagedKeyResolver>,
     connection_progress: Option<&ConnectionProgressReporter>,
     options: AuthenticationOptions,
+    audit: Option<&oxideterm_audit::AuditContext>,
 ) -> Result<(), SshTransportError> {
+    // Method names are static metadata; prompts, replies, key material, and error strings stay outside the audit queue.
+    let operation = oxideterm_audit::AuditOperation::in_context(
+        audit,
+        oxideterm_audit::AuditCategory::Security,
+        "ssh_authenticate",
+        Some(&format!(
+            "requested_method={}",
+            auth_method_label(&config.auth)
+        )),
+    );
+    let mut attempts = AuthenticationAudit::new(audit, operation.id());
+    let mut password_to_save = None;
+    let result = authenticate_flow(
+        handle,
+        config,
+        prompt_handler,
+        managed_key_resolver,
+        connection_progress,
+        options,
+        &mut attempts,
+        &mut password_to_save,
+    )
+    .await;
+    operation.result(&result);
+    if let Ok(configured_credentials_confirmed) = &result
+        && let Some(handler) = prompt_handler
+    {
+        handler.authentication_completed(*configured_credentials_confirmed);
+    }
+    if result.is_ok()
+        && let Some(SshPasswordResponse {
+            password,
+            on_authenticated: Some(save),
+        }) = password_to_save
+    {
+        save(password);
+    }
+    result.map(|_| ())
+}
+
+async fn authenticate_flow(
+    handle: &mut client::Handle<NativeClientHandler>,
+    config: &SshConfig,
+    prompt_handler: Option<&dyn SshPromptHandler>,
+    managed_key_resolver: Option<&ManagedKeyResolver>,
+    connection_progress: Option<&ConnectionProgressReporter>,
+    options: AuthenticationOptions,
+    audit: &mut AuthenticationAudit,
+    password_to_save: &mut Option<SshPasswordResponse>,
+) -> Result<bool, SshTransportError> {
     tracing::debug!(
         auth_method = auth_method_label(&config.auth),
         "SSH authentication flow starting"
     );
-    if let Some(result) = try_none_auth_probe(handle, &config.username).await
+    if let Some(result) = try_none_auth_probe(handle, &config.username, audit).await
         && result.success()
     {
         tracing::debug!("SSH none-auth probe accepted by server");
-        return Ok(());
+        return Ok(false);
     }
 
     let auth = match &config.auth {
@@ -542,10 +641,11 @@ async fn authenticate_with_options(
                 server_identity.as_deref(),
                 *delegate_credentials,
                 connection_progress,
+                audit,
             )
             .await?
             {
-                KerberosAuthenticationOutcome::Authenticated => return Ok(()),
+                KerberosAuthenticationOutcome::Authenticated => return Ok(false),
                 KerberosAuthenticationOutcome::Fallback => {
                     if let Some(reporter) = connection_progress {
                         reporter.report(ConnectionTraceStage::FallbackAuthentication);
@@ -557,23 +657,61 @@ async fn authenticate_with_options(
         auth => auth,
     };
 
+    // Local password requests must bypass server-prompt matching, including
+    // when the user has configured a broad TOTP regular expression.
+    let password_prompt_handler = prompt_handler;
+    let totp_handler = config.totp.as_ref().map(|binding| totp::TotpPromptHandler {
+        binding: binding.clone(), manual: prompt_handler,
+        submitted: std::sync::atomic::AtomicBool::new(false),
+    });
+    let prompt_handler = totp_handler.as_ref().map(|handler| handler as &dyn SshPromptHandler).or(prompt_handler);
     let result = match auth {
-        AuthMethod::Password { password } => {
+        AuthMethod::Password { password, prompt } => {
+            let prompted;
+            let password = if *prompt {
+                let handler = password_prompt_handler.ok_or(SshTransportError::UnsupportedAuth(
+                    "password authentication requires a prompt handler",
+                ))?;
+                let request = SshPasswordPrompt {
+                    host: config.host.clone(),
+                    port: config.port,
+                    username: config.username.clone(),
+                };
+                let response = audit
+                    .password_prompt(handler, request)
+                    .await
+                    .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
+                if response.on_authenticated.is_some() {
+                    // The whole authentication flow, including any second factor, owns this secret.
+                    *password_to_save = Some(response);
+                    &password_to_save.as_ref().unwrap().password
+                } else {
+                    prompted = response.password;
+                    &prompted
+                }
+            } else {
+                password
+            };
             tracing::debug!("SSH password authentication starting");
-            let result = authenticate_password(handle, config, password).await?;
+            let result = authenticate_password(handle, config, password, audit).await?;
             log_auth_result("password", &result);
             if options.password_kbi_fallback
-                && try_password_as_keyboard_interactive(
-                    handle,
-                    config,
-                    password,
-                    &result,
-                    prompt_handler,
-                )
-                .await?
+                && let PasswordFallbackOutcome::Authenticated { password_confirmed } =
+                    try_password_as_keyboard_interactive(
+                        handle,
+                        config,
+                        password,
+                        &result,
+                        prompt_handler,
+                        audit,
+                    )
+                    .await?
             {
+                if !password_confirmed {
+                    *password_to_save = None;
+                }
                 tracing::debug!("SSH password keyboard-interactive fallback succeeded");
-                return Ok(());
+                return Ok(password_confirmed && !prompt);
             }
             result
         }
@@ -594,7 +732,8 @@ async fn authenticate_with_options(
                 key_path,
                 passphrase.as_ref().map(|passphrase| passphrase.as_str()),
             )?;
-            let result = authenticate_publickey_best_algo(handle, &config.username, key).await?;
+            let result =
+                authenticate_publickey_best_algo(handle, &config.username, key, audit).await?;
             log_auth_result("publickey", &result);
             result
         }
@@ -623,17 +762,18 @@ async fn authenticate_with_options(
                 passphrase.as_ref().map(|passphrase| passphrase.as_str()),
             )?;
             let result =
-                authenticate_certificate_best_algo(handle, &config.username, key, cert).await?;
+                authenticate_certificate_best_algo(handle, &config.username, key, cert, audit)
+                    .await?;
             log_auth_result("certificate", &result);
             result
         }
         AuthMethod::Agent => {
             tracing::debug!("SSH agent authentication starting");
-            let agent_attempt = authenticate_agent(handle, config).await;
+            let agent_attempt = authenticate_agent(handle, config, audit).await;
             if let Some(result) = agent_attempt.result.as_ref() {
                 log_auth_result("agent", result);
                 if result.success() {
-                    return Ok(());
+                    return Ok(true);
                 }
             }
 
@@ -648,11 +788,12 @@ async fn authenticate_with_options(
                 );
                 for key in fallback_keys {
                     let result =
-                        authenticate_publickey_best_algo(handle, &config.username, key).await?;
+                        authenticate_publickey_best_algo(handle, &config.username, key, audit)
+                            .await?;
                     log_auth_result("default-publickey", &result);
                     if result.success() || !server_allows_more_publickey_attempts(&result) {
                         return if result.success() {
-                            Ok(())
+                            Ok(true)
                         } else {
                             Err(SshTransportError::AuthenticationFailed(
                                 authentication_failure_message(&result),
@@ -688,17 +829,24 @@ async fn authenticate_with_options(
             // keychain material for this auth attempt and drops it after decode.
             let private_key = resolve_managed_key(key_id)?;
             let key = load_private_key_from_memory(
-                private_key.as_str(),
+                private_key.private_key.as_str(),
                 passphrase.as_ref().map(|passphrase| passphrase.as_str()),
             )?;
-            let result = authenticate_publickey_best_algo(handle, &config.username, key).await?;
+            let result = if let Some(certificate) = &private_key.certificate {
+                let certificate = Certificate::from_openssh(certificate).map_err(|_| SshTransportError::AuthenticationFailed("Invalid managed SSH certificate".into()))?;
+                if certificate.public_key() != key.public_key().key_data() {
+                    return Err(SshTransportError::AuthenticationFailed("Managed SSH certificate does not match its private key".into()));
+                }
+                authenticate_certificate_best_algo(handle,&config.username,key,certificate,audit).await?
+            } else { authenticate_publickey_best_algo(handle, &config.username, key, audit).await? };
             log_auth_result("managed-key", &result);
             result
         }
         AuthMethod::KeyboardInteractive => {
             tracing::debug!("SSH keyboard-interactive authentication starting");
             let result =
-                authenticate_keyboard_interactive(handle, &config.username, prompt_handler).await?;
+                authenticate_keyboard_interactive(handle, &config.username, prompt_handler, audit)
+                    .await?;
             log_auth_result("keyboard-interactive", &result);
             result
         }
@@ -707,13 +855,13 @@ async fn authenticate_with_options(
 
     if result.success() {
         tracing::debug!("SSH authentication flow succeeded");
-        Ok(())
+        Ok(!matches!(auth, AuthMethod::Password { prompt: true, .. }))
     } else if options.interactive_kbi_chain
-        && try_keyboard_interactive_chain(handle, &config.username, &result, prompt_handler)
-        .await?
+        && try_keyboard_interactive_chain(handle, &config.username, &result, prompt_handler, audit)
+            .await?
     {
         tracing::debug!("SSH chained keyboard-interactive authentication succeeded");
-        Ok(())
+        Ok(!matches!(auth, AuthMethod::Password { prompt: true, .. }))
     } else {
         tracing::debug!("SSH authentication flow failed");
         Err(SshTransportError::AuthenticationFailed(
@@ -746,6 +894,7 @@ async fn try_kerberos_authentication(
     server_identity: Option<&str>,
     delegate_credentials: bool,
     connection_progress: Option<&ConnectionProgressReporter>,
+    audit: &mut AuthenticationAudit,
 ) -> Result<KerberosAuthenticationOutcome, SshTransportError> {
     if let Some(reporter) = connection_progress {
         reporter.report(ConnectionTraceStage::KerberosCredentials);
@@ -755,15 +904,13 @@ async fn try_kerberos_authentication(
         delegate_credentials,
         "SSH preferred Kerberos authentication starting"
     );
-    let mut authenticator = gssapi::KerberosAuthenticator::new(
-        &config.host,
-        server_identity,
-        delegate_credentials,
-    )
-    .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
+    let mut authenticator =
+        gssapi::KerberosAuthenticator::new(&config.host, server_identity, delegate_credentials)
+            .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
     if let Some(reporter) = connection_progress {
         reporter.report(ConnectionTraceStage::GssapiExchange);
     }
+    let operation = audit.attempt("gssapi-with-mic", "authenticate", None);
     let result = tokio::time::timeout(
         GSSAPI_AUTH_TIMEOUT,
         handle.authenticate_gssapi_with_mic(
@@ -774,6 +921,10 @@ async fn try_kerberos_authentication(
     )
     .await;
 
+    AuthenticationAudit::finish(
+        operation,
+        result.as_ref().ok().and_then(|result| result.as_ref().ok()),
+    );
     match result {
         Ok(Ok(result)) if result.success() => Ok(KerberosAuthenticationOutcome::Authenticated),
         Ok(Ok(_)) if authenticator.allows_authentication_fallback() => {
@@ -829,9 +980,17 @@ fn log_auth_result(method: &'static str, result: &client::AuthResult) {
 async fn try_none_auth_probe(
     handle: &mut client::Handle<NativeClientHandler>,
     username: &str,
+    audit: &mut AuthenticationAudit,
 ) -> Option<client::AuthResult> {
     tracing::debug!("SSH none-auth probe starting");
-    match tokio::time::timeout(NONE_AUTH_PROBE_TIMEOUT, handle.authenticate_none(username)).await {
+    let operation = audit.attempt("none", "authenticate", None);
+    let result =
+        tokio::time::timeout(NONE_AUTH_PROBE_TIMEOUT, handle.authenticate_none(username)).await;
+    AuthenticationAudit::finish(
+        operation,
+        result.as_ref().ok().and_then(|result| result.as_ref().ok()),
+    );
+    match result {
         Ok(Ok(result)) => {
             log_auth_result("none", &result);
             Some(result)
@@ -847,16 +1006,23 @@ async fn authenticate_password(
     handle: &mut client::Handle<NativeClientHandler>,
     config: &SshConfig,
     password: &str,
+    audit: &mut AuthenticationAudit,
 ) -> Result<client::AuthResult, SshTransportError> {
-    let result = tokio::time::timeout(
-        PASSWORD_AUTH_TIMEOUT,
-        handle.authenticate_password(config.username.clone(), password),
-    )
-    .await
-    .map_err(|_| {
-        SshTransportError::AuthenticationFailed("password authentication timed out".to_string())
-    })?
-    .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
+    let result = audit
+        .authenticate("password", None, async {
+            tokio::time::timeout(
+                PASSWORD_AUTH_TIMEOUT,
+                handle.authenticate_password(config.username.clone(), password),
+            )
+            .await
+            .map_err(|_| {
+                SshTransportError::AuthenticationFailed(
+                    "password authentication timed out".to_string(),
+                )
+            })?
+            .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
+        })
+        .await?;
 
     if result.success() {
         return Ok(result);
@@ -865,17 +1031,21 @@ async fn authenticate_password(
     if should_retry_password_auth(&result) {
         tracing::debug!("SSH password authentication retry starting");
         tokio::time::sleep(PASSWORD_RETRY_DELAY).await;
-        tokio::time::timeout(
-            PASSWORD_AUTH_TIMEOUT,
-            handle.authenticate_password(config.username.clone(), password),
-        )
-        .await
-        .map_err(|_| {
-            SshTransportError::AuthenticationFailed(
-                "password authentication retry timed out".to_string(),
-            )
-        })?
-        .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
+        audit
+            .authenticate("password", None, async {
+                tokio::time::timeout(
+                    PASSWORD_AUTH_TIMEOUT,
+                    handle.authenticate_password(config.username.clone(), password),
+                )
+                .await
+                .map_err(|_| {
+                    SshTransportError::AuthenticationFailed(
+                        "password authentication retry timed out".to_string(),
+                    )
+                })?
+                .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
+            })
+            .await
     } else {
         Ok(result)
     }

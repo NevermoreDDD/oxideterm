@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "Mostrar controles",
+      "hide_controls": "Ocultar controles"
+    },
+    "autosuggest": {
+      "matches": "{{count}} resultados",
+      "navigation_hint": "{{select}} selecionar · {{run}} executar · Clique preencher",
+      "dismiss_hint": "{{dismiss}} fechar · {{remove}} remover"
+    },
     "processing_failed": "O processamento do terminal foi interrompido. Reconecte esta sessão para continuar.",
     "local_terminal": "Terminal local",
     "tmux": {
@@ -42,6 +51,11 @@
       "risk_configured": "configurado"
     },
     "paste": {
+      "edit": "Editar",
+      "edit_title": "Editar antes de colar",
+      "strip_fence": "Remover delimitadores do bloco de código",
+      "undo": "Desfazer",
+      "redo": "Refazer",
       "title": "Múltiplas linhas detectadas ({{count}} linhas)",
       "more_lines": "... {{count}} linhas a mais",
       "confirm": "Confirmar",
@@ -75,6 +89,12 @@
       "clear_screen": "Limpar tela"
     },
     "modem": {
+      "timeout": "O outro dispositivo não respondeu a tempo. Inicie o programa de transferência nele e tente novamente.",
+      "protocol_error": "O outro dispositivo enviou dados de transferência inválidos ou inesperados.",
+      "file_error": "Não foi possível ler ou gravar o arquivo. Verifique as permissões e o espaço disponível.",
+      "file_too_large": "O arquivo excede o limite de tamanho deste protocolo.",
+      "buffer_overflow": "O outro dispositivo enviou mais dados do que o buffer de transferência pode armazenar.",
+      "worker_stopped": "O processo de transferência parou inesperadamente. Tente novamente.",
       "binary_transfer": "Transferência binária",
       "xmodem_upload": "Enviar via XMODEM",
       "xmodem_receive": "Receber via XMODEM",
@@ -259,7 +279,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Os comandos em \"{{name}}\" serão movidos para o grupo padrão antes da exclusão.",
+      "delete_group_description": "Os comandos em \"{{name}}\" serão movidos para \"{{destination}}\" antes da exclusão deste grupo.",
+      "reorder_groups": "Arraste a alça para reordenar os grupos",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -469,6 +490,7 @@
       "execute": "Executar"
     },
     "sender": {
+      "group_hint": "Os grupos de conexões salvos selecionam todos os terminais correspondentes. O isolamento na sincronização interativa não altera esses destinos explícitos.",
       "task": "Envio",
       "placeholder": "Digite comandos ou bytes hexadecimais...",
       "show": "Mostrar envio de comandos",
@@ -505,10 +527,18 @@
       "error_busy": "Um destino está em uso por outro envio"
     },
     "broadcast": {
-      "groups": "Grupos de transmissão",
+      "members_hint": "Selecione os terminais e ative a sincronização. Novos terminais não entram automaticamente. Remova um terminal do grupo atual antes de movê-lo.",
+      "isolate_member": "Isolar",
+      "resume_member": "Retomar",
+      "pause_group": "Pausar",
+      "start_group": "Ativar sincronização",
+      "sync_isolated": "Isolado",
+      "sync_disabled": "Pausado",
+      "sync_enabled": "Sincronizando",
+      "groups": "Grupos de sincronização",
       "create_group": "Novo grupo",
       "no_groups": "Nenhum grupo nomeado",
-      "temporary_group": "Seleção temporária",
+      "temporary_group": "Grupo temporário",
       "group_name_placeholder": "Nome do grupo",
       "group_members": "Membros do grupo",
       "unsaved_target": "Não salva",

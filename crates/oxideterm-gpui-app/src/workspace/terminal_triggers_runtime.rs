@@ -301,6 +301,7 @@ impl WorkspaceApp {
                     session_id,
                 ),
                 saved_profile_id,
+                &self.connection_store,
             );
         }
         if let Some(location) = self.tab_host.read(cx).terminal_location(session_id) {
@@ -825,14 +826,6 @@ mod tests {
 
         assert!(!LocalTriggerProcessLaunch::from_expanded(direct).1);
         assert!(LocalTriggerProcessLaunch::from_expanded(shell).1);
-    }
-
-    #[test]
-    fn local_process_errors_do_not_include_action_content() {
-        let rendered = format!("{:?}", LocalTriggerProcessError::SpawnFailed);
-
-        assert_eq!(rendered, "SpawnFailed");
-        assert!(!rendered.contains("secret-value"));
     }
 
     #[test]

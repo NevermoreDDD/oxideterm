@@ -1,4 +1,4 @@
-// OxideTerm modification: child surface ownership is committed only after renderer setup succeeds.
+// OxideTerm modifications: commit child ownership after renderer setup; preserve restored window state.
 use std::{
     cell::{Cell, Ref, RefCell, RefMut},
     ffi::c_void,
@@ -38,7 +38,7 @@ use gpui::{
     Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowControls, WindowDecorations, WindowKind, WindowParams,
+    WindowControls, WindowDecorations, WindowKind, WindowParams, WindowVisibility,
     layer_shell::{Anchor, LayerShellNotSupportedError},
     popup::PopupOptions,
     px, size,
@@ -50,6 +50,7 @@ pub(crate) struct Callbacks {
     request_frame: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     input: Option<Box<dyn FnMut(gpui::PlatformInput) -> gpui::DispatchEventResult>>,
     active_status_change: Option<Box<dyn FnMut(bool)>>,
+    visibility_change: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change: Option<Box<dyn FnMut(bool)>>,
     resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
     moved: Option<Box<dyn FnMut()>>,
@@ -92,7 +93,30 @@ struct InProgressConfigure {
     fullscreen: bool,
     maximized: bool,
     resizing: bool,
+    visibility: WindowVisibility,
     tiling: Tiling,
+}
+
+impl InProgressConfigure {
+    fn resolve_size(
+        &mut self,
+        restore_on_open: bool,
+        got_unmaximized: bool,
+        restored_size: Size<Pixels>,
+        inset: Pixels,
+    ) {
+        if self.fullscreen || self.maximized {
+            return;
+        }
+        let tiled = self.tiling.top || self.tiling.bottom || self.tiling.left || self.tiling.right;
+        self.size = if !tiled && (restore_on_open || got_unmaximized) {
+            // The first floating-window configure is a suggestion, not a replacement
+            // for saved application bounds. Tiled windows must obey the compositor.
+            Some(restored_size)
+        } else {
+            compute_outer_size(inset, self.size, self.tiling)
+        };
+    }
 }
 
 pub struct WaylandWindowState {
@@ -117,6 +141,8 @@ pub struct WaylandWindowState {
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
     maximized: bool,
+    /// `Hidden` while the `xdg_toplevel` `suspended` state (xdg-shell v6) is set.
+    visibility: WindowVisibility,
     tiling: Tiling,
     window_bounds: Bounds<Pixels>,
     client: WaylandClientStatePtr,
@@ -613,6 +639,7 @@ impl WaylandWindowState {
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
             maximized: false,
+            visibility: WindowVisibility::Visible,
             tiling: Tiling::default(),
             window_bounds: options.bounds,
             in_progress_configure: None,
@@ -697,8 +724,71 @@ impl PresentationState {
 }
 
 #[cfg(test)]
-mod presentation_state_tests {
-    use super::PresentationState;
+mod tests {
+    use super::{InProgressConfigure, PresentationState};
+    use gpui::{Tiling, WindowVisibility, px, size};
+
+    #[test]
+    fn floating_configure_restores_saved_size_only_on_open_or_unmaximize() {
+        let restored = size(px(1100.0), px(720.0));
+        let suggested = size(px(800.0), px(600.0));
+        for (initial, unmaximized, suggestion, expected) in [
+            (true, false, Some(suggested), Some(restored)),
+            (true, false, None, Some(restored)),
+            (false, true, Some(suggested), Some(restored)),
+            (
+                false,
+                false,
+                Some(suggested),
+                Some(size(px(820.0), px(620.0))),
+            ),
+            (false, false, None, None),
+        ] {
+            let mut configure = InProgressConfigure {
+                size: suggestion,
+                fullscreen: false,
+                maximized: false,
+                resizing: false,
+                visibility: WindowVisibility::Visible,
+                tiling: Tiling::default(),
+            };
+            configure.resolve_size(initial, unmaximized, restored, px(10.0));
+            assert_eq!(
+                configure.size, expected,
+                "initial={initial}, unmaximized={unmaximized}"
+            );
+        }
+    }
+
+    #[test]
+    fn constrained_configure_keeps_compositor_size() {
+        for (fullscreen, maximized, tiling, expected) in [
+            (true, false, Tiling::default(), size(px(800.0), px(600.0))),
+            (false, true, Tiling::default(), size(px(800.0), px(600.0))),
+            (
+                false,
+                false,
+                Tiling {
+                    top: true,
+                    left: true,
+                    bottom: true,
+                    right: false,
+                },
+                size(px(810.0), px(600.0)),
+            ),
+        ] {
+            let mut configure = InProgressConfigure {
+                size: Some(size(px(800.0), px(600.0))),
+                fullscreen,
+                maximized,
+                resizing: false,
+                visibility: WindowVisibility::Visible,
+                tiling,
+            };
+            configure.resolve_size(true, false, size(px(1100.0), px(720.0)), px(10.0));
+            assert_eq!(configure.size, Some(expected));
+        }
+    }
 
     #[test]
     fn failure_tracks_whether_the_surface_has_presented() {
@@ -1057,7 +1147,7 @@ impl WaylandWindowStatePtr {
             accepts_text_input
         } else {
             drop(state);
-            true
+            false
         };
         if Some(ime_enabled) == client.ime_enabled() {
             return;
@@ -1072,6 +1162,8 @@ impl WaylandWindowStatePtr {
 
     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
         if let xdg_surface::Event::Configure { serial } = event {
+            let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
+            let mut window_state_changed = false;
             {
                 let mut state = self.state.borrow_mut();
                 if let Some(window_controls) = state.in_progress_window_controls.take() {
@@ -1089,30 +1181,52 @@ impl WaylandWindowStatePtr {
 
                 if let Some(mut configure) = state.in_progress_configure.take() {
                     let got_unmaximized = state.maximized && !configure.maximized;
+                    window_state_changed = state.fullscreen != configure.fullscreen
+                        || state.maximized != configure.maximized;
                     state.fullscreen = configure.fullscreen;
                     state.maximized = configure.maximized;
                     state.tiling = configure.tiling;
+                    let visibility_changed = state.visibility != configure.visibility;
+                    state.visibility = configure.visibility;
                     // Limit interactive resizes to once per vblank
-                    if configure.resizing && state.resize_throttle {
+                    let throttled = configure.resizing && state.resize_throttle;
+                    if throttled {
                         state.surface_state.ack_configure(serial);
+                        drop(state);
+                        if window_state_changed {
+                            self.notify_window_state_changed();
+                        }
+                        if visibility_changed {
+                            self.report_visibility(configure.visibility);
+                        }
                         return;
                     } else if configure.resizing {
                         state.resize_throttle = true;
                     }
-                    if !configure.fullscreen && !configure.maximized {
-                        configure.size = if got_unmaximized {
-                            Some(state.window_bounds.size)
-                        } else {
-                            compute_outer_size(state.inset(), configure.size, state.tiling)
+                    configure.resolve_size(
+                        // Popup and layer-shell sizes are compositor constraints.
+                        initial_configure
+                            && matches!(&state.surface_state, WaylandSurfaceState::Xdg(_)),
+                        got_unmaximized,
+                        state.window_bounds.size,
+                        state.inset(),
+                    );
+                    if !configure.fullscreen
+                        && !configure.maximized
+                        && let Some(size) = configure.size
+                    {
+                        state.window_bounds = Bounds {
+                            origin: Point::default(),
+                            size,
                         };
-                        if let Some(size) = configure.size {
-                            state.window_bounds = Bounds {
-                                origin: Point::default(),
-                                size,
-                            };
-                        }
                     }
                     drop(state);
+                    if visibility_changed {
+                        self.report_visibility(configure.visibility);
+                    }
+                    if throttled {
+                        return;
+                    }
                     if let Some(size) = configure.size {
                         self.resize(size);
                     }
@@ -1136,13 +1250,25 @@ impl WaylandWindowStatePtr {
                 window_geometry.size.height,
             );
 
-            let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
             drop(state);
             if initial_configure {
                 self.frame();
             } else {
                 self.request_redraw();
             }
+            if window_state_changed {
+                self.notify_window_state_changed();
+            }
+        }
+    }
+
+    fn notify_window_state_changed(&self) {
+        // GPUI's bounds observer uses this callback for state-only changes too.
+        // Release both RefCells before calling back into application code.
+        let callback = self.callbacks.borrow_mut().moved.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.callbacks.borrow_mut().moved = Some(callback);
         }
     }
 
@@ -1206,6 +1332,7 @@ impl WaylandWindowStatePtr {
                 let mut fullscreen = false;
                 let mut maximized = false;
                 let mut resizing = false;
+                let mut visibility = WindowVisibility::Visible;
 
                 for state in states {
                     match state {
@@ -1216,6 +1343,7 @@ impl WaylandWindowStatePtr {
                             fullscreen = true;
                         }
                         xdg_toplevel::State::Resizing => resizing = true,
+                        xdg_toplevel::State::Suspended => visibility = WindowVisibility::Hidden,
                         xdg_toplevel::State::TiledTop => {
                             tiling.top = true;
                         }
@@ -1244,6 +1372,7 @@ impl WaylandWindowStatePtr {
                     fullscreen,
                     maximized,
                     resizing,
+                    visibility,
                     tiling,
                 });
 
@@ -1318,6 +1447,7 @@ impl WaylandWindowStatePtr {
                     fullscreen: false,
                     maximized: false,
                     resizing: false,
+                    visibility: WindowVisibility::Visible,
                     tiling: Tiling::default(),
                 });
                 drop(state);
@@ -1352,6 +1482,7 @@ impl WaylandWindowStatePtr {
                     fullscreen: false,
                     maximized: false,
                     resizing: false,
+                    visibility: WindowVisibility::Visible,
                     tiling: Tiling::default(),
                 });
 
@@ -1567,6 +1698,14 @@ impl WaylandWindowStatePtr {
         if let Some(mut fun) = callback {
             fun(focus);
             self.callbacks.borrow_mut().hover_status_change = Some(fun);
+        }
+    }
+
+    fn report_visibility(&self, visibility: WindowVisibility) {
+        let callback = self.callbacks.borrow_mut().visibility_change.take();
+        if let Some(mut callback) = callback {
+            callback(visibility);
+            self.callbacks.borrow_mut().visibility_change = Some(callback);
         }
     }
 
@@ -1802,6 +1941,10 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().active
     }
 
+    fn visibility(&self) -> WindowVisibility {
+        self.borrow().visibility
+    }
+
     fn is_hovered(&self) -> bool {
         self.borrow().hovered
     }
@@ -1886,6 +2029,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.callbacks.borrow_mut().active_status_change = Some(callback);
+    }
+
+    fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
+        self.0.callbacks.borrow_mut().visibility_change = Some(callback);
     }
 
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
@@ -2123,17 +2270,18 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.borrow().renderer.gpu_specs().into()
+        self.borrow().renderer.gpu_specs()
     }
 
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.borrow().renderer.gpu_context();
-        Some(Box::new((device, queue)))
+        self.borrow()
+            .renderer
+            .gpu_context()
+            .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
 
     fn gpu_device_lost(&self) -> Option<bool> {
-        // Only loads an atomic flag — safe even mid-recovery, when
-        // `gpu_context` would panic on the torn-down resources.
+        // The shared error state remains readable while GPU resources are released.
         Some(self.borrow().renderer.device_lost())
     }
 

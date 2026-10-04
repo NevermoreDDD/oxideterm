@@ -31,7 +31,11 @@
       "gssapi_delegate_credentials": "將 Kerberos 憑證委派給此伺服器",
       "gssapi_delegation_warning": "僅委派給受信任的伺服器。遠端主機可能以你的身分使用委派憑證存取其他 Kerberos 服務。",
       "password": "密碼",
+      "use_empty_password": "使用空密碼",
       "save_password": "將密碼儲存至鑰匙圈",
+      "save_credentials_after_login": "連線成功後儲存驗證資訊",
+      "credentials_saved": "驗證資訊已儲存",
+      "save_credentials_failed": "儲存驗證資訊失敗",
       "group": "群組",
       "notes": "備註",
       "notes_placeholder": "新增此連線的選填說明",
@@ -145,6 +149,9 @@
       "ssh_algorithms_hint": "檢視協商順序，並依類別覆寫預設演算法。",
       "ssh_algorithms_categories": "演算法類別",
       "ssh_algorithms_default": "預設",
+      "ssh_algorithms_follow_preset": "跟隨預設",
+      "ssh_algorithms_disabled": "未啟用演算法",
+      "ssh_algorithms_edit_hint": "越靠上越優先。拖曳排序，Alt+↑/↓ 移動選取項目，空白鍵切換啟用狀態。至少保留一個演算法。",
       "ssh_algorithms_custom": "自訂",
       "ssh_algorithms_custom_count": "已自訂 {{count}} 類",
       "ssh_algorithms_category_kex": "金鑰交換（KEX）",
@@ -203,6 +210,9 @@
       }
     },
     "kbi": {
+      "save_password_after_login": "登入成功後儲存密碼",
+      "password_saved": "SSH 密碼已儲存",
+      "save_password_failed": "無法儲存 SSH 密碼，目前連線仍保持開啟。",
       "title": "鍵盤互動認證",
       "continue": "繼續",
       "cancelled": "鍵盤互動認證已取消。"

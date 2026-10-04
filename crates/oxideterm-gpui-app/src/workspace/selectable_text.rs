@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, ElementId, Entity,
-    HitboxBehavior, Hsla, InteractiveElement, IntoColor, IntoElement, MouseButton, ParentElement,
-    Pixels, Point, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledText,
-    TextAlign, TextLayout, TextRun, Timer, Window, canvas, div, font, point,
-    prelude::FluentBuilder, px, rgb, size,
+    HitboxBehavior, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
+    Point, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledText, TextAlign,
+    TextLayout, TextRun, Timer, Window, canvas, div, font, point, prelude::FluentBuilder, px, rgb,
+    size,
 };
 use oxideterm_gpui_ui::{
     scroll::{ScrollableElement, vertical_scrollbar_layer},
@@ -75,6 +75,7 @@ struct SelectableTextAnchorUpdate {
 }
 
 struct SelectableTextFragmentUpdate {
+    join_previous: bool,
     group_id: u64,
     fragment_id: u64,
     order: usize,
@@ -92,6 +93,19 @@ fn selectable_text_fragment_selection_content_changed(
     existing.is_none_or(|(existing_group_id, existing_order, existing_text)| {
         existing_group_id != group_id || existing_order != order || existing_text != text
     })
+}
+
+fn join_selectable_fragment_text<'a>(
+    fragments: impl IntoIterator<Item = (bool, &'a str)>,
+) -> String {
+    let mut text = String::new();
+    for (index, (join_previous, fragment)) in fragments.into_iter().enumerate() {
+        if index > 0 && !join_previous {
+            text.push('\n');
+        }
+        text.push_str(fragment);
+    }
+    text
 }
 
 fn begin_selectable_text_frame_flush(flush_scheduled: &Cell<bool>) -> bool {
@@ -217,7 +231,7 @@ impl WorkspaceApp {
         // borrows those handles only while applying a drag-autoscroll tick.
         let page_handles = {
             let file_manager = self.file_manager.read(cx);
-            let sftp = self.sftp_view.read(cx);
+            let sftp = self.sftp_view().read(cx);
             [
                 file_manager.preview_document_scroll.clone(),
                 file_manager.preview_metadata_scroll.clone(),
@@ -375,6 +389,14 @@ impl WorkspaceApp {
         &self,
         cx: &mut Context<Self>,
     ) -> SelectableTextRenderState {
+        self.selectable_text_render_state_for_entity(cx.entity(), cx)
+    }
+
+    pub(super) fn selectable_text_render_state_for_entity(
+        &self,
+        workspace: Entity<Self>,
+        cx: &App,
+    ) -> SelectableTextRenderState {
         let active_group_selection =
             if let Some(WorkspaceImeTarget::ReadOnlyText(group_id)) = self.active_ime_target(cx) {
                 self.ime_selected_range_for_target(WorkspaceImeTarget::ReadOnlyText(group_id), cx)
@@ -394,7 +416,7 @@ impl WorkspaceApp {
             })
             .unwrap_or_default();
         SelectableTextRenderState {
-            workspace: cx.entity(),
+            workspace,
             ui_font_family: tauri_ui_font_family(
                 &self.settings_store.settings().appearance.ui_font_family,
             ),
@@ -543,7 +565,7 @@ impl WorkspaceApp {
             .map(|range| {
                 selected_text_runs(
                     &value,
-                    &[run.clone()],
+                    std::slice::from_ref(&run),
                     range,
                     selection_bg(self.tokens.ui.accent),
                 )
@@ -619,8 +641,8 @@ impl WorkspaceApp {
         font_family: Option<SharedString>,
         alpha: f32,
     ) -> TextRun {
-        let mut color: Hsla = rgb(color).into_color();
-        color.alpha = alpha.clamp(0.0, 1.0);
+        let mut color: Hsla = rgb(color).into();
+        color.a = alpha.clamp(0.0, 1.0);
         TextRun {
             len: value.len(),
             font: font(font_family.unwrap_or_else(|| {
@@ -727,6 +749,7 @@ impl WorkspaceApp {
                     .borrow_mut()
                     .fragments
                     .push(SelectableTextFragmentUpdate {
+                        join_previous: false,
                         group_id,
                         fragment_id,
                         order,
@@ -798,11 +821,6 @@ impl WorkspaceApp {
             .filter(|update| update.group_id != selectable_document_group_id() && update.order == 0)
             .map(|update| update.group_id)
             .collect::<HashSet<_>>();
-        if !replaced_groups.is_empty() {
-            self.selectable_text_fragments
-                .retain(|_, fragment| !replaced_groups.contains(&fragment.group_id));
-        }
-
         let active_group = match self.active_ime_target(cx) {
             Some(WorkspaceImeTarget::ReadOnlyText(group_id)) => Some(group_id),
             _ => None,
@@ -838,10 +856,17 @@ impl WorkspaceApp {
                     });
             fragment_changed || fragment_removed
         });
+        // Compare against the previous frame before replacing its fragments.
+        // Removing them first makes every selected frame look like changed text.
+        if !replaced_groups.is_empty() {
+            self.selectable_text_fragments
+                .retain(|_, fragment| !replaced_groups.contains(&fragment.group_id));
+        }
         for update in updates {
             self.selectable_text_fragments.insert(
                 update.fragment_id,
                 SelectableTextFragmentState {
+                    join_previous: update.join_previous,
                     group_id: update.group_id,
                     order: update.order,
                     generation: self.selectable_text_generation,
@@ -861,14 +886,9 @@ impl WorkspaceApp {
         if fragments.is_empty() {
             return None;
         }
-        let mut text = String::new();
-        for (index, fragment) in fragments.into_iter().enumerate() {
-            if index > 0 {
-                text.push('\n');
-            }
-            text.push_str(&fragment.text);
-        }
-        Some(text)
+        Some(join_selectable_fragment_text(fragments.into_iter().map(
+            |fragment| (fragment.join_previous, fragment.text.as_str()),
+        )))
     }
 
     pub(super) fn selectable_text_group_closest_index_for_position(
@@ -938,7 +958,7 @@ impl WorkspaceApp {
             .into_iter()
             .enumerate()
         {
-            if index > 0 {
+            if index > 0 && !fragment.join_previous {
                 cursor = cursor.saturating_add(1);
             }
             let start = cursor;
@@ -1102,7 +1122,7 @@ impl SelectableTextRenderState {
         let run = TextRun {
             len: text.len(),
             font: font(self.ui_font_family.clone()),
-            color: rgb(color).into_color(),
+            color: rgb(color).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -1117,12 +1137,14 @@ impl SelectableTextRenderState {
                     order,
                     text.into(),
                     vec![run],
+                    Vec::new(),
+                    false,
                 ),
             SelectableTextRole::NonSelectable => render_non_selectable_styled_text(text, vec![run]),
         }
     }
 
-    fn render_styled_text_in_group(
+    pub(super) fn render_styled_text_in_group(
         &self,
         role: SelectableTextRole,
         group_id: u64,
@@ -1130,6 +1152,8 @@ impl SelectableTextRenderState {
         order: usize,
         text: SharedString,
         runs: Vec<TextRun>,
+        links: Vec<oxideterm_gpui_markdown::render::MarkdownTextLink>,
+        join_previous: bool,
     ) -> AnyElement {
         debug_assert_ne!(role, SelectableTextRole::NonSelectable);
         let target = WorkspaceImeTarget::ReadOnlyText(group_id);
@@ -1153,6 +1177,8 @@ impl SelectableTextRenderState {
         let value_for_anchor = value.clone();
         let styled_text = StyledText::new(text).with_runs(display_runs);
         let layout = styled_text.layout().clone();
+        let link_layout = layout.clone();
+        let link_workspace = self.workspace.clone();
         let hit_target = selectable_text_hit_target(
             layout.clone(),
             move |event: &gpui::MouseDownEvent, window, cx| {
@@ -1182,6 +1208,24 @@ impl SelectableTextRenderState {
                 .when(role == SelectableTextRole::RowSafe, |text| {
                     text.whitespace_nowrap()
                 })
+                .on_mouse_up(MouseButton::Left, move |event, window, cx| {
+                    if event.click_count != 1 || links.is_empty() {
+                        return;
+                    }
+                    let selecting = link_workspace
+                        .read(cx)
+                        .ime_selected_range_for_target(target, cx)
+                        .is_some_and(|range| range.start != range.end);
+                    if selecting {
+                        return;
+                    }
+                    if let Ok(index) = link_layout.index_for_position(event.position)
+                        && let Some(link) = links.iter().find(|link| link.range.contains(&index))
+                    {
+                        (link.open)(window, cx);
+                        cx.stop_propagation();
+                    }
+                })
                 .child(styled_text)
                 .when(role.is_interactive(), |element| element.child(hit_target))
                 .on_mouse_move(move |event: &gpui::MouseMoveEvent, window, cx| {
@@ -1196,6 +1240,7 @@ impl SelectableTextRenderState {
                     .borrow_mut()
                     .fragments
                     .push(SelectableTextFragmentUpdate {
+                        join_previous,
                         group_id,
                         fragment_id,
                         order,
@@ -1238,7 +1283,7 @@ impl SelectableTextRenderState {
             .into_iter()
             .enumerate()
         {
-            if index > 0 {
+            if index > 0 && !fragment.join_previous {
                 cursor = cursor.saturating_add(1);
             }
             let start = cursor;
@@ -1282,8 +1327,8 @@ impl SelectableTextRenderState {
 }
 
 fn selection_bg(accent: u32) -> Hsla {
-    let mut color: Hsla = rgb(accent).into_color();
-    color.alpha = 0.25;
+    let mut color: Hsla = rgb(accent).into();
+    color.a = 0.25;
     color
 }
 
@@ -1390,6 +1435,18 @@ fn distance_from_bounds(point: Point<Pixels>, bounds: gpui::Bounds<Pixels>) -> f
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copying_wrapped_inline_fragments_preserves_paragraph_boundaries() {
+        assert_eq!(
+            super::join_selectable_fragment_text([
+                (false, "中文"),
+                (true, "与 English "),
+                (true, "🙂"),
+                (false, "下一段"),
+            ]),
+            "中文与 English 🙂\n下一段"
+        );
+    }
     use super::*;
 
     #[test]

@@ -37,9 +37,6 @@ const SESSION_FOCUS_EMERALD: u32 = 0x10b981;
 // Tauri EventLogPanel rows use `min-h-[24px]` with `px-3 py-1`; keep the
 // native estimate next to the shared virtual-list call so scroll-to-index and
 // sticky-bottom behavior stay browser-like.
-const EVENT_LOG_SIDEBAR_ROW_HEIGHT: f32 = 24.0;
-const EVENT_LOG_SIDEBAR_VIRTUAL_OVERSCAN: usize = 20;
-const EVENT_LOG_STICKY_BOTTOM_THRESHOLD_PX: f32 = 30.0;
 const EMBEDDED_SFTP_MIN_SESSION_FRACTION: f32 = 0.2;
 const EMBEDDED_SFTP_MAX_SESSION_FRACTION: f32 = 0.75;
 
@@ -53,6 +50,7 @@ pub(super) enum SidebarSection {
     Network,
     Extensions,
     CloudSync,
+    Knowledge,
     Assistant,
     HostTools,
     Automation,
@@ -88,7 +86,6 @@ pub(in crate::workspace) struct SessionStatusStyle {
     icon: LucideIcon,
     text_color: u32,
     dot_color: u32,
-    opacity: f32,
     ring: bool,
 }
 
@@ -122,6 +119,7 @@ impl SidebarSection {
             "network" | "topology" => Self::Network,
             "extensions" => Self::Extensions,
             "cloud_sync" => Self::CloudSync,
+            "knowledge" => Self::Knowledge,
             "ai" | "assistant" => Self::Assistant,
             "host_tools" => Self::HostTools,
             "automation" => Self::Automation,
@@ -148,6 +146,7 @@ impl SidebarSection {
             Self::Network => "topology",
             Self::Extensions => "extensions",
             Self::CloudSync => "cloud_sync",
+            Self::Knowledge => "knowledge",
             Self::Assistant => "ai",
             Self::HostTools => "host_tools",
             Self::Automation => "automation",
@@ -172,6 +171,7 @@ impl WorkspaceApp {
             | SidebarSection::Terminal
             | SidebarSection::Runtime
             | SidebarSection::Network
+            | SidebarSection::Knowledge
             | SidebarSection::Assistant
             | SidebarSection::HostTools
             | SidebarSection::Automation
@@ -187,6 +187,7 @@ mod activity;
 mod ai;
 mod helpers;
 mod region;
+pub(in crate::workspace) use region::sidebar_resize_hotzone_chrome;
 mod sessions;
 mod state;
 mod titlebar;
@@ -195,8 +196,10 @@ pub(in crate::workspace) use titlebar::{
 };
 
 pub(in crate::workspace) use ai::{
-    AcpApplicationToolTurn, AiCompactionDelivery, AiCompactionDeliverySender, AiInlinePanelState,
-    AiStreamDelivery, AiStreamDeliveryEvent, AiStreamDeliverySender, ai_now_ms,
+    AcpApplicationToolTurn, AiChatPromptKeyAction, AiCompactionDelivery,
+    AiCompactionDeliverySender, AiInlinePanelState, AiInputVisualLine, AiStreamDelivery,
+    AiStreamDeliveryEvent, AiStreamDeliverySender, ai_chat_prompt_key_action,
+    ai_input_line_index_for_offset, ai_input_visual_lines, ai_now_ms,
     handle_acp_application_tool_call,
 };
 use helpers::*;
@@ -218,6 +221,7 @@ mod sidebar_persistence_tests {
             SidebarSection::Network,
             SidebarSection::Extensions,
             SidebarSection::CloudSync,
+            SidebarSection::Knowledge,
             SidebarSection::Assistant,
             SidebarSection::HostTools,
             SidebarSection::Automation,

@@ -119,19 +119,23 @@ impl<R: Read + Send + 'static> UnblockedReader<R> {
     }
 
     /// Try to read from the reader.
-    pub fn try_read(&mut self, buf: &mut [u8]) -> usize {
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let waker = Waker::from(self.interest.clone());
 
         match self.pipe.poll_drain_bytes(&mut Context::from_waker(&waker), buf) {
-            Poll::Pending => 0,
-            Poll::Ready(n) => n,
+            // A live, empty pipe must not make the PTY event loop stop listening for output.
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+            Poll::Ready(n) => Ok(n),
         }
     }
 }
 
 impl<R: Read + Send + 'static> Read for UnblockedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        Ok(self.try_read(buf))
+        self.try_read(buf)
     }
 }
 
@@ -272,5 +276,69 @@ impl Wake for Registration {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+    use std::time::{Duration, Instant};
+
+    use polling::Events;
+
+    use super::*;
+
+    fn read_when_ready(
+        reader: &mut UnblockedReader<miow::pipe::AnonRead>,
+        poller: &Poller,
+        buffer: &mut [u8],
+    ) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut events = Events::with_capacity(NonZeroUsize::new(8).unwrap());
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("timed out waiting for pipe output or EOF");
+            events.clear();
+            poller.wait(&mut events, Some(remaining)).unwrap();
+            if !events.iter().any(|event| event.readable) {
+                continue;
+            }
+            match reader.read(buffer) {
+                Ok(count) => return count,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                Err(error) => panic!("pipe read failed: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reader_distinguishes_idle_from_eof_and_wakes_for_later_output() {
+        let (source, mut output) = miow::pipe::anonymous(0).unwrap();
+        let mut reader = UnblockedReader::new(source, 4096);
+        let poller = Arc::new(Poller::new().unwrap());
+        reader.register(&poller, Event::readable(2), PollMode::Level);
+        let mut buffer = [0u8; 64];
+
+        // No producer output exists yet; returning EOF here disables the PTY read interest.
+        assert_eq!(reader.read(&mut buffer).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+
+        for expected in [b"first output\n".as_slice(), b"second output\n".as_slice()] {
+            output.write_all(expected).unwrap();
+            let mut received = Vec::new();
+            while received.len() < expected.len() {
+                let count = read_when_ready(&mut reader, &poller, &mut buffer);
+                assert_ne!(count, 0, "the open producer must not report EOF");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            assert_eq!(received, expected);
+            assert_eq!(reader.read(&mut buffer).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        }
+
+        // Closing the real pipe must wake the consumer and preserve the EOF contract.
+        drop(output);
+        assert_eq!(read_when_ready(&mut reader, &poller, &mut buffer), 0);
+        reader.deregister();
     }
 }

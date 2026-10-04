@@ -65,6 +65,121 @@ wait
 }
 
 #[test]
+fn local_pty_bulk_output_preserves_queries_and_final_bytes_on_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input");
+    let response = directory.path().join("response");
+    std::fs::write(&input, "output before cursor query\r\n".repeat(32_768)).unwrap();
+    let script = r#"
+stty raw -echo
+cat "$1"
+printf '\033[4;6H\033[6n'
+dd bs=1 count=6 of="$2" 2>/dev/null
+printf '\033[2J\033[HFINAL-OUTPUT'
+"#;
+    let config = LocalPtyConfig {
+        shell: Some(
+            ShellInfo::new("test-sh", "Test sh", "/bin/sh").with_args(vec![
+                "-c".into(),
+                script.into(),
+                "pty-query-test".into(),
+                input.display().to_string(),
+                response.display().to_string(),
+            ]),
+        ),
+        load_profile: false,
+        ..Default::default()
+    };
+    let mut session = LocalPtySession::spawn_with_config_graphics_and_encoding(
+        80,
+        24,
+        config,
+        GraphicsOptions::default(),
+        TerminalEncoding::Utf8,
+        100,
+    )
+    .unwrap();
+    assert_eventually(
+        Duration::from_secs(5),
+        || {
+            session.drain_output();
+            session.take_events();
+            !session.lifecycle().is_running()
+        },
+        "PTY did not complete its cursor query and exit",
+    );
+    assert_eq!(std::fs::read(response).unwrap(), b"\x1b[4;6R");
+    let snapshot = session.snapshot();
+    let first_line: String = snapshot.lines[0]
+        .cells
+        .iter()
+        .take(12)
+        .map(|cell| cell.ch)
+        .collect();
+    assert_eq!(first_line, "FINAL-OUTPUT");
+}
+
+#[test]
+fn concurrent_local_ptys_keep_output_and_shutdown_independent() {
+    let mut sessions: Vec<_> = (0..4)
+        .map(|index| {
+            let config = LocalPtyConfig {
+                shell: Some(
+                    ShellInfo::new("test-sh", "Test sh", "/bin/sh").with_args(vec![
+                        "-c".into(),
+                        r#"
+n=0
+while [ "$n" -lt 2000 ]; do
+    printf 'bulk output %s\r\n' "$n"
+    n=$((n+1))
+done
+printf '\033[2J\033[Hsession-%s' "$1"
+"#
+                        .into(),
+                        "pty-isolation-test".into(),
+                        index.to_string(),
+                    ]),
+                ),
+                load_profile: false,
+                ..Default::default()
+            };
+            LocalPtySession::spawn_with_config_graphics_and_encoding(
+                80,
+                24,
+                config,
+                GraphicsOptions::default(),
+                TerminalEncoding::Utf8,
+                100,
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eventually(
+        Duration::from_secs(10),
+        || {
+            for session in &mut sessions {
+                session.drain_output();
+                session.take_events();
+            }
+            sessions
+                .iter()
+                .all(|session| !session.lifecycle().is_running())
+        },
+        "concurrent PTYs did not exit",
+    );
+    for (index, session) in sessions.iter().enumerate() {
+        let snapshot = session.snapshot();
+        let text: String = snapshot.lines[0]
+            .cells
+            .iter()
+            .take(9)
+            .map(|cell| cell.ch)
+            .collect();
+        assert_eq!(text, format!("session-{index}"));
+    }
+}
+
+#[test]
 fn local_available_shell_integrations_report_initial_cwd() {
     let expected_cwd = std::env::temp_dir();
     for shell_id in ["bash", "zsh", "fish", "pwsh"] {
@@ -114,24 +229,12 @@ fn integrated_zsh_loads_history_from_user_config_in_a_real_pty() {
     session.drain_output();
     session.take_events();
     session
-        .write_text("print -r -- OXIDETERM_HISTORY_COUNT=${#history[@]}\n")
-        .expect("query Zsh history count");
+        .write_text("fc -l 1 -1\n")
+        .expect("query Zsh history");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut screen = String::new();
-    let parse_history_count = |output: &str| {
-        output.rsplit("OXIDETERM_HISTORY_COUNT=").find_map(|value| {
-            let digits = value
-                .trim_start()
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>();
-            (!digits.is_empty())
-                .then(|| digits.parse::<usize>().ok())
-                .flatten()
-        })
-    };
-    while std::time::Instant::now() < deadline && parse_history_count(&screen).is_none() {
+    while std::time::Instant::now() < deadline && !screen.contains("oxideterm-history-probe") {
         session.drain_output();
         screen = session
             .snapshot()
@@ -144,9 +247,8 @@ fn integrated_zsh_loads_history_from_user_config_in_a_real_pty() {
     }
     session.shutdown();
 
-    let count = parse_history_count(&screen).expect("history count response");
     assert!(
-        count > 0,
+        screen.contains("oxideterm-history-probe"),
         "integrated Zsh PTY did not load configured history"
     );
 }

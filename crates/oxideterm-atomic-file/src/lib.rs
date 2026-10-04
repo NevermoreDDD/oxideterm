@@ -7,7 +7,7 @@ mod platform;
 mod temporary;
 
 use std::{
-    fs::{self, File},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
 };
@@ -64,7 +64,12 @@ pub fn durable_replace(source: &Path, destination: &Path) -> io::Result<()> {
     }
 
     // Sync the caller-provided source before making it visible at the destination.
-    File::open(source)?.sync_all()?;
+    // FlushFileBuffers requires write access on Windows, even for an already-written source.
+    OpenOptions::new()
+        .read(true)
+        .write(cfg!(windows))
+        .open(source)?
+        .sync_all()?;
     replace_and_sync_parent(source, destination, destination_parent)
 }
 
@@ -75,6 +80,11 @@ pub fn durable_remove(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Persists a batch of directory-entry changes with the platform's required handle flags.
+pub fn sync_directory(directory: &Path) -> io::Result<()> {
+    platform::sync_directory(directory)
 }
 
 fn replace_and_sync_parent(source: &Path, destination: &Path, parent: &Path) -> io::Result<()> {
@@ -89,40 +99,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durable_write_replaces_existing_contents() {
+    fn durable_file_lifecycle_preserves_contents_on_failure_and_cleans_up() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        fs::write(&path, b"old").unwrap();
+        let path = directory.path().join("nested").join("state.json");
+
+        durable_write(&path, b"old").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"old");
 
         durable_write(&path, b"new").unwrap();
-
-        assert_eq!(fs::read(path).unwrap(), b"new");
-    }
-
-    #[test]
-    fn callback_failure_preserves_destination_and_cleans_temporary_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        fs::write(&path, b"old").unwrap();
-
-        let error = durable_write_with_before_replace(&path, b"new", || {
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let error = durable_write_with_before_replace(&path, b"uncommitted", || {
             Err(io::Error::other("injected failure"))
         })
         .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(fs::read(&path).unwrap(), b"old");
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn durable_write_recreates_missing_parent_directories() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested").join("state.json");
-
-        durable_write(&path, b"state").unwrap();
-
-        assert_eq!(fs::read(path).unwrap(), b"state");
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        durable_remove(&path).unwrap();
+        durable_remove(&path).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]
@@ -152,17 +148,5 @@ mod tests {
 
         assert!(!source.exists());
         assert_eq!(fs::read(destination).unwrap(), b"new");
-    }
-
-    #[test]
-    fn durable_remove_is_idempotent() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.json");
-        fs::write(&path, b"state").unwrap();
-
-        durable_remove(&path).unwrap();
-        durable_remove(&path).unwrap();
-
-        assert!(!path.exists());
     }
 }

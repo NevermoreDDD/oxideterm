@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "Show controls",
+      "hide_controls": "Hide controls"
+    },
+    "autosuggest": {
+      "matches": "{{count}} matches",
+      "navigation_hint": "{{select}} select · {{run}} run · Click fill",
+      "dismiss_hint": "{{dismiss}} close · {{remove}} remove"
+    },
     "processing_failed": "Terminal processing stopped. Reconnect this session to continue.",
     "local_terminal": "Local Terminal",
     "tmux": {
@@ -68,6 +77,7 @@
       "source_quick_command": "quick"
     },
     "sender": {
+      "group_hint": "Saved connection groups target all matching terminal windows. Interactive sync isolation does not change these explicit targets.",
       "task": "Sender",
       "placeholder": "Enter commands or hexadecimal bytes...",
       "show": "Show command sender",
@@ -104,10 +114,18 @@
       "error_busy": "A target is used by another sender"
     },
     "broadcast": {
-      "groups": "Broadcast groups",
+      "members_hint": "Select specific terminals, then enable sync. New terminals do not join automatically. Remove a terminal from its current group before moving it.",
+      "isolate_member": "Isolate",
+      "resume_member": "Resume sync",
+      "pause_group": "Pause sync",
+      "start_group": "Enable sync",
+      "sync_isolated": "Isolated",
+      "sync_disabled": "Paused",
+      "sync_enabled": "Syncing",
+      "groups": "Sync groups",
       "create_group": "New group",
       "no_groups": "No named groups yet",
-      "temporary_group": "Temporary selection",
+      "temporary_group": "Temporary sync group",
       "group_name_placeholder": "Group name",
       "group_members": "Group members",
       "unsaved_target": "Not saved",
@@ -121,6 +139,11 @@
     "typeLocal": "Local",
     "typeSsh": "SSH",
     "paste": {
+      "edit": "Edit",
+      "edit_title": "Edit before pasting",
+      "strip_fence": "Remove code block markers",
+      "undo": "Undo",
+      "redo": "Redo",
       "title": "Multiple lines detected ({{count}} lines)",
       "more_lines": "... {{count}} more lines",
       "confirm": "Confirm",
@@ -154,6 +177,12 @@
       "clear_screen": "Clear screen"
     },
     "modem": {
+      "timeout": "The peer did not respond in time. Start its transfer program, then retry.",
+      "protocol_error": "The peer sent invalid or unexpected transfer data.",
+      "file_error": "Unable to read or write the transfer file. Check permissions and free space.",
+      "file_too_large": "The file exceeds this protocol's size limit.",
+      "buffer_overflow": "The peer sent more data than the transfer buffer can hold.",
+      "worker_stopped": "The transfer worker stopped unexpectedly. Please retry.",
       "binary_transfer": "Binary transfer",
       "xmodem_upload": "XMODEM upload",
       "xmodem_receive": "XMODEM receive",
@@ -312,7 +341,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Commands in \"{{name}}\" will be moved to the default group before deletion.",
+      "delete_group_description": "Commands in \"{{name}}\" will be moved to \"{{destination}}\" before this group is deleted.",
+      "reorder_groups": "Drag the handle to reorder groups",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",

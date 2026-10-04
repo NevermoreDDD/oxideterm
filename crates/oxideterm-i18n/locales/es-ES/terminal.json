@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "Mostrar controles",
+      "hide_controls": "Ocultar controles"
+    },
+    "autosuggest": {
+      "matches": "{{count}} coincidencias",
+      "navigation_hint": "{{select}} seleccionar · {{run}} ejecutar · Clic rellenar",
+      "dismiss_hint": "{{dismiss}} cerrar · {{remove}} eliminar"
+    },
     "processing_failed": "El procesamiento del terminal se ha detenido. Vuelve a conectar esta sesión para continuar.",
     "local_terminal": "Terminal local",
     "tmux": {
@@ -42,6 +51,11 @@
       "risk_configured": "configurado"
     },
     "paste": {
+      "edit": "Editar",
+      "edit_title": "Editar antes de pegar",
+      "strip_fence": "Quitar marcadores de bloque de código",
+      "undo": "Deshacer",
+      "redo": "Rehacer",
       "title": "Múltiples líneas detectadas ({{count}} líneas)",
       "more_lines": "... {{count}} líneas más",
       "confirm": "Confirmar",
@@ -75,6 +89,12 @@
       "clear_screen": "Limpiar pantalla"
     },
     "modem": {
+      "timeout": "El equipo remoto no respondió a tiempo. Inicie su programa de transferencia y vuelva a intentarlo.",
+      "protocol_error": "El equipo remoto envió datos de transferencia no válidos o inesperados.",
+      "file_error": "No se puede leer o escribir el archivo. Compruebe los permisos y el espacio disponible.",
+      "file_too_large": "El archivo supera el límite de tamaño de este protocolo.",
+      "buffer_overflow": "El equipo remoto envió más datos de los que puede almacenar el búfer de transferencia.",
+      "worker_stopped": "El proceso de transferencia se detuvo inesperadamente. Vuelva a intentarlo.",
       "binary_transfer": "Transferencia binaria",
       "xmodem_upload": "Subir con XMODEM",
       "xmodem_receive": "Recibir con XMODEM",
@@ -259,7 +279,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Los comandos de «{{name}}» se moverán al grupo predeterminado antes de eliminarlo.",
+      "delete_group_description": "Los comandos de «{{name}}» se moverán a «{{destination}}» antes de eliminar este grupo.",
+      "reorder_groups": "Arrastra el asa para reordenar los grupos",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -469,6 +490,7 @@
       "execute": "Ejecutar"
     },
     "sender": {
+      "group_hint": "Los grupos de conexiones guardados seleccionan todos los terminales coincidentes. El aislamiento de la sincronización interactiva no cambia estos destinos explícitos.",
       "task": "Emisor",
       "placeholder": "Introduce comandos o bytes hexadecimales...",
       "show": "Mostrar emisor de comandos",
@@ -505,10 +527,18 @@
       "error_busy": "Otro emisor está usando un destino"
     },
     "broadcast": {
-      "groups": "Grupos de difusión",
+      "members_hint": "Selecciona terminales concretos y activa la sincronización. Los nuevos terminales no se unen automáticamente. Quita un terminal de su grupo actual antes de moverlo.",
+      "isolate_member": "Aislar",
+      "resume_member": "Reanudar",
+      "pause_group": "Pausar",
+      "start_group": "Activar sincronización",
+      "sync_isolated": "Aislado",
+      "sync_disabled": "En pausa",
+      "sync_enabled": "Sincronizando",
+      "groups": "Grupos de sincronización",
       "create_group": "Nuevo grupo",
       "no_groups": "Aún no hay grupos con nombre",
-      "temporary_group": "Selección temporal",
+      "temporary_group": "Grupo temporal",
       "group_name_placeholder": "Nombre del grupo",
       "group_members": "Miembros del grupo",
       "unsaved_target": "No guardada",

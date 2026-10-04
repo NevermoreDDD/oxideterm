@@ -1,6 +1,6 @@
 use gpui::{
-    Font, FontStyle, FontWeight, Hsla, IntoColor, Rgba, StrikethroughStyle, TextRun,
-    UnderlineStyle, px, rgb, rgba,
+    Font, FontStyle, FontWeight, Hsla, Rgba, StrikethroughStyle, TextRun, UnderlineStyle, px, rgb,
+    rgba,
 };
 use oxideterm_terminal::{TerminalCell, TerminalColor};
 
@@ -33,19 +33,11 @@ pub(crate) fn text_run_for_cell(
             weight,
             style,
         },
-        color: if link {
-            rgb(0x61afef).into_color()
-        } else {
-            color
-        },
+        color: if link { rgb(0x61afef).into() } else { color },
         background_color: None,
         underline: (cell.attrs.underline() || link).then_some(UnderlineStyle {
             thickness: px(1.0),
-            color: Some(if link {
-                rgb(0x61afef).into_color()
-            } else {
-                color
-            }),
+            color: Some(if link { rgb(0x61afef).into() } else { color }),
             wavy: false,
         }),
         strikethrough: cell.attrs.strikeout().then_some(StrikethroughStyle {
@@ -56,13 +48,17 @@ pub(crate) fn text_run_for_cell(
     }
 }
 
-pub(crate) fn marked_text_run(text: &str, metrics: &TerminalMetrics) -> TextRun {
-    let color = rgb(0xe6e8eb).into_color();
+pub(crate) fn marked_text_run(
+    text: &str,
+    theme: &TerminalUiTheme,
+    metrics: &TerminalMetrics,
+) -> TextRun {
+    let color = rgb(theme.foreground).into();
     TextRun {
         len: text.len(),
         font: metrics.font.clone(),
         color,
-        background_color: Some(rgba(0x528bff33).into_color()),
+        background_color: Some(rgb(theme.background).into()),
         underline: Some(UnderlineStyle {
             thickness: px(1.0),
             color: Some(color),
@@ -81,7 +77,7 @@ pub(crate) fn ghost_text_run(
     TextRun {
         len: text.len(),
         font: metrics.font.clone(),
-        color: rgba((theme.foreground << 8) | 0x66).into_color(),
+        color: rgba((theme.foreground << 8) | 0x66).into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -97,7 +93,7 @@ pub(crate) fn timestamp_text_run(
     TextRun {
         len: text.len(),
         font: metrics.font.clone(),
-        color: rgba((theme.header_foreground << 8) | 0xcc).into_color(),
+        color: rgba((theme.header_foreground << 8) | 0xcc).into(),
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -194,16 +190,16 @@ pub(crate) fn powerline_separator(ch: char) -> Option<PowerlineSeparator> {
 }
 
 pub(crate) fn to_rgba(color: TerminalColor) -> Rgba {
-    Rgba::new(
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-        1.0,
-    )
+    Rgba {
+        r: color.r as f32 / 255.0,
+        g: color.g as f32 / 255.0,
+        b: color.b as f32 / 255.0,
+        a: 1.0,
+    }
 }
 
 pub(crate) fn to_hsla(color: TerminalColor) -> Hsla {
-    to_rgba(color).into_color()
+    to_rgba(color).into()
 }
 
 pub(crate) fn terminal_background(theme: &TerminalUiTheme) -> Hsla {

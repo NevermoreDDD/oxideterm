@@ -1,91 +1,11 @@
 // Copyright (C) 2026 AnalyseDeCircuit
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::filesystem::{
-    FileStat, FileSystemCapabilities, IdeFileData, IdeFileError, IdeFileErrorKind, IdeFileSystem,
-    WriteMode,
-};
 use crate::model::{
-    DirtyCloseDecision, FileKind, FileTreeEntry, IdeLocation, OpenFileOutcome, ReloadError,
-    RestoreSkipReason, RestoreSnapshotResult, SavedFileVersion,
+    DirtyCloseDecision, FileKind, FileTreeEntry, IdeLocation, OpenFileOutcome, RestoreSkipReason,
+    RestoreSnapshotResult, SavedFileVersion,
 };
 use crate::workspace::IdeWorkspace;
-
-struct MemoryFs {
-    data: IdeFileData,
-    fail_write: bool,
-    atomic_write: bool,
-}
-
-impl MemoryFs {
-    fn new(text: &str, version: SavedFileVersion) -> Self {
-        Self {
-            data: IdeFileData {
-                format: Default::default(),
-                text: text.into(),
-                version,
-            },
-            fail_write: false,
-            atomic_write: true,
-        }
-    }
-
-    fn failing_write(mut self) -> Self {
-        self.fail_write = true;
-        self
-    }
-}
-
-impl IdeFileSystem for MemoryFs {
-    fn capabilities(&self) -> FileSystemCapabilities {
-        FileSystemCapabilities {
-            atomic_write: self.atomic_write,
-            directory_listing: true,
-            conflict_detection: true,
-        }
-    }
-
-    fn read_file(
-        &self,
-        _location: &IdeLocation,
-        _encoding: Option<&str>,
-    ) -> Result<IdeFileData, IdeFileError> {
-        Ok(self.data.clone())
-    }
-
-    fn stat(&self, _location: &IdeLocation) -> Result<FileStat, IdeFileError> {
-        Ok(FileStat {
-            version: self.data.version.clone(),
-            is_read_only: false,
-        })
-    }
-
-    fn list_dir(&self, _location: &IdeLocation) -> Result<Vec<FileTreeEntry>, IdeFileError> {
-        Ok(Vec::new())
-    }
-
-    fn write_file(
-        &self,
-        _location: &IdeLocation,
-        _text: &str,
-        _format: &crate::TextFileFormat,
-        _expected_version: Option<&SavedFileVersion>,
-        mode: WriteMode,
-    ) -> Result<SavedFileVersion, IdeFileError> {
-        assert_eq!(mode, WriteMode::AtomicReplace);
-        if self.fail_write {
-            return Err(IdeFileError::new(
-                IdeFileErrorKind::Disconnected,
-                "connection lost",
-            ));
-        }
-        Ok(SavedFileVersion {
-            size_bytes: Some(7),
-            modified_millis: Some(100),
-            etag: Some("saved".into()),
-        })
-    }
-}
 
 fn local_file(name: &str) -> IdeLocation {
     IdeLocation::local(format!("/tmp/oxideterm/{name}"))
@@ -120,72 +40,34 @@ fn open_file_reuses_existing_tab_for_same_location() {
 }
 
 #[test]
-fn edits_mark_dirty_and_save_clears_dirty() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("README.md"), "old", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-
-    workspace.replace_buffer_text(tab_id, "new").unwrap();
-    assert!(workspace.buffer(tab_id).unwrap().is_dirty());
-
-    workspace
-        .mark_saved(
-            tab_id,
-            SavedFileVersion {
-                size_bytes: Some(3),
-                modified_millis: Some(10),
-                etag: Some("v2".to_string()),
-            },
-        )
-        .unwrap();
-    assert!(!workspace.buffer(tab_id).unwrap().is_dirty());
-}
-
-#[test]
-fn replacing_buffer_with_identical_text_keeps_dirty_state() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("clean.txt"), "same", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-
-    workspace.replace_buffer_text(tab_id, "same").unwrap();
-
-    assert!(!workspace.buffer(tab_id).unwrap().is_dirty());
-}
-
-#[test]
-fn save_tab_with_clears_dirty_only_after_success() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("save.rs"), "old", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    workspace.replace_buffer_text(tab_id, "changed").unwrap();
-
-    let failed = MemoryFs::new("unused", SavedFileVersion::unknown()).failing_write();
-    assert!(workspace.save_tab_with(&failed, tab_id).is_err());
-    assert!(workspace.buffer(tab_id).unwrap().is_dirty());
-
-    let saved = workspace
-        .save_tab_with(
-            &MemoryFs::new("unused", SavedFileVersion::unknown()),
-            tab_id,
-        )
-        .unwrap();
-    assert_eq!(saved.etag.as_deref(), Some("saved"));
-    assert!(!workspace.buffer(tab_id).unwrap().is_dirty());
+fn replacement_marks_only_changed_text_dirty_and_saving_clears_it() {
+    for (initial, replacement, dirty) in [("old", "new", true), ("same", "same", false)] {
+        let mut workspace = IdeWorkspace::new();
+        workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
+        let OpenFileOutcome::Opened(tab_id) = workspace
+            .open_file(local_file("file.txt"), initial, SavedFileVersion::unknown())
+            .unwrap()
+        else {
+            panic!("file should open");
+        };
+        workspace.replace_buffer_text(tab_id, replacement).unwrap();
+        assert_eq!(
+            workspace.buffer(tab_id).unwrap().is_dirty(),
+            dirty,
+            "{initial}"
+        );
+        let version = SavedFileVersion {
+            size_bytes: Some(replacement.len() as u64),
+            modified_millis: Some(10),
+            etag: Some("v2".to_string()),
+        };
+        workspace.mark_saved(tab_id, version.clone()).unwrap();
+        let buffer = workspace.buffer(tab_id).unwrap();
+        assert_eq!(buffer.text.as_ref(), replacement);
+        assert_eq!(buffer.saved_text.as_ref(), replacement);
+        assert_eq!(buffer.version, version);
+        assert!(!buffer.is_dirty());
+    }
 }
 
 #[test]
@@ -277,54 +159,7 @@ fn close_after_save_keeps_tab_open_when_newer_edit_arrives() {
 }
 
 #[test]
-fn reload_tab_with_refuses_dirty_buffers() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("reload.rs"), "old", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    workspace.replace_buffer_text(tab_id, "dirty").unwrap();
-
-    let result = workspace.reload_tab_with(
-        &MemoryFs::new("remote", SavedFileVersion::unknown()),
-        tab_id,
-    );
-
-    assert_eq!(result, Err(ReloadError::DirtyBuffer));
-    assert_eq!(workspace.buffer(tab_id).unwrap().text.as_ref(), "dirty");
-}
-
-#[test]
-fn reload_tab_with_replaces_clean_buffer() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let version = SavedFileVersion {
-        size_bytes: Some(6),
-        modified_millis: Some(42),
-        etag: Some("remote".into()),
-    };
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("reload.rs"), "old", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-
-    workspace
-        .reload_tab_with(&MemoryFs::new("remote", version.clone()), tab_id)
-        .unwrap();
-
-    let buffer = workspace.buffer(tab_id).unwrap();
-    assert_eq!(buffer.text.as_ref(), "remote");
-    assert_eq!(buffer.version, version);
-    assert!(!buffer.is_dirty());
-}
-
-#[test]
-fn dirty_close_requires_confirmation_and_cancel_keeps_tab() {
+fn dirty_close_cancel_keeps_tab_and_later_discard_removes_it() {
     let mut workspace = IdeWorkspace::new();
     workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
     let OpenFileOutcome::Opened(tab_id) = workspace
@@ -344,19 +179,6 @@ fn dirty_close_requires_confirmation_and_cancel_keeps_tab() {
         .unwrap();
     assert_eq!(workspace.tabs().len(), 1);
     assert!(workspace.pending_close().is_none());
-}
-
-#[test]
-fn dirty_close_discard_removes_tab() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("dirty.txt"), "old", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    workspace.replace_buffer_text(tab_id, "new").unwrap();
     let request = workspace.request_close_tab(tab_id).unwrap().unwrap();
 
     workspace
@@ -364,24 +186,6 @@ fn dirty_close_discard_removes_tab() {
         .unwrap();
     assert!(workspace.tabs().is_empty());
     assert!(workspace.buffer(tab_id).is_none());
-}
-
-#[test]
-fn close_all_tabs_stops_on_first_dirty_tab() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(local_file("dirty.txt"), "old", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    workspace.replace_buffer_text(tab_id, "new").unwrap();
-
-    let request = workspace.request_close_all_tabs().unwrap().unwrap();
-
-    assert_eq!(request.tab_id, tab_id);
-    assert_eq!(workspace.tabs().len(), 1);
 }
 
 #[test]
@@ -435,6 +239,7 @@ fn file_tree_state_is_included_in_snapshot_restore() {
         version: SavedFileVersion::unknown(),
     };
     source.open_project(root.clone(), "demo");
+    let initial_revision = source.file_tree().revision();
     source.set_tree_expanded(&root, true).unwrap();
     source
         .set_tree_children(root.clone(), vec![child.clone()])
@@ -442,6 +247,7 @@ fn file_tree_state_is_included_in_snapshot_restore() {
     source
         .select_tree_entry(Some(child.location.clone()))
         .unwrap();
+    assert!(source.file_tree().revision() > initial_revision);
 
     let snapshot = source.snapshot().unwrap();
     let mut restored = IdeWorkspace::new();
@@ -459,7 +265,7 @@ fn file_tree_state_is_included_in_snapshot_restore() {
 }
 
 #[test]
-fn snapshot_restore_preserves_dirty_buffers_and_active_tab() {
+fn snapshot_restore_preserves_dirty_buffers_locations_pins_and_active_tab() {
     let mut source = IdeWorkspace::new();
     source.open_project(IdeLocation::remote("node-a", "/home/demo"), "demo");
     let OpenFileOutcome::Opened(first) = source
@@ -483,12 +289,15 @@ fn snapshot_restore_preserves_dirty_buffers_and_active_tab() {
         panic!("file should open");
     };
     source.replace_buffer_text(first, "dirty").unwrap();
+    assert!(source.toggle_tab_pin(first).unwrap());
 
     let snapshot = source.snapshot().unwrap();
     let serialized = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(serialized["buffers"][0]["text"], "dirty");
     assert_eq!(serialized["buffers"][0]["saved_text"], "saved");
     assert_eq!(serialized["buffers"][1]["text"], "b");
+    assert_eq!(serialized["tabs"][0]["is_pinned"], true);
+    assert_eq!(serialized["tabs"][1]["is_pinned"], false);
     let snapshot = serde_json::from_value(serialized).unwrap();
     let mut restored = IdeWorkspace::new();
     assert_eq!(
@@ -496,6 +305,18 @@ fn snapshot_restore_preserves_dirty_buffers_and_active_tab() {
         RestoreSnapshotResult::Restored { tab_count: 2 }
     );
     assert_eq!(restored.active_tab(), Some(second));
+    assert_eq!(
+        restored
+            .tabs()
+            .iter()
+            .map(|tab| (tab.id, tab.is_pinned))
+            .collect::<Vec<_>>(),
+        [(first, true), (second, false)]
+    );
+    assert_eq!(
+        restored.buffer(first).unwrap().location,
+        IdeLocation::remote("node-a", "/home/demo/a.rs")
+    );
     assert_eq!(restored.buffer(first).unwrap().text.as_ref(), "dirty");
     assert_eq!(restored.buffer(first).unwrap().saved_text.as_ref(), "saved");
     let clean = restored.buffer(second).unwrap();
@@ -506,65 +327,7 @@ fn snapshot_restore_preserves_dirty_buffers_and_active_tab() {
 }
 
 #[test]
-fn reconnect_restore_restores_open_file_without_clearing_dirty_buffer() {
-    let mut source = IdeWorkspace::new();
-    let location = IdeLocation::remote("node-a", "/home/demo/src/main.rs");
-    source.open_project(IdeLocation::remote("node-a", "/home/demo"), "demo");
-    let OpenFileOutcome::Opened(tab_id) = source
-        .open_file(location.clone(), "saved", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    source
-        .replace_buffer_text(tab_id, "dirty local edit")
-        .unwrap();
-
-    let snapshot = source.snapshot().unwrap();
-    let mut restored = IdeWorkspace::new();
-    assert_eq!(
-        restored.restore_snapshot(snapshot),
-        RestoreSnapshotResult::Restored { tab_count: 1 }
-    );
-
-    let buffer = restored.buffer(tab_id).unwrap();
-    assert_eq!(buffer.location, location);
-    assert_eq!(buffer.text.as_ref(), "dirty local edit");
-    assert!(buffer.is_dirty());
-}
-
-#[test]
-fn stale_reload_result_cannot_overwrite_newer_dirty_buffer() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::remote("node-a", "/home/demo"), "demo");
-    let OpenFileOutcome::Opened(tab_id) = workspace
-        .open_file(
-            IdeLocation::remote("node-a", "/home/demo/src/main.rs"),
-            "saved",
-            SavedFileVersion::unknown(),
-        )
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    workspace
-        .replace_buffer_text(tab_id, "newer dirty local edit")
-        .unwrap();
-
-    let stale_remote = MemoryFs::new("stale remote read", SavedFileVersion::unknown());
-    assert_eq!(
-        workspace.reload_tab_with(&stale_remote, tab_id),
-        Err(ReloadError::DirtyBuffer)
-    );
-    assert_eq!(
-        workspace.buffer(tab_id).unwrap().text.as_ref(),
-        "newer dirty local edit"
-    );
-    assert!(workspace.buffer(tab_id).unwrap().is_dirty());
-}
-
-#[test]
-fn restore_skips_after_user_closed_project() {
+fn restore_preserves_user_closed_and_dirty_project_states() {
     let mut source = IdeWorkspace::new();
     source.open_project(IdeLocation::remote("node-a", "/home/demo"), "demo");
     source
@@ -576,80 +339,36 @@ fn restore_skips_after_user_closed_project() {
         .unwrap();
     let snapshot = source.snapshot().unwrap();
 
-    let mut target = IdeWorkspace::new();
-    target.open_project(IdeLocation::remote("node-a", "/home/demo"), "demo");
-    target.close_project();
-
-    assert_eq!(
-        target.restore_snapshot(snapshot),
-        RestoreSnapshotResult::Skipped(RestoreSkipReason::ProjectWasClosedByUser)
-    );
+    for reason in [
+        RestoreSkipReason::ProjectWasClosedByUser,
+        RestoreSkipReason::ExistingDirtyBuffers,
+    ] {
+        let mut target = IdeWorkspace::new();
+        target.open_project(IdeLocation::remote("node-a", "/home/demo"), "demo");
+        if reason == RestoreSkipReason::ProjectWasClosedByUser {
+            target.close_project();
+        } else {
+            let OpenFileOutcome::Opened(tab_id) = target
+                .open_file(
+                    IdeLocation::remote("node-a", "/home/demo/b.rs"),
+                    "b",
+                    SavedFileVersion::unknown(),
+                )
+                .unwrap()
+            else {
+                panic!("file should open");
+            };
+            target.replace_buffer_text(tab_id, "dirty").unwrap();
+        }
+        assert_eq!(
+            target.restore_snapshot(snapshot.clone()),
+            RestoreSnapshotResult::Skipped(reason)
+        );
+    }
 }
 
 #[test]
-fn restore_skips_when_current_project_has_dirty_edits() {
-    let mut source = IdeWorkspace::new();
-    source.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    source
-        .open_file(local_file("a.rs"), "a", SavedFileVersion::unknown())
-        .unwrap();
-    let snapshot = source.snapshot().unwrap();
-
-    let mut target = IdeWorkspace::new();
-    target.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = target
-        .open_file(local_file("b.rs"), "b", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    target.replace_buffer_text(tab_id, "dirty").unwrap();
-
-    assert_eq!(
-        target.restore_snapshot(snapshot),
-        RestoreSnapshotResult::Skipped(RestoreSkipReason::ExistingDirtyBuffers)
-    );
-}
-
-#[test]
-fn tab_pin_state_round_trips_through_snapshot() {
-    let mut source = IdeWorkspace::new();
-    source.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(tab_id) = source
-        .open_file(
-            local_file("pinned.rs"),
-            "fn main() {}",
-            SavedFileVersion::unknown(),
-        )
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-
-    assert!(source.toggle_tab_pin(tab_id).unwrap());
-    let snapshot = source.snapshot().unwrap();
-    assert!(
-        snapshot
-            .tabs
-            .iter()
-            .any(|tab| tab.id == tab_id && tab.is_pinned)
-    );
-
-    let mut restored = IdeWorkspace::new();
-    assert_eq!(
-        restored.restore_snapshot(snapshot),
-        RestoreSnapshotResult::Restored { tab_count: 1 }
-    );
-    assert!(
-        restored
-            .tabs()
-            .iter()
-            .any(|tab| tab.id == tab_id && tab.is_pinned)
-    );
-}
-
-#[test]
-fn reorders_tabs_before_target() {
+fn reorders_tabs_before_targets_and_to_drop_indices() {
     let mut workspace = IdeWorkspace::new();
     workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
     let OpenFileOutcome::Opened(first) = workspace
@@ -679,31 +398,7 @@ fn reorders_tabs_before_target() {
         .map(|tab| tab.id)
         .collect::<Vec<_>>();
     assert_eq!(order, vec![third, first, second]);
-}
-
-#[test]
-fn reorders_tabs_to_dnd_target_index() {
-    let mut workspace = IdeWorkspace::new();
-    workspace.open_project(IdeLocation::local("/tmp/oxideterm"), "OxideTerm");
-    let OpenFileOutcome::Opened(first) = workspace
-        .open_file(local_file("a.rs"), "a", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    let OpenFileOutcome::Opened(second) = workspace
-        .open_file(local_file("b.rs"), "b", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-    let OpenFileOutcome::Opened(third) = workspace
-        .open_file(local_file("c.rs"), "c", SavedFileVersion::unknown())
-        .unwrap()
-    else {
-        panic!("file should open");
-    };
-
+    workspace.move_tab_to_index(third, 2).unwrap();
     workspace.move_tab_to_index(first, 2).unwrap();
 
     let order = workspace

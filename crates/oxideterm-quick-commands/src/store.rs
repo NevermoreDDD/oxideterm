@@ -44,10 +44,12 @@ thread_local! {
 }
 
 /// An opaque copy of the exact Quick Commands file state used for rollback.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct QuickCommandsCheckpoint {
     state: QuickCommandsCheckpointState,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 enum QuickCommandsCheckpointState {
     Missing,
     Present(Vec<u8>),
@@ -73,7 +75,131 @@ pub fn load_snapshot(settings_path: &Path) -> Result<QuickCommandsSnapshot, Stri
 
 pub fn save_snapshot(settings_path: &Path, snapshot: &QuickCommandsSnapshot) -> Result<(), String> {
     let path = quick_commands_path(settings_path);
-    save_snapshot_to_path(&path, snapshot)
+    let previous = load_snapshot_from_path(&path).ok().flatten();
+    let mut audit = quick_command_audit("quick_command_configuration_save");
+    audit.summary(&quick_command_change_summary(previous.as_ref(), snapshot));
+    let result = save_snapshot_to_path(&path, snapshot);
+    audit.finish(
+        match &result {
+            Ok(_)
+                if previous
+                    .as_ref()
+                    .is_some_and(|previous| quick_commands_unchanged(previous, snapshot)) =>
+            {
+                oxideterm_audit::AuditOutcome::Unchanged
+            }
+            Ok(_) => oxideterm_audit::AuditOutcome::Succeeded,
+            Err(_) => oxideterm_audit::AuditOutcome::Failed,
+        },
+        oxideterm_audit::AuditEvidence::Protocol,
+        None,
+        None,
+    );
+    result
+}
+
+fn quick_command_audit(action: &str) -> oxideterm_audit::AuditOperation {
+    if oxideterm_audit::AuditContext::current_request()
+        .as_ref()
+        .is_some_and(|context| context.protocol.as_deref() == Some("cloud_sync_apply"))
+    {
+        // The cross-store transaction owns the result until commit or rollback.
+        oxideterm_audit::AuditOperation::in_context(
+            None,
+            oxideterm_audit::AuditCategory::Configuration,
+            action,
+            None,
+        )
+    } else {
+        oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Configuration,
+            action,
+            None,
+            None,
+        )
+    }
+}
+
+fn quick_command_change_summary(
+    previous: Option<&QuickCommandsSnapshot>,
+    current: &QuickCommandsSnapshot,
+) -> String {
+    let Some(previous) = previous else {
+        return format!(
+            "commands_created={},categories_created={}",
+            current.commands.len(),
+            current.categories.len()
+        );
+    };
+    let created = current
+        .commands
+        .iter()
+        .filter(|command| !previous.commands.iter().any(|old| old.id == command.id))
+        .count();
+    let edited = current
+        .commands
+        .iter()
+        .filter(|command| {
+            previous
+                .commands
+                .iter()
+                .any(|old| old.id == command.id && !quick_command_definition_eq(old, command))
+        })
+        .count();
+    let deleted = previous
+        .commands
+        .iter()
+        .filter(|command| !current.commands.iter().any(|next| next.id == command.id))
+        .count();
+    let categories_created = current
+        .categories
+        .iter()
+        .filter(|category| !previous.categories.iter().any(|old| old.id == category.id))
+        .count();
+    let categories_edited = current
+        .categories
+        .iter()
+        .filter(|category| {
+            previous
+                .categories
+                .iter()
+                .any(|old| old.id == category.id && old != *category)
+        })
+        .count();
+    let categories_deleted = previous
+        .categories
+        .iter()
+        .filter(|category| !current.categories.iter().any(|next| next.id == category.id))
+        .count();
+    format!(
+        "commands_created={created},commands_edited={edited},commands_deleted={deleted},categories_created={categories_created},categories_edited={categories_edited},categories_deleted={categories_deleted}"
+    )
+}
+
+fn quick_commands_unchanged(
+    previous: &QuickCommandsSnapshot,
+    current: &QuickCommandsSnapshot,
+) -> bool {
+    previous.categories == current.categories
+        && previous.commands.len() == current.commands.len()
+        && current.commands.iter().all(|command| {
+            previous
+                .commands
+                .iter()
+                .any(|old| old.id == command.id && quick_command_definition_eq(old, command))
+        })
+}
+
+fn quick_command_definition_eq(left: &QuickCommand, right: &QuickCommand) -> bool {
+    left.id == right.id
+        && left.name == right.name
+        && left.command == right.command
+        && left.category == right.category
+        && left.description == right.description
+        && left.parameters == right.parameters
+        && left.availability == right.availability
+        && left.confirmation == right.confirmation
+        && left.sort_order == right.sort_order
 }
 
 /// Captures whether the Quick Commands file exists and its complete contents.
@@ -115,6 +241,34 @@ pub fn restore_checkpoint(
 }
 
 pub fn apply_snapshot_json(
+    settings_path: &Path,
+    snapshot_json: &str,
+    strategy: QuickCommandImportStrategy,
+) -> QuickCommandImportResult {
+    let mut audit = quick_command_audit("quick_command_configuration_import");
+    let result = apply_snapshot_json_inner(settings_path, snapshot_json, strategy);
+    audit.summary(&format!(
+        "imported={},skipped={},errors={}",
+        result.imported,
+        result.skipped,
+        result.errors.len()
+    ));
+    audit.finish(
+        if !result.errors.is_empty() {
+            oxideterm_audit::AuditOutcome::Failed
+        } else if result.imported == 0 {
+            oxideterm_audit::AuditOutcome::Unchanged
+        } else {
+            oxideterm_audit::AuditOutcome::Succeeded
+        },
+        oxideterm_audit::AuditEvidence::Protocol,
+        None,
+        None,
+    );
+    result
+}
+
+fn apply_snapshot_json_inner(
     settings_path: &Path,
     snapshot_json: &str,
     strategy: QuickCommandImportStrategy,
@@ -883,17 +1037,6 @@ mod tests {
     }
 
     #[test]
-    fn export_uses_defaults_when_file_is_missing() {
-        let settings_path = temp_settings_path("defaults");
-        let json = export_snapshot_json(&settings_path).unwrap();
-        let snapshot = serde_json::from_str::<QuickCommandsSnapshot>(&json).unwrap();
-
-        assert_eq!(snapshot.version, QUICK_COMMANDS_SCHEMA_VERSION);
-        assert!(!snapshot.categories.is_empty());
-        assert!(!snapshot.commands.is_empty());
-    }
-
-    #[test]
     fn apply_snapshot_persists_imported_commands() {
         let settings_path = temp_settings_path("apply");
         let incoming = QuickCommandsSnapshot {
@@ -911,10 +1054,51 @@ mod tests {
         let json = serde_json::to_string(&incoming).unwrap();
 
         let result = apply_snapshot_json(&settings_path, &json, QuickCommandImportStrategy::Merge);
-        let exported = export_snapshot_json(&settings_path).unwrap();
+        let loaded = load_snapshot(&settings_path).unwrap();
 
-        assert!(result.imported > 0);
-        assert!(exported.contains("Ops Uptime"));
+        assert_eq!(result.imported, 1);
+        assert!(result.errors.is_empty());
+        let imported = loaded
+            .commands
+            .iter()
+            .find(|command| command.id == "ops-uptime")
+            .unwrap();
+        assert_eq!(
+            (
+                imported.name.as_str(),
+                imported.command.as_str(),
+                imported.category.as_str()
+            ),
+            ("Ops Uptime", "uptime", "ops")
+        );
+    }
+
+    #[test]
+    fn change_summary_counts_edits_without_command_body() {
+        let previous = QuickCommandsSnapshot {
+            version: QUICK_COMMANDS_SCHEMA_VERSION,
+            categories: vec![quick_category("ops", "Ops", QuickCommandIcon::Zap, 0)],
+            commands: vec![quick_command(
+                "ops-check",
+                "Check",
+                "echo safe",
+                "ops",
+                "Check",
+            )],
+            updated_at: 1,
+        };
+        let mut current = previous.clone();
+        current.updated_at = 2;
+        current.commands[0].updated_at = 2;
+        assert!(quick_commands_unchanged(&previous, &current));
+        current.commands[0].command = "printf token-for-test".to_string();
+        assert!(!quick_commands_unchanged(&previous, &current));
+        let summary = quick_command_change_summary(Some(&previous), &current);
+        assert_eq!(
+            summary,
+            "commands_created=0,commands_edited=1,commands_deleted=0,categories_created=0,categories_edited=0,categories_deleted=0"
+        );
+        assert!(!summary.contains("token-for-test"));
     }
 
     #[test]
@@ -969,104 +1153,97 @@ mod tests {
     }
 
     #[test]
-    fn failed_atomic_save_preserves_existing_file() {
-        let settings_path = temp_settings_path("atomic-existing");
-        let path = quick_commands_path(&settings_path);
-        let mut snapshot = default_snapshot();
-        save_snapshot(&settings_path, &snapshot).unwrap();
-        let previous = fs::read(&path).unwrap();
-        snapshot.updated_at = snapshot.updated_at.saturating_add(1);
-        inject_atomic_replace_failure();
+    fn failed_atomic_save_preserves_present_and_missing_file_states() {
+        for (name, existing) in [("atomic-existing", true), ("atomic-missing", false)] {
+            let settings_path = temp_settings_path(name);
+            let path = quick_commands_path(&settings_path);
+            let mut snapshot = default_snapshot();
+            let previous = if existing {
+                save_snapshot(&settings_path, &snapshot).unwrap();
+                Some(fs::read(&path).unwrap())
+            } else {
+                None
+            };
+            snapshot.updated_at = snapshot.updated_at.saturating_add(1);
+            inject_atomic_replace_failure();
 
-        assert!(save_snapshot(&settings_path, &snapshot).is_err());
-        assert_eq!(fs::read(&path).unwrap(), previous);
-        assert_no_temporary_files(path.parent().unwrap());
+            assert!(
+                save_snapshot(&settings_path, &snapshot).is_err(),
+                "existing={existing}"
+            );
+            match previous {
+                Some(bytes) => assert_eq!(fs::read(&path).unwrap(), bytes),
+                None => assert!(!path.exists()),
+            }
+            assert_no_temporary_files(path.parent().unwrap());
+        }
     }
 
     #[test]
-    fn failed_atomic_save_preserves_missing_file_state() {
-        let settings_path = temp_settings_path("atomic-missing");
-        let path = quick_commands_path(&settings_path);
-        inject_atomic_replace_failure();
-
-        assert!(save_snapshot(&settings_path, &default_snapshot()).is_err());
-        assert!(!path.exists());
-        assert_no_temporary_files(path.parent().unwrap());
+    fn checkpoint_restores_exact_present_or_missing_file_state() {
+        for (name, existing) in [("checkpoint-present", true), ("checkpoint-missing", false)] {
+            let settings_path = temp_settings_path(name);
+            let path = quick_commands_path(&settings_path);
+            let original = b"{ not a parsed snapshot, but exact persisted state }";
+            if existing {
+                fs::write(&path, original).unwrap();
+            }
+            let checkpoint = capture_checkpoint(&settings_path).unwrap();
+            if existing {
+                fs::write(&path, b"replacement").unwrap();
+            } else {
+                save_snapshot(&settings_path, &default_snapshot()).unwrap();
+            }
+            restore_checkpoint(&settings_path, &checkpoint).unwrap();
+            if existing {
+                assert_eq!(fs::read(&path).unwrap(), original);
+                fs::remove_dir_all(path.parent().unwrap()).unwrap();
+                restore_checkpoint(&settings_path, &checkpoint).unwrap();
+                assert_eq!(fs::read(&path).unwrap(), original);
+            } else {
+                assert!(!path.exists());
+            }
+        }
     }
 
     #[test]
-    fn checkpoint_restores_exact_present_file_contents() {
-        let settings_path = temp_settings_path("checkpoint-present");
-        let path = quick_commands_path(&settings_path);
-        let original = b"{ not a parsed snapshot, but exact persisted state }";
-        fs::write(&path, original).unwrap();
-        let checkpoint = capture_checkpoint(&settings_path).unwrap();
-        fs::write(&path, b"replacement").unwrap();
+    fn failed_checkpoint_restore_preserves_current_file_for_both_states() {
+        for (name, existing) in [
+            ("checkpoint-present-failure", true),
+            ("checkpoint-missing-failure", false),
+        ] {
+            let settings_path = temp_settings_path(name);
+            let path = quick_commands_path(&settings_path);
+            if existing {
+                fs::write(&path, b"checkpoint").unwrap();
+            }
+            let checkpoint = capture_checkpoint(&settings_path).unwrap();
+            let current = b"current state";
+            fs::write(&path, current).unwrap();
+            if existing {
+                inject_atomic_replace_failure();
+            } else {
+                inject_checkpoint_removal_failure();
+            }
 
-        restore_checkpoint(&settings_path, &checkpoint).unwrap();
-
-        assert_eq!(fs::read(&path).unwrap(), original);
+            assert!(
+                restore_checkpoint(&settings_path, &checkpoint).is_err(),
+                "existing={existing}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), current, "existing={existing}");
+            assert_no_temporary_files(path.parent().unwrap());
+        }
     }
 
     #[test]
-    fn present_checkpoint_restore_recreates_removed_parent_directory() {
-        let settings_path = temp_settings_path("checkpoint-parent");
-        let path = quick_commands_path(&settings_path);
-        let original = b"checkpoint contents";
-        fs::write(&path, original).unwrap();
-        let checkpoint = capture_checkpoint(&settings_path).unwrap();
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
-
-        restore_checkpoint(&settings_path, &checkpoint).unwrap();
-
-        assert_eq!(fs::read(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn checkpoint_restores_missing_file_state() {
-        let settings_path = temp_settings_path("checkpoint-missing");
-        let path = quick_commands_path(&settings_path);
-        let checkpoint = capture_checkpoint(&settings_path).unwrap();
-        save_snapshot(&settings_path, &default_snapshot()).unwrap();
-
-        restore_checkpoint(&settings_path, &checkpoint).unwrap();
-
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn failed_present_checkpoint_restore_preserves_current_file() {
-        let settings_path = temp_settings_path("checkpoint-present-failure");
-        let path = quick_commands_path(&settings_path);
-        fs::write(&path, b"checkpoint").unwrap();
-        let checkpoint = capture_checkpoint(&settings_path).unwrap();
-        let current = b"current state";
-        fs::write(&path, current).unwrap();
-        inject_atomic_replace_failure();
-
-        assert!(restore_checkpoint(&settings_path, &checkpoint).is_err());
-        assert_eq!(fs::read(&path).unwrap(), current);
-        assert_no_temporary_files(path.parent().unwrap());
-    }
-
-    #[test]
-    fn failed_missing_checkpoint_restore_preserves_current_file() {
-        let settings_path = temp_settings_path("checkpoint-missing-failure");
-        let path = quick_commands_path(&settings_path);
-        let checkpoint = capture_checkpoint(&settings_path).unwrap();
-        let current = b"current state";
-        fs::write(&path, current).unwrap();
-        inject_checkpoint_removal_failure();
-
-        assert!(restore_checkpoint(&settings_path, &checkpoint).is_err());
-        assert_eq!(fs::read(&path).unwrap(), current);
-    }
-
-    #[test]
-    fn rename_import_does_not_duplicate_builtin_roundtrip_records() {
+    fn missing_store_defaults_export_and_rename_import_without_duplicates() {
         let source_settings_path = temp_settings_path("roundtrip-source");
         let target_settings_path = temp_settings_path("roundtrip-target");
         let json = export_snapshot_json(&source_settings_path).unwrap();
+        let defaults = serde_json::from_str::<QuickCommandsSnapshot>(&json).unwrap();
+        assert_eq!(defaults.version, QUICK_COMMANDS_SCHEMA_VERSION);
+        assert!(!defaults.categories.is_empty());
+        assert!(!defaults.commands.is_empty());
 
         let result = apply_snapshot_json(
             &target_settings_path,

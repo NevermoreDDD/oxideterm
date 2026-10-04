@@ -436,9 +436,7 @@ fn rewrite_without_host_key(
                 .split(',')
                 .filter(|hostname| {
                     let canonical = KnownHostsStore::canonical_host_entry(hostname);
-                    !remove_hosts
-                        .iter()
-                        .any(|remove_host| canonical == *remove_host)
+                    !remove_hosts.contains(&canonical)
                 })
                 .collect::<Vec<_>>();
 
@@ -487,10 +485,21 @@ pub fn learn_host_key(
     server_public_key: &PublicKey,
 ) -> Result<(), SshTransportError> {
     let fingerprint = public_key_fingerprint(server_public_key);
-    let mut store = KnownHostsStore::new()?;
-    store.add_host(host, port, server_public_key)?;
-    accept_host_key_for_session(host, port, fingerprint);
-    Ok(())
+    let mut audit = oxideterm_audit::AuditOperation::begin(
+        oxideterm_audit::AuditCategory::Security,
+        "host_trust_add",
+        Some(host),
+        None,
+    );
+    audit.summary(&format!("port={port},fingerprint={fingerprint}"));
+    let audit_result = (|| {
+        let mut store = KnownHostsStore::new()?;
+        store.add_host(host, port, server_public_key)?;
+        accept_host_key_for_session(host, port, fingerprint);
+        Ok(())
+    })();
+    audit.result(&audit_result);
+    audit_result
 }
 
 pub fn remove_host_key(
@@ -499,7 +508,19 @@ pub fn remove_host_key(
     key_type: &str,
     expected_fingerprint: &str,
 ) -> Result<(), SshTransportError> {
-    KnownHostsStore::new()?.remove_host_key(host, port, key_type, expected_fingerprint)
+    let mut audit = oxideterm_audit::AuditOperation::begin(
+        oxideterm_audit::AuditCategory::Security,
+        "host_trust_remove",
+        Some(host),
+        None,
+    );
+    audit.summary(&format!(
+        "port={port},key_type={key_type},fingerprint={expected_fingerprint}"
+    ));
+    let audit_result =
+        (|| KnownHostsStore::new()?.remove_host_key(host, port, key_type, expected_fingerprint))();
+    audit.result(&audit_result);
+    audit_result
 }
 
 fn default_known_hosts_path() -> Result<PathBuf, SshTransportError> {
@@ -767,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn known_hosts_store_verifies_plain_alias_entry() {
+    fn known_hosts_store_verifies_alias_and_reports_changed_key() {
         let path = temp_known_hosts_path("alias");
         let key = sample_public_key();
         fs::write(
@@ -786,26 +807,7 @@ mod tests {
             store.verify("alias.example.com", 22, &key),
             HostKeyVerification::Verified
         );
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn known_hosts_store_reports_changed_for_same_key_type() {
-        let path = temp_known_hosts_path("changed");
-        let key = sample_public_key();
         let alternate = alternate_public_key();
-        fs::write(
-            &path,
-            format!(
-                "example.com {} {}\n",
-                public_key_type(&key),
-                key.public_key_base64()
-            ),
-        )
-        .unwrap();
-
-        let store = KnownHostsStore::with_path(path.clone()).unwrap();
-
         assert_eq!(
             store.verify("example.com", 22, &alternate),
             HostKeyVerification::Changed {
@@ -818,10 +820,10 @@ mod tests {
     }
 
     #[test]
-    fn accepted_host_key_cache_makes_preflight_verified_for_session() {
+    fn accepted_host_key_cache_verifies_key_and_preflight_before_network() {
         let _guard = CACHE_TEST_LOCK.lock().unwrap();
         let key = sample_public_key();
-        let host = "accepted-cache-only.example.com";
+        let host = "cached-before-dns.invalid";
         HOST_KEY_CACHE.clear();
 
         accept_host_key_for_session(host, 2222, public_key_fingerprint(&key));
@@ -830,19 +832,8 @@ mod tests {
             verify_host_key(host, 2222, &key).unwrap(),
             HostKeyVerification::Verified
         );
-        HOST_KEY_CACHE.clear();
-    }
-
-    #[test]
-    fn preflight_returns_verified_from_session_cache_before_network() {
-        let _guard = CACHE_TEST_LOCK.lock().unwrap();
-        let key = sample_public_key();
-        let host = "cached-before-dns.invalid";
-        HOST_KEY_CACHE.clear();
-        accept_host_key_for_session(host, 22, public_key_fingerprint(&key));
-
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let status = runtime.block_on(check_host_key(host, 22, 1));
+        let status = runtime.block_on(check_host_key(host, 2222, 1));
 
         assert_eq!(status, HostKeyStatus::Verified);
         HOST_KEY_CACHE.clear();

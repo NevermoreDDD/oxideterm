@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from conpty_runtime import stage_runtime as stage_conpty_runtime
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 APP_MANIFEST = ROOT_DIR / "crates" / "oxideterm-gpui-app" / "Cargo.toml"
@@ -38,6 +40,8 @@ MACOS_DMG_BACKGROUND_NAME = "unsigned-dmg-background.png"
 MACOS_DMG_DETACH_MAX_ATTEMPTS = 5
 MACOS_DMG_FORCE_DETACH_MAX_ATTEMPTS = 15
 MACOS_DMG_DETACH_RETRY_DELAY_SECONDS = 2
+MACOS_DMG_CREATE_MAX_ATTEMPTS = 3
+MACOS_DMG_CREATE_RETRY_DELAY_SECONDS = 2
 MACOS_RESOURCE_BUSY_EXIT_CODE = 16
 DIST_DIR = ROOT_DIR / "dist"
 BASE_APP_NAME = "OxideTerm"
@@ -126,6 +130,12 @@ RELEASE_DOCUMENTS = (
         "MICROSOFT-TERMINAL-LICENSE-MIT",
     ),
     (ROOT_DIR / "NOTICE", "NOTICE"),
+    (THIRD_PARTY_LICENSE_DIR / "DISTRO-ICONS-NOTICE.md", "DISTRO-ICONS-NOTICE.md"),
+    (THIRD_PARTY_LICENSE_DIR / "CC-BY-SA-3.0.txt", "CC-BY-SA-3.0.txt"),
+    (THIRD_PARTY_LICENSE_DIR / "CC-BY-SA-4.0.txt", "CC-BY-SA-4.0.txt"),
+    (THIRD_PARTY_LICENSE_DIR / "CC-BY-SA-2.5.txt", "CC-BY-SA-2.5.txt"),
+    (THIRD_PARTY_LICENSE_DIR / "CC-BY-4.0.txt", "CC-BY-4.0.txt"),
+    (THIRD_PARTY_LICENSE_DIR / "MATERIAL-ICON-THEME-LICENSE-MIT", "MATERIAL-ICON-THEME-LICENSE-MIT"),
     (ROOT_DIR / "README.md", "README.md"),
     (ROOT_DIR / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
     (
@@ -611,6 +621,7 @@ def copy_runtime_resources(dst: Path, target: str, *, encode_agent_binaries: boo
     copy_tree(helper_source, dst / HELPER_RESOURCE_DIR / target)
     if "windows" in target:
         stage_windows_x11_runtime(dst / WINDOWS_X11_RUNTIME_DIR, target)
+        stage_conpty_runtime(dst, target)
 
 
 def nsis_path(path: Path) -> str:
@@ -915,25 +926,52 @@ end run
 '''.strip()
 
 
+def create_macos_disk_image(
+    source: Path, destination: Path, volume_name: str, image_format: str
+) -> None:
+    command = [
+        "hdiutil", "create", "-volname", volume_name,
+        "-srcfolder", str(source), "-ov", "-format", image_format, str(destination),
+    ]
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    for attempt in range(1, MACOS_DMG_CREATE_MAX_ATTEMPTS + 1):
+        print("+", " ".join(command), flush=True)
+        try:
+            result = subprocess.run(
+                command, cwd=ROOT_DIR, env=env, check=True,
+                text=True, stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as error:
+            diagnostic = error.stderr or ""
+            if diagnostic:
+                print(diagnostic, end="", file=sys.stderr, flush=True)
+            # Unlike detach, create can report EBUSY as exit 1; preserve the
+            # diagnostic and retry only that transient failure, never all errors.
+            busy = (
+                error.returncode == MACOS_RESOURCE_BUSY_EXIT_CODE
+                or "Resource busy" in diagnostic
+            )
+            if not busy or attempt == MACOS_DMG_CREATE_MAX_ATTEMPTS:
+                raise
+            print(
+                "warning: DMG creation is busy; retrying "
+                f"({attempt}/{MACOS_DMG_CREATE_MAX_ATTEMPTS})",
+                file=sys.stderr, flush=True,
+            )
+            time.sleep(MACOS_DMG_CREATE_RETRY_DELAY_SECONDS)
+        else:
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr, flush=True)
+            return
+
+
 def create_macos_dmg(
     dmg_root: Path, dmg_path: Path, identity: ReleaseIdentity
 ) -> None:
     """Create a compressed DMG, applying Finder chrome when it is available."""
     if not should_include_macos_unsigned_install_notice(identity):
-        run(
-            [
-                "hdiutil",
-                "create",
-                "-volname",
-                identity.app_name,
-                "-srcfolder",
-                str(dmg_root),
-                "-ov",
-                "-format",
-                "UDZO",
-                str(dmg_path),
-            ]
-        )
+        create_macos_disk_image(dmg_root, dmg_path, identity.app_name, "UDZO")
         return
 
     writable_dmg = dmg_path.with_name(f".{dmg_path.stem}.writable.dmg")
@@ -943,20 +981,7 @@ def create_macos_dmg(
         shutil.rmtree(mount_point)
     mount_point.mkdir()
 
-    run(
-        [
-            "hdiutil",
-            "create",
-            "-volname",
-            identity.app_name,
-            "-srcfolder",
-            str(dmg_root),
-            "-ov",
-            "-format",
-            "UDRW",
-            str(writable_dmg),
-        ]
-    )
+    create_macos_disk_image(dmg_root, writable_dmg, identity.app_name, "UDRW")
     attached_device: str | None = None
     try:
         attached_device = attach_macos_dmg(writable_dmg, mount_point)
@@ -1246,7 +1271,8 @@ def create_windows_installer(
         installer_path=installer_path,
         icon_path=icon_path,
     )
-    script_path.write_text(script + "\n", encoding="utf-8")
+    # NSIS uses the Windows code page for unmarked scripts, even with Unicode true.
+    script_path.write_text(script + "\n", encoding="utf-8-sig")
     run([makensis, str(script_path)])
     sign_windows_file(installer_path)
     shutil.rmtree(installer_root)
@@ -1288,6 +1314,28 @@ def windows_protocol_unregistration_script(identity: ReleaseIdentity) -> str:
         lines.append(
             f'  DeleteRegKey HKCU "Software\\Classes\\{identity.app_identifier}.{scheme}"'
         )
+    return "\n".join(lines)
+
+
+def windows_installer_languages(identity: ReleaseIdentity) -> str:
+    languages = (
+        ("en", "English"), ("zh-CN", "SimpChinese"), ("zh-TW", "TradChinese"),
+        ("de", "German"), ("es-ES", "Spanish"), ("fr-FR", "French"),
+        ("it", "Italian"), ("ja", "Japanese"), ("ko", "Korean"),
+        ("pt-BR", "PortugueseBR"), ("vi", "Vietnamese"),
+    )
+    lines = []
+    for locale, language in languages:
+        catalog = ROOT_DIR / "crates" / "oxideterm-i18n" / "locales" / locale / "common.json"
+        messages = json.loads(catalog.read_text(encoding="utf-8"))["installer"]
+        lines.append(f'!insertmacro MUI_LANGUAGE "{language}"')
+        for key, name in (
+            ("close_running_application", "CloseRunningApplication"),
+            ("application_close_failed", "ApplicationCloseFailed"),
+        ):
+            message = nsis_string(messages[key].replace("{{app}}", identity.app_name))
+            message = message.replace("{{path}}", "$INSTDIR")
+            lines.append(f'LangString {name} ${{LANG_{language.upper()}}} "{message}"')
     return "\n".join(lines)
 
 
@@ -1354,7 +1402,7 @@ VIAddVersionKey /LANG=1033 "ProductVersion" "{nsis_string(version)}"
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "English"
+{windows_installer_languages(identity)}
 
 Var IsOxideUpdate
 Var IsLegacyUpgrade
@@ -1372,11 +1420,55 @@ oxide_update_mode:
   SetSilent silent
 FunctionEnd
 
+Function EnsureApplicationClosed
+  ; Check the selected installation, not unrelated portable or preview copies.
+  IfFileExists "$INSTDIR\\{binary.name}" 0 preflight_return
+  System::Store "s"
+preflight_start:
+  StrCpy $5 0
+  System::Call 'rstrtmgr::RmStartSession(*i .r0, i 0, w .r1) i .r2'
+  StrCmp $2 0 0 preflight_failed
+  StrCpy $5 1
+  System::Call 'rstrtmgr::RmRegisterResources(i r0, i 1, *w "$INSTDIR\\{binary.name}", i 0, p 0, i 0, p 0) i .r2'
+  StrCmp $2 0 0 preflight_failed
+  System::Call 'rstrtmgr::RmGetList(i r0, *i .r3, *i 0, p 0, *i .r4) i .r2'
+  StrCmp $2 0 preflight_done
+  ; ERROR_MORE_DATA with a zero-sized list means there are file owners.
+  StrCmp $2 234 0 preflight_failed
+  IfSilent preflight_cancel
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(CloseRunningApplication)" IDCANCEL preflight_cancel
+  ; No force flag: allow applications to finish their normal shutdown.
+  System::Call 'rstrtmgr::RmShutdown(i r0, i 0, p 0) i .r2'
+  StrCmp $2 0 0 preflight_failed
+  System::Call 'rstrtmgr::RmGetList(i r0, *i .r3, *i 0, p 0, *i .r4) i .r2'
+  StrCmp $2 0 preflight_done preflight_failed
+
+preflight_failed:
+  IfSilent preflight_cancel
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(ApplicationCloseFailed)" IDRETRY preflight_retry
+  Goto preflight_cancel
+preflight_retry:
+  StrCmp $5 1 0 preflight_start
+  System::Call 'rstrtmgr::RmEndSession(i r0)'
+  Goto preflight_start
+preflight_cancel:
+  StrCmp $5 1 0 preflight_abort
+  System::Call 'rstrtmgr::RmEndSession(i r0)'
+preflight_abort:
+  SetErrorLevel 2
+  Quit
+preflight_done:
+  System::Call 'rstrtmgr::RmEndSession(i r0)'
+  System::Store "l"
+preflight_return:
+FunctionEnd
+
 Section "Application Files"
   SectionIn RO
   StrCmp $IsOxideUpdate "1" update_install normal_install
 
 normal_install:
+  Call EnsureApplicationClosed
   SetOutPath "$INSTDIR"
   SetOverwrite on
   File /r "{nsis_path(installer_root)}\\*"

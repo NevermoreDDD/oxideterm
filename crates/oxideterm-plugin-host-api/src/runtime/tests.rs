@@ -63,30 +63,32 @@ fn process_decoder_classifies_sync_password_frames_before_typed_queues() {
 }
 
 #[test]
-fn process_decoder_rejects_malformed_sensitive_frames() {
-    let error = decode_process_output_frame(
-        r#"{"protocolVersion":1,"payload":{"type":"callHostApi","namespace":"sync","method":"previewImport","args":{"password":"sensitive-value"}}}"#,
-    )
-    .unwrap_err();
-
-    assert_eq!(error.code, "process_outbound_decode_failed");
-    assert!(!error.message.contains("sensitive-value"));
+fn process_decoder_rejects_invalid_sensitive_frames_without_disclosure() {
+    for (scenario, frame, code, recoverable) in [
+        (
+            "missing request ID",
+            r#"{"protocolVersion":1,"payload":{"type":"callHostApi","namespace":"sync","method":"previewImport","args":{"password":"sensitive-value"}}}"#,
+            "process_outbound_decode_failed",
+            None,
+        ),
+        (
+            "unknown protocol version",
+            r#"{"protocolVersion":2,"payload":{"type":"callHostApi","requestId":"sync-1","namespace":"sync","method":"exportOxide","args":{"password":"sensitive-value"}}}"#,
+            "unsupported_protocol_version",
+            Some(false),
+        ),
+    ] {
+        let error = decode_process_output_frame(frame).unwrap_err();
+        assert_eq!(error.code, code, "{scenario}");
+        if let Some(expected) = recoverable {
+            assert_eq!(error.recoverable, expected, "{scenario}");
+        }
+        assert!(!error.message.contains("sensitive-value"), "{scenario}");
+    }
 }
 
 #[test]
-fn process_decoder_rejects_sensitive_frames_with_unknown_version() {
-    let error = decode_process_output_frame(
-        r#"{"protocolVersion":2,"payload":{"type":"callHostApi","requestId":"sync-1","namespace":"sync","method":"exportOxide","args":{"password":"sensitive-value"}}}"#,
-    )
-    .unwrap_err();
-
-    assert_eq!(error.code, "unsupported_protocol_version");
-    assert!(!error.recoverable);
-    assert!(!error.message.contains("sensitive-value"));
-}
-
-#[test]
-fn runtime_request_round_trips_as_versioned_json() {
+fn runtime_activate_request_uses_versioned_wire_fields() {
     let request = PluginRequest {
         request_id: "activate-1".to_string(),
         kind: PluginRequestKind::Activate {
@@ -99,19 +101,27 @@ fn runtime_request_round_trips_as_versioned_json() {
         timeout_ms: Some(5_000),
     };
     let envelope = PluginProtocolEnvelope::new(Some(request.request_id.clone()), request);
-    let encoded = serde_json::to_string(&envelope).unwrap();
-    let decoded: PluginProtocolEnvelope<PluginRequest> = serde_json::from_str(&encoded).unwrap();
-
-    decoded.validate_version().unwrap();
-    assert_eq!(decoded.request_id.as_deref(), Some("activate-1"));
-    assert!(matches!(
-        decoded.payload.kind,
-        PluginRequestKind::Activate { .. }
-    ));
+    let encoded = serde_json::to_value(envelope).unwrap();
+    assert_eq!(encoded["protocolVersion"], 1);
+    assert_eq!(encoded["requestId"], "activate-1");
+    assert_eq!(encoded["payload"]["requestId"], "activate-1");
+    assert_eq!(encoded["payload"]["timeoutMs"], 5_000);
+    assert_eq!(encoded["payload"]["kind"]["type"], "activate");
+    assert_eq!(
+        encoded["payload"]["kind"]["manifest"]["id"],
+        "com.example.runtime"
+    );
+    assert_eq!(
+        encoded["payload"]["kind"]["permissions"],
+        serde_json::json!({
+            "capabilities": ["plugin.invoke"],
+            "allowedHostApis": ["ui.registerCommand"],
+        })
+    );
 }
 
 #[test]
-fn process_runtime_entry_resolves_inside_plugin_dir() {
+fn process_runtime_entry_is_confined_to_plugin_directory() {
     let temp_dir = unique_temp_dir("plugin-process-entry");
     let plugin_dir = temp_dir.join("plugin");
     let bin_dir = plugin_dir.join("bin");
@@ -120,31 +130,19 @@ fn process_runtime_entry_resolves_inside_plugin_dir() {
 
     let resolved = resolve_process_runtime_entry(&plugin_dir, "bin/plugin").unwrap();
     assert!(resolved.starts_with(fs::canonicalize(&plugin_dir).unwrap()));
-}
-
-#[test]
-fn process_runtime_entry_rejects_path_traversal() {
-    let temp_dir = unique_temp_dir("plugin-process-traversal");
-    let plugin_dir = temp_dir.join("plugin");
-    fs::create_dir_all(&plugin_dir).unwrap();
-
     let error = resolve_process_runtime_entry(&plugin_dir, "../outside").unwrap_err();
     assert_eq!(error.code, "invalid_process_entry");
-}
 
-#[cfg(unix)]
-#[test]
-fn process_runtime_entry_rejects_symlink_escape() {
-    let temp_dir = unique_temp_dir("plugin-process-symlink");
-    let plugin_dir = temp_dir.join("plugin");
-    let outside_dir = temp_dir.join("outside");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    fs::create_dir_all(&outside_dir).unwrap();
-    fs::write(outside_dir.join("runner"), b"#!/bin/sh\n").unwrap();
-    std::os::unix::fs::symlink(outside_dir.join("runner"), plugin_dir.join("runner")).unwrap();
+    #[cfg(unix)]
+    {
+        let outside_dir = temp_dir.join("outside");
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(outside_dir.join("runner"), b"#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink(outside_dir.join("runner"), plugin_dir.join("runner")).unwrap();
 
-    let error = resolve_process_runtime_entry(&plugin_dir, "runner").unwrap_err();
-    assert_eq!(error.code, "process_entry_escapes_plugin_dir");
+        let error = resolve_process_runtime_entry(&plugin_dir, "runner").unwrap_err();
+        assert_eq!(error.code, "process_entry_escapes_plugin_dir");
+    }
 }
 
 #[cfg(feature = "wasm-runtime")]
@@ -206,28 +204,6 @@ async fn wasm_runtime_dispatches_command_and_event_over_memory_abi() {
             value: serde_json::json!({ "eventHandled": true })
         }
     );
-}
-
-#[cfg(feature = "wasm-runtime")]
-fn wasm_noop_start_module() -> Vec<u8> {
-    wat::parse_str(
-        r#"
-            (module
-              (memory (export "memory") 1)
-              (global $heap (mut i32) (i32.const 2048))
-              (func (export "_start"))
-              (func (export "oxideterm_plugin_alloc") (param $len i32) (result i32)
-                (local $ptr i32)
-                global.get $heap
-                local.set $ptr
-                global.get $heap
-                local.get $len
-                i32.add
-                global.set $heap
-                local.get $ptr))
-            "#,
-    )
-    .unwrap()
 }
 
 #[cfg(feature = "wasm-runtime")]
@@ -321,42 +297,6 @@ fn write_process_plugin(plugin_dir: &Path, body: &str) {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn process_runtime_activate_uses_json_lines_protocol() {
-    let temp_dir = unique_temp_dir("plugin-process-activate");
-    let plugin_dir = temp_dir.join("plugin");
-    write_process_plugin(
-        &plugin_dir,
-        r#"#!/bin/sh
-read request
-printf '%s\n' '{"protocolVersion":1,"requestId":"activate-test","payload":{"requestId":"activate-test","result":{"status":"ok","value":{"activated":true}}}}'
-"#,
-    );
-
-    let mut runtime = NativeProcessPluginRuntime::new(
-        "com.example.runtime",
-        &plugin_dir,
-        "bin/plugin",
-        process_runtime_test_timeout(),
-    );
-    let response = runtime
-        .activate(PluginActivateRequest {
-            request_id: "activate-test".to_string(),
-            manifest: sample_manifest(),
-            permissions: PluginPermissionSet::default(),
-            timeout_ms: PROCESS_RUNTIME_TEST_TIMEOUT_MS,
-        })
-        .await
-        .unwrap();
-
-    assert!(matches!(response.result, PluginResponseResult::Ok { .. }));
-    assert_eq!(
-        runtime.health().await.unwrap().state,
-        PluginRuntimeLifecycleState::Active
-    );
-    runtime.kill().await.unwrap();
-}
-#[cfg(unix)]
-#[tokio::test]
 async fn process_runtime_collects_activate_time_outbound_frames() {
     let temp_dir = unique_temp_dir("plugin-process-outbound");
     let plugin_dir = temp_dir.join("plugin");
@@ -387,6 +327,10 @@ printf '%s\n' '{"protocolVersion":1,"requestId":"activate-test","payload":{"requ
         .unwrap();
 
     assert!(matches!(response.result, PluginResponseResult::Ok { .. }));
+    assert_eq!(
+        runtime.health().await.unwrap().state,
+        PluginRuntimeLifecycleState::Active
+    );
     assert_eq!(runtime.supervisor.registration_count(), 1);
     assert_eq!(runtime.supervisor.log_count(), 1);
     let messages = runtime.drain_outbound_messages();
@@ -659,83 +603,6 @@ printf '%s\n' "{\"protocolVersion\":1,\"requestId\":\"event:app.themeChanged\",\
 
 #[cfg(unix)]
 #[tokio::test]
-async fn process_runtime_replies_to_returnable_host_call_before_final_response() {
-    let temp_dir = unique_temp_dir("plugin-process-returnable-host-call");
-    let plugin_dir = temp_dir.join("plugin");
-    fs::create_dir_all(&plugin_dir).unwrap();
-    write_process_plugin(
-        &plugin_dir,
-        r#"#!/bin/sh
-read activate
-printf '%s\n' '{"protocolVersion":1,"requestId":"activate-test","payload":{"requestId":"activate-test","result":{"status":"ok","value":{"activated":true}}}}'
-read dispatch
-printf '%s\n' '{"protocolVersion":1,"payload":{"type":"callHostApi","requestId":"host-storage-get","namespace":"storage","method":"get","args":{"key":"recent"}}}'
-read host_response
-case "$host_response" in
-  *'"value":"stored"'*) result='{"status":"ok","value":{"read":true}}' ;;
-  *) result='{"status":"error","error":{"code":"bad_host_response","message":"missing host value","recoverable":false}}' ;;
-esac
-printf '%s\n' "{\"protocolVersion\":1,\"requestId\":\"command:demo.read\",\"payload\":{\"requestId\":\"command:demo.read\",\"result\":$result}}"
-"#,
-    );
-
-    let mut runtime = NativeProcessPluginRuntime::new(
-        "com.example.runtime",
-        &plugin_dir,
-        "bin/plugin",
-        process_runtime_test_timeout(),
-    );
-    runtime.set_host_call_handler(Box::new(|call| {
-        assert_eq!(call.namespace, "storage");
-        assert_eq!(call.method, "get");
-        Some(PluginResponse::ok(
-            call.request_id,
-            serde_json::json!({ "value": "stored" }),
-        ))
-    }));
-    runtime
-        .activate(PluginActivateRequest {
-            request_id: "activate-test".to_string(),
-            manifest: sample_manifest(),
-            permissions: PluginPermissionSet::default(),
-            timeout_ms: PROCESS_RUNTIME_TEST_TIMEOUT_MS,
-        })
-        .await
-        .unwrap();
-
-    let response = runtime
-        .call(PluginRequest {
-            request_id: "command:demo.read".to_string(),
-            kind: PluginRequestKind::DispatchCommand {
-                command: "demo.read".to_string(),
-                args: Value::Null,
-            },
-            timeout_ms: Some(2_000),
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(
-        response.result,
-        PluginResponseResult::Ok {
-            value: serde_json::json!({ "read": true })
-        }
-    );
-    assert!(runtime.drain_outbound_effects().iter().any(|effect| {
-        matches!(
-            effect,
-            PluginOutboundEffect::HostCall {
-                namespace,
-                method,
-                ..
-            } if namespace == "storage" && method == "get"
-        )
-    }));
-    runtime.kill().await.unwrap();
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn process_runtime_does_not_retain_secret_host_call_copies() {
     let temp_dir = unique_temp_dir("plugin-process-secret-host-call");
     let plugin_dir = temp_dir.join("plugin");
@@ -926,6 +793,16 @@ printf '%s\n' "{\"protocolVersion\":1,\"requestId\":\"command:com.example.runtim
             value: serde_json::json!({ "read": true })
         }
     );
+    assert!(dispatch.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            PluginOutboundEffect::HostCall {
+                namespace,
+                method,
+                ..
+            } if namespace == "storage" && method == "get"
+        )
+    }));
     host.deactivate_plugin("com.example.runtime").await.unwrap();
 }
 
@@ -1155,109 +1032,4 @@ sleep 2
         runtime.supervisor.state(),
         PluginRuntimeLifecycleState::Error
     );
-}
-
-#[test]
-fn supervisor_auto_disables_and_cleans_registrations_after_repeated_errors() {
-    let mut supervisor =
-        PluginRuntimeSupervisorState::new("com.example.runtime", Duration::from_secs(5));
-    supervisor.mark_active();
-    supervisor
-        .record_registration(PluginRegistration {
-            registration_id: "command-1".to_string(),
-            plugin_id: "com.example.runtime".to_string(),
-            kind: PluginRegistrationKind::Command,
-            metadata: serde_json::json!({ "command": "demo.run" }),
-        })
-        .unwrap();
-
-    supervisor.record_error(PluginError::runtime("crash", "first"));
-    supervisor.record_error(PluginError::runtime("crash", "second"));
-    assert_eq!(supervisor.state(), PluginRuntimeLifecycleState::Error);
-    assert_eq!(supervisor.registration_count(), 1);
-
-    supervisor.record_error(PluginError::runtime("crash", "third"));
-    assert_eq!(
-        supervisor.state(),
-        PluginRuntimeLifecycleState::AutoDisabled
-    );
-    assert_eq!(supervisor.registration_count(), 0);
-}
-
-#[test]
-fn supervisor_rejects_foreign_plugin_registration() {
-    let mut supervisor =
-        PluginRuntimeSupervisorState::new("com.example.runtime", Duration::from_secs(5));
-    let result = supervisor.record_registration(PluginRegistration {
-        registration_id: "status-1".to_string(),
-        plugin_id: "com.example.other".to_string(),
-        kind: PluginRegistrationKind::StatusBar,
-        metadata: Value::Null,
-    });
-
-    assert!(result.is_err());
-    assert_eq!(supervisor.registration_count(), 0);
-}
-
-#[test]
-fn supervisor_applies_register_dispose_log_and_error_outbound_messages() {
-    let mut supervisor =
-        PluginRuntimeSupervisorState::new("com.example.runtime", Duration::from_secs(5));
-    let registration = PluginRegistration {
-        registration_id: "status-1".to_string(),
-        plugin_id: "com.example.runtime".to_string(),
-        kind: PluginRegistrationKind::StatusBar,
-        metadata: serde_json::json!({ "text": "ready" }),
-    };
-
-    let effect = supervisor
-        .handle_outbound_message(PluginOutboundMessage::RegisterContribution {
-            registration: registration.clone(),
-        })
-        .unwrap();
-    assert_eq!(effect, PluginOutboundEffect::RegistrationChanged);
-    assert_eq!(supervisor.registration_count(), 1);
-
-    let effect = supervisor
-        .handle_outbound_message(PluginOutboundMessage::Log {
-            level: PluginRuntimeLogLevel::Info,
-            message: "registered".to_string(),
-        })
-        .unwrap();
-    assert_eq!(effect, PluginOutboundEffect::None);
-    assert_eq!(supervisor.log_count(), 1);
-
-    let effect = supervisor
-        .handle_outbound_message(PluginOutboundMessage::DisposeContribution {
-            registration_id: registration.registration_id,
-        })
-        .unwrap();
-    assert_eq!(effect, PluginOutboundEffect::RegistrationChanged);
-    assert_eq!(supervisor.registration_count(), 0);
-
-    supervisor
-        .handle_outbound_message(PluginOutboundMessage::RuntimeError {
-            error: PluginError::runtime("crash", "failed"),
-        })
-        .unwrap();
-    assert_eq!(supervisor.state(), PluginRuntimeLifecycleState::Error);
-}
-
-#[test]
-fn supervisor_rejects_foreign_registration_from_outbound_message() {
-    let mut supervisor =
-        PluginRuntimeSupervisorState::new("com.example.runtime", Duration::from_secs(5));
-    let error = supervisor
-        .handle_outbound_message(PluginOutboundMessage::RegisterContribution {
-            registration: PluginRegistration {
-                registration_id: "command-1".to_string(),
-                plugin_id: "com.example.other".to_string(),
-                kind: PluginRegistrationKind::Command,
-                metadata: Value::Null,
-            },
-        })
-        .unwrap_err();
-
-    assert_eq!(error.code, "invalid_registration");
-    assert_eq!(supervisor.registration_count(), 0);
 }

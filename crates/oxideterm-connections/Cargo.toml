@@ -1,3 +1,6 @@
+[lints]
+workspace = true
+
 [package]
 name = "oxideterm-connections"
 edition.workspace = true
@@ -5,6 +8,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+oxideterm-audit = { path = "../oxideterm-audit" }
 anyhow.workspace = true
 argon2.workspace = true
 base64.workspace = true
@@ -21,13 +25,16 @@ oxideterm-atomic-file = { path = "../oxideterm-atomic-file" }
 oxideterm-portable-runtime = { path = "../oxideterm-portable-runtime" }
 oxideterm-remote-desktop = { path = "../oxideterm-remote-desktop" }
 oxideterm-secret-store = { path = "../oxideterm-secret-store" }
-russh = { path = "../russh" }
+russh.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 whoami.workspace = true
 zeroize.workspace = true
+totp-rs = { version = "6.0", default-features = false, features = ["std", "otpauth", "zeroize"] }
+regex.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 rand10.workspace = true

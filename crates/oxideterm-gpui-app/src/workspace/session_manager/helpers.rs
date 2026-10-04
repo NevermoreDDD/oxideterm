@@ -253,6 +253,7 @@ pub(in crate::workspace) fn form_from_saved_connection(
             SavedAuth::Password {
                 keychain_id,
                 plaintext_password,
+                ..
             } => (
                 SshAuthTab::Password,
                 plaintext_password
@@ -375,6 +376,7 @@ pub(in crate::workspace) fn form_from_saved_connection(
     form.gssapi_server_identity = gssapi_server_identity;
     form.gssapi_delegate_credentials = gssapi_delegate_credentials;
     form.save_password = save_password;
+    form.empty_password = conn.auth.uses_empty_password();
     form.group = group_label_for_form(conn.group.as_deref());
     form.notes = conn.notes.clone().unwrap_or_default();
     form.color = conn.color.clone().unwrap_or_default();
@@ -406,6 +408,7 @@ pub(in crate::workspace) fn form_from_saved_connection(
     // Preserve compatibility settings when an existing connection enters edit mode.
     form.legacy_ssh_compatibility = conn.options.legacy_ssh_compatibility;
     form.ssh_algorithms = conn.options.ssh_algorithms.clone();
+    form.totp_credential_id = conn.options.totp_credential_id.clone();
     form.connect_timeout_seconds = conn.options.effective_connect_timeout_seconds();
     form.connect_timeout_seconds_text = form.connect_timeout_seconds.to_string();
     form.dedicated_new_terminal_connection = conn.options.dedicated_new_terminal_connection;
@@ -470,6 +473,7 @@ pub(super) fn form_from_standalone_sftp_profile(
     form.port = profile.port.to_string();
     form.username = profile.username.clone();
     form.auth_tab = ssh_auth_tab_from_saved_auth(&profile.auth);
+    form.empty_password = profile.auth.uses_empty_password();
     form.saved_password_keychain_id = match profile.auth.conventional_fallback() {
         SavedAuth::Password { keychain_id, .. } => keychain_id.clone(),
         _ => None,
@@ -551,6 +555,7 @@ pub(super) fn form_from_standalone_sftp_profile(
         secondary.port = endpoint.port.to_string();
         secondary.username = endpoint.username.clone();
         secondary.auth_tab = ssh_auth_tab_from_saved_auth(&endpoint.auth);
+        secondary.empty_password = endpoint.auth.uses_empty_password();
         secondary.password_keychain_id = match endpoint.auth.conventional_fallback() {
             SavedAuth::Password { keychain_id, .. } => keychain_id.clone(),
             _ => None,
@@ -630,6 +635,8 @@ pub(super) fn connection_has_unloaded_keychain_password(conn: &SavedConnection) 
     matches!(
         &conn.auth,
         SavedAuth::Password {
+            empty_password: false,
+
             keychain_id: Some(_),
             plaintext_password: None,
         }
@@ -798,6 +805,7 @@ fn connection_draft_from_form_with_proxy_hop_prefix(
     persist_password_draft: bool,
 ) -> ConnectionDraft {
     ConnectionDraft {
+        totp_credential_id: form.totp_credential_id.clone(),
         // Both new and edited forms allow an omitted display name; storage requires a label.
         name: if form.name.trim().is_empty() {
             format!("{}@{}", form.username.trim(), form.host.trim())
@@ -837,11 +845,13 @@ pub(super) fn proxy_hop_draft_from_form(
     hop: &mut super::new_connection::NewConnectionProxyHop,
 ) -> ProxyHopDraft {
     ProxyHopDraft {
+        totp_credential_id: hop.totp_credential_id.clone(),
         host: hop.host.clone(),
         port: hop.port.clone(),
         username: hop.username.clone(),
         auth: ConnectionAuthDraft {
             kind: auth_draft_kind(hop.auth_tab),
+            empty_password: hop.empty_password,
             gssapi_authentication: hop.gssapi_enabled,
             password: take_secret_from_ui_draft(&mut hop.password),
             key_path: hop.key_path.clone(),
@@ -861,12 +871,13 @@ pub(super) fn proxy_hop_draft_from_form(
     }
 }
 
-pub(super) fn auth_draft_from_form(
+pub(in crate::workspace) fn auth_draft_from_form(
     form: &mut NewConnectionForm,
     persist_password_draft: bool,
 ) -> ConnectionAuthDraft {
     ConnectionAuthDraft {
         kind: auth_draft_kind(form.auth_tab),
+        empty_password: form.empty_password,
         gssapi_authentication: form.gssapi_enabled,
         password: if form.auth_tab == SshAuthTab::Password
             && persist_password_draft

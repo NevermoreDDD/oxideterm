@@ -49,9 +49,17 @@ fn readonly_value_trigger_spec() -> SelectTriggerChromeSpec {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum SelectAnchorId {
+    ActiveSessionSort,
+    AuditCategory,
+    AuditSeverity,
+    AuditSource,
+    AuditOutcome,
+    AuditTime,
+    AuditSearchField,
     SettingsLanguage,
     SettingsUpdateChannel,
     SettingsAppearanceTheme,
+    SettingsAppearanceTerminalTheme,
     SettingsAppearanceDensity,
     SettingsAppearanceUiFontSizeSlider,
     SettingsAppearanceBorderRadiusSlider,
@@ -125,6 +133,8 @@ pub enum SelectAnchorId {
     NewConnectionGroup,
     NewConnectionKeyAuthSource,
     NewConnectionManagedKey,
+    NewConnectionTotp,
+    NewConnectionJumpTotp,
     NewConnectionStandaloneSftpSecondaryKeyAuthSource,
     NewConnectionStandaloneSftpSecondaryManagedKey,
     NewConnectionJumpSavedConnection,
@@ -184,6 +194,7 @@ impl SelectAnchorId {
                 | Self::SettingsUpdateProxyMode
                 | Self::SettingsUpdateProxyProtocol
                 | Self::SettingsAppearanceTheme
+                | Self::SettingsAppearanceTerminalTheme
                 | Self::SettingsAppearanceDensity
                 | Self::SettingsAppearanceAnimation
                 | Self::SettingsAppearanceRenderProfile
@@ -247,6 +258,8 @@ impl SelectAnchorId {
             Self::NewConnectionGroup
                 | Self::NewConnectionKeyAuthSource
                 | Self::NewConnectionManagedKey
+                | Self::NewConnectionTotp
+                | Self::NewConnectionJumpTotp
                 | Self::NewConnectionStandaloneSftpSecondaryKeyAuthSource
                 | Self::NewConnectionStandaloneSftpSecondaryManagedKey
                 | Self::NewConnectionJumpSavedConnection
@@ -618,7 +631,7 @@ pub fn select_panel_popup_with_max_height(
     width: f32,
     max_height: f32,
 ) -> Stateful<Div> {
-    select_popup_with_max_height(tokens, width, max_height).bg(rgb(tokens.ui.bg_panel))
+    select_popup_with_max_height(tokens, width, max_height)
 }
 
 pub fn select_overlay_popup(tokens: &ThemeTokens, width: f32) -> Stateful<Div> {

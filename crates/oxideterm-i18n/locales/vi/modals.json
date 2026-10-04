@@ -280,6 +280,13 @@
       "verifying": "Đang xác minh..."
     },
     "new_connection": {
+      "transport_ftp": "FTP / FTPS",
+      "ftp_description": "Quản lý tệp từ xa qua FTP hoặc FTPS tường minh với kết nối dữ liệu thụ động.",
+      "ftp_tls": "Dùng FTPS (TLS tường minh)",
+      "ftp_initial_path": "Thư mục ban đầu",
+      "ftp_timeout": "Thời gian chờ kết nối (giây)",
+      "ftp_invalid": "Kiểm tra máy chủ FTP, cổng, tên người dùng và thời gian chờ.",
+      "ftp_failed": "Kết nối FTP thất bại",
       "title": "Kết nối mới",
       "description": "Cấu hình một máy chủ SSH cho terminal, SFTP, chuyển tiếp cổng và chỉnh sửa tệp từ xa.",
       "twofa_error": "Lỗi 2FA: {{error}}",
@@ -356,7 +363,7 @@
       "save_failed": "Lưu kết nối thất bại",
       "transport_local_terminal": "Terminal cục bộ",
       "local_terminal_description": "Mở shell trên thiết bị này bằng cài đặt terminal hiện tại.",
-      "local_terminal_detail": "Phiên này được mở ngay và không được thêm vào các kết nối đã lưu.",
+      "local_terminal_detail": "Lưu shell và thư mục khởi động của dự án. Mỗi lần mở sẽ tạo một terminal độc lập.",
       "local_terminal_open": "Mở terminal",
       "transport_ssh": "Máy chủ SSH",
       "advanced_group": "Kết nối nâng cao",

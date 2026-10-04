@@ -8,6 +8,263 @@ use gpui::{
 mod ssh_peer;
 
 #[gpui::test]
+fn confirmed_clipboard_paste_sends_one_bracketed_text_block(cx: &mut TestAppContext) {
+    let mut peer = ssh_peer::SshPeer::new();
+    let config =
+        SshSessionConfig::from(peer.config.take().unwrap()).with_runtime(peer.runtime.clone());
+    let (pane, cx) = cx.add_window_view(move |window, cx| {
+        TerminalPane::new_ssh_with_preferences(
+            config,
+            TerminalUiPreferences {
+                paste_protection: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .unwrap()
+    });
+    let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    peer.runtime
+        .block_on(sender.data(channel, b"\x1b[?2004h".to_vec()))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pane.read_with(cx, |pane, _| {
+        pane.terminal
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE)
+    }) {
+        assert!(Instant::now() < deadline, "paste mode was not parsed");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    pane.update(cx, |pane, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+            "第一段\r\n\r\n第二段\n第三段\r".into(),
+        ));
+        pane.paste_from_clipboard(cx);
+        pane.send_protocol_bytes(b"before-paste", cx);
+    });
+    let (before_confirmation, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(before_confirmation, b"before-paste");
+
+    pane.update(cx, |pane, cx| {
+        pane.confirm_pending_paste(cx);
+        pane.send_protocol_bytes(b"after-paste", cx);
+    });
+    let mut received = Vec::new();
+    while !received.ends_with(b"after-paste") {
+        let (bytes, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
+        received.extend_from_slice(&bytes);
+    }
+    assert_eq!(
+        received,
+        "\x1b[200~第一段\n\n第二段\n第三段\n\x1b[201~after-paste".as_bytes()
+    );
+    pane.update(cx, |pane, _| pane.terminal.lock().shutdown());
+}
+
+#[gpui::test]
+fn application_scroll_accumulates_small_deltas_until_remote_input(cx: &mut TestAppContext) {
+    use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase};
+
+    let mut peer = ssh_peer::SshPeer::new();
+    let config =
+        SshSessionConfig::from(peer.config.take().unwrap()).with_runtime(peer.runtime.clone());
+    let (pane, cx) = cx.add_window_view(move |window, cx| {
+        TerminalPane::new_ssh_with_preferences(
+            config,
+            TerminalUiPreferences {
+                cursor_blink: false,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .unwrap()
+    });
+    let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    for (sequence, expected_mode, multiplier, expected_input) in [
+        (
+            b"\x1b[?1049h\x1b[?1000h\x1b[?1006h".as_slice(),
+            TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE,
+            1.0,
+            b"\x1b[<64;1;1M\x1b[<65;1;1M".as_slice(),
+        ),
+        (
+            b"\x1b[?1000l\x1b[?1006l\x1b[?1007h".as_slice(),
+            TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL,
+            TERMINAL_SCROLL_MULTIPLIER,
+            b"\x1bOA\x1bOB".as_slice(),
+        ),
+    ] {
+        peer.runtime
+            .block_on(sender.data(channel, sequence.to_vec()))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ready = pane.read_with(cx, |pane, _| {
+                let mode = pane.terminal.lock().mode();
+                mode.contains(expected_mode)
+                    && (expected_mode.intersects(TermMode::MOUSE_MODE)
+                        || !mode.intersects(TermMode::MOUSE_MODE))
+            });
+            if ready {
+                break;
+            }
+            assert!(Instant::now() < deadline, "application mode was not parsed");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        pane.update(cx, |pane, cx| {
+            pane.clear_smooth_scroll_remainder();
+            for (direction, steps) in [(1.0, 3), (-1.0, 4)] {
+                for _ in 0..steps {
+                    pane.handle_scroll(
+                        &ScrollWheelEvent {
+                            position: point(px(0.0), px(0.0)),
+                            delta: ScrollDelta::Pixels(point(
+                                px(0.0),
+                                pane.metrics.line_height * (direction * 0.375 / multiplier),
+                            )),
+                            touch_phase: TouchPhase::Moved,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                }
+            }
+            // A following write proves the worker drained the scroll input without a timing guess.
+            pane.send_protocol_bytes(b"scroll-barrier", cx);
+        });
+        let mut received = Vec::new();
+        while !received.ends_with(b"scroll-barrier") {
+            let (bytes, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(
+            &received[..received.len() - b"scroll-barrier".len()],
+            expected_input
+        );
+    }
+    pane.update(cx, |pane, _| pane.terminal.lock().shutdown());
+}
+
+#[gpui::test]
+fn busy_ssh_parser_does_not_block_drawing_the_previous_frame(cx: &mut TestAppContext) {
+    let mut peer = ssh_peer::SshPeer::new();
+    let config =
+        SshSessionConfig::from(peer.config.take().unwrap()).with_runtime(peer.runtime.clone());
+    let (pane, cx) = cx.add_window_view(move |window, cx| {
+        TerminalPane::new_ssh_with_preferences(
+            config,
+            TerminalUiPreferences {
+                cursor_blink: false,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .unwrap()
+    });
+    let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(10)).unwrap();
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(
+                AvailableSpace::Definite(px(900.0)),
+                AvailableSpace::Definite(px(600.0)),
+            ),
+            |_, _| pane.clone().into_element(),
+        );
+    };
+    draw(cx);
+    let previous = pane.read_with(cx, |pane, _| pane.snapshot.clone());
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+    let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_timed_out = timed_out.clone();
+    pane.update(cx, |pane, _| {
+        pane.terminal
+            .lock()
+            .set_output_processor(Some(Arc::new(move |bytes| {
+                entered_tx.send(()).unwrap();
+                // A watchdog releases the worker even when a blocking render regresses.
+                if release_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    worker_timed_out.store(true, std::sync::atomic::Ordering::Release);
+                }
+                bytes.to_vec()
+            })));
+    });
+    peer.runtime
+        .block_on(sender.data(channel, b"FINAL-AFTER-DEFER".to_vec()))
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let palette_started = Instant::now();
+    pane.update(cx, |pane, cx| {
+        let mut preferences = pane.preferences.clone();
+        preferences.theme = TerminalUiTheme::new(0xfdf6e3, 0x657b83, 0x586e75);
+        pane.set_preferences(preferences, cx);
+        pane.snapshot_deferred_since = None;
+    });
+    draw(cx);
+    eprintln!(
+        "SSH_BUSY_PALETTE update_and_draw_ms={:.3}",
+        palette_started.elapsed().as_secs_f64() * 1000.0
+    );
+    let blocked = timed_out.load(std::sync::atomic::Ordering::Acquire);
+    let _ = release_tx.send(());
+    assert!(
+        !blocked,
+        "theme update or render waited for the busy parser"
+    );
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.snapshot_dirty);
+        assert_eq!(
+            pane.snapshot
+                .lines
+                .iter()
+                .map(|row| &row.cells)
+                .collect::<Vec<_>>(),
+            previous
+                .lines
+                .iter()
+                .map(|row| &row.cells)
+                .collect::<Vec<_>>(),
+        );
+    });
+    let activity = pane.read_with(cx, |pane, _| pane.terminal.lock().activity_receiver());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // Bridge the worker's real notification into GPUI's deterministic executor.
+        let notified = peer.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(2), activity.notified())
+                .await
+                .unwrap_or(false)
+        });
+        if notified {
+            pane.update(cx, |pane, cx| pane.tick(cx));
+        }
+        draw(cx);
+        if pane.read_with(cx, |pane, _| {
+            pane.snapshot.lines.iter().any(|line| {
+                line.text().contains("FINAL-AFTER-DEFER")
+                    && line.cells[0].fg == oxideterm_terminal::TerminalColor::rgb(0x65, 0x7b, 0x83)
+                    && line.cells[0].bg == oxideterm_terminal::TerminalColor::rgb(0xfd, 0xf6, 0xe3)
+            })
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "deferred final output was never painted with the new palette"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    pane.update(cx, |pane, _| pane.terminal.lock().shutdown());
+}
+
+#[gpui::test]
 fn ssh_worker_output_reaches_a_painted_pane_without_followup_output(cx: &mut TestAppContext) {
     let mut peer = ssh_peer::SshPeer::new();
     let config = SshSessionConfig::from(peer.config.take().unwrap())
@@ -107,19 +364,62 @@ fn tmux_selection_replays_the_first_click_and_release_on_the_new_pane(cx: &mut T
     });
     let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(10)).unwrap();
     let layout = "80x24,0,0{40x24,0,0,1,39x24,41,0,2}";
-    let bootstrap = format!(
-        "\x1bP1000p%begin 1 1 1\n%end 1 1 1\n%begin 1 2 1\n3.4\n%end 1 2 1\n\
-         %begin 1 3 1\n$1 demo\n%end 1 3 1\n%begin 1 4 1\n@1 0 1 * shell\n%end 1 4 1\n\
-         %begin 1 5 1\n%1 @1 1 40 24 0 0 {layout}\n%2 @1 0 39 24 0 0 {layout}\n%end 1 5 1\n\
-         %begin 1 6 1\n%end 1 6 1\n%begin 1 7 1\n%end 1 7 1\n\
-         %begin 1 8 1\n%1 0 0\n%2 0 0\n%end 1 8 1\n%begin 1 9 1\n$1 @1 %1\n%end 1 9 1\n\
-         %output %2 \\033[?1000h\\033[?1006h\n"
-    );
     peer.runtime
-        .block_on(sender.data(channel, bootstrap.into_bytes()))
+        .block_on(sender.data(channel, b"\x1bP1000p".to_vec()))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let panes = format!("%1 @1 1 40 24 0 0 {layout}\n%2 @1 0 39 24 0 0 {layout}\n");
+    let mut pending_input = Vec::new();
+    for (index, (query, body)) in [
+        ("refresh-client -C ", ""),
+        ("display-message -p '#{version}'", "3.4\n"),
+        ("list-sessions -F ", "$1 demo\n"),
+        ("list-windows -F ", "@1 0 1 * shell\n"),
+        ("list-panes -s -F ", panes.as_str()),
+        ("capture-pane -p -e -t ", ""),
+        ("capture-pane -p -e -t ", ""),
+        (
+            "list-panes -s -F '#{pane_id} #{cursor_x} #{cursor_y}'",
+            "%1 0 0\n%2 0 0\n",
+        ),
+        (
+            "display-message -p '#{session_id} #{window_id} #{pane_id}'",
+            "$1 @1 %1\n",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // The controller registers replies when queries are written to the transport.
+        // A real tmux peer cannot answer queries before receiving them.
+        let line_end = loop {
+            if let Some(end) = pending_input.iter().position(|byte| *byte == b'\n') {
+                break end;
+            }
+            let (bytes, _) = peer
+                .input
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("tmux bootstrap query did not reach the peer");
+            pending_input.extend(bytes);
+        };
+        let command = String::from_utf8(pending_input.drain(..=line_end).collect()).unwrap();
+        assert!(
+            command.starts_with(query),
+            "unexpected tmux query: {command}"
+        );
+        let number = index + 1;
+        let reply = format!("%begin 1 {number} 1\n{body}%end 1 {number} 1\n");
+        peer.runtime
+            .block_on(sender.data(channel, reply.into_bytes()))
+            .unwrap();
+    }
+    peer.runtime
+        .block_on(sender.data(
+            channel,
+            b"%output %2 \\033[?1000h\\033[?1006hMOUSE-READY\n".to_vec(),
+        ))
         .unwrap();
     let activity = pane.read_with(cx, |pane, _| pane.terminal.lock().activity_receiver());
-    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let notified = peer.runtime.block_on(async {
             tokio::time::timeout(Duration::from_millis(2), activity.notified())
@@ -138,10 +438,16 @@ fn tmux_selection_replays_the_first_click_and_release_on_the_new_pane(cx: &mut T
             |_, _| pane.clone().into_element(),
         );
         if pane.read_with(cx, |pane, _| {
-            pane.terminal
-                .lock()
+            let terminal = pane.terminal.lock();
+            terminal
                 .tmux_state()
                 .is_some_and(|state| state.ready && state.pane_count == 2)
+                // Readiness precedes pane output; wait until mouse modes have been parsed too.
+                && terminal
+                    .snapshot()
+                    .lines
+                    .iter()
+                    .any(|row| row.text().contains("MOUSE-READY"))
         }) {
             break;
         }

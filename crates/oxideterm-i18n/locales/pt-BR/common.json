@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} ainda está em execução (talvez na bandeja do sistema), ou seus arquivos estão sendo usados por outro aplicativo. Salve seu trabalho. Clique em OK para fechar os aplicativos que usam esses arquivos e continuar a instalação, ou em Cancelar para interrompê-la. Pasta de instalação: {{path}}",
+    "application_close_failed": "Não foi possível liberar ou verificar o uso dos arquivos em {{path}}. Saia do {{app}} pela bandeja do sistema e feche outros aplicativos que usam esta pasta. Depois clique em Repetir. Cancelar interrompe a instalação sem substituir arquivos."
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Inicializador de shell"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "Diagrama Mermaid sem suporte",
-    "mermaid_expand": "Ampliar"
+    "mermaid_expand": "Ampliar",
+    "mermaid_loading": "Renderizando diagrama…",
+    "html_details": "Detalhes"
   },
   "layout": {
     "empty": {
@@ -204,8 +210,29 @@
     "native_sidebar_empty_title": "Sistema de plugins indisponível",
     "native_sidebar_empty_description": "Abra a aba de plugins para ver o estado native atual.",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "Atualize o servidor de sincronização para uma versão compatível com o novo protocolo de sincronização na nuvem e sincronize novamente.",
+        "password_change_pending": "Há uma alteração de senha pendente. Tente novamente com a mesma senha nova.",
+        "change_password": "Alterar senha de sincronização",
+        "change_password_description": "Um novo espaço será criado com a nova senha. A troca ocorrerá após verificar o envio. O espaço anterior será mantido.",
+        "password_change_separate_settings": "Salve as outras configurações antes de alterar a senha de sincronização.",
+        "password_too_short": "A senha deve ter pelo menos 6 caracteres.",
+        "sync": "Sincronizar",
+        "cleanup_pending": "A limpeza está pendente. Sincronize novamente para concluir.",
+        "keep": "Manter",
+        "preview": "Prévia da sincronização",
+        "changes": "Campos alterados",
+        "upgrade": "Os dados na nuvem serão atualizados. Os arquivos originais serão mantidos.",
+        "candidate": "Versão",
+        "apply": "Aplicar e sincronizar",
+        "configuration": "Configuração",
+        "protected": "Valor protegido",
+        "current": "Este dispositivo",
+        "conflict_hint": "Escolha uma versão para os campos em conflito. Os campos não selecionados mantêm o valor atual deste dispositivo."
+      },
       "panel_title": "Sincronização em nuvem do Oxide",
       "backend": {
+        "local_file": "Arquivo local",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -278,6 +305,7 @@
         "sync_scope": "Escopo de sincronização",
         "conflict_recovery": "Recuperação de conflitos",
         "import_preview": "Prévia da importação",
+        "export_preview": "Prévia da exportação",
         "upload_preview": "Prévia do envio",
         "rollback_preview": "Prévia da reversão",
         "rollback_backups": "Backups de reversão",
@@ -336,6 +364,7 @@
         "google_drive_permission_warning": "Se o Google informar access_denied, admin_policy_enforced, invalid_client ou Drive API não ativada, verifique tela de consentimento, tipo de cliente desktop, estado da API, política de administrador e usuários de teste."
       },
       "settings": {
+        "sync_method": "Método de sincronização",
         "backend_type": "Tipo de backend",
         "auth_mode": "Autenticação",
         "endpoint": "Endpoint",
@@ -438,6 +467,7 @@
         "summary_line": "{{connections}} conexões, {{forwards}} encaminhamentos, {{quickCommands}} comandos rápidos, {{serialProfiles}} perfis seriais, {{telnetProfiles}} perfis Telnet, {{pluginSettingsCount}} configurações de plugin, {{sensitiveCredentials}} credenciais sensíveis"
       },
       "errors": {
+        "local_forward_requires_connection": "Para exportar um arquivo local, selecione também as conexões das regras de encaminhamento selecionadas.",
         "operation_in_progress": "Outra operação de sincronização na nuvem já está em execução.",
         "missing_endpoint": "Configure o endpoint do backend antes de sincronizar.",
         "missing_namespace": "Configure o namespace ou o prefixo do caminho antes de sincronizar.",
@@ -568,6 +598,7 @@
         "downloading": "Downloading objects"
       },
       "preview": {
+        "standalone_sftp_profiles": "Conexões de transferência de arquivos ({{count}})",
         "summary_header": "Resumo da visualização remota",
         "apply_plan_title": "Plano de aplicação",
         "upload_scope_title": "Escopo do envio",
@@ -1171,6 +1202,12 @@
     "hint_other": "Modo Zen — Pressione Ctrl+Shift+Z para sair"
   },
   "tabbar": {
+    "drag_to_dock": "Arraste para encaixar",
+    "workspace": "Área de trabalho",
+    "merge_into_horizontal": "Mesclar com “{{title}}” (lado a lado)",
+    "merge_into_vertical": "Mesclar com “{{title}}” (empilhado)",
+    "move_pane_to_tab": "Mover para nova aba",
+    "move_pane_to_window": "Mover para nova janela",
     "offline": "Offline",
     "cancel_reconnect": "Cancelar reconexão",
     "reconnect": "Reconectar",
@@ -1287,5 +1324,13 @@
     "setup_pending": "Criando o cofre portátil...",
     "unlock_submit": "Desbloquear e continuar",
     "unlock_pending": "Desbloqueando os dados portáteis..."
+  },
+  "local_session": {
+    "directory": "Diretório inicial",
+    "inherit_directory": "Usar o diretório padrão das configurações",
+    "inherit_shell": "Usar o shell padrão das configurações",
+    "shell_unavailable": "O shell salvo não está disponível neste dispositivo. Edite a sessão para escolher um shell instalado.",
+    "directory_unavailable": "O diretório inicial não está disponível. Edite a sessão para escolher um diretório existente.",
+    "name_required": "Digite um nome para salvar esta sessão local."
   }
 }

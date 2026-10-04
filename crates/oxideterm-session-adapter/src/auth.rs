@@ -12,6 +12,10 @@ pub fn auth_method_from_saved_auth(
 ) -> Option<AuthMethod> {
     Some(match auth {
         SavedAuth::Password {
+            empty_password: true,
+            ..
+        } => AuthMethod::password(""),
+        SavedAuth::Password {
             plaintext_password: Some(password),
             ..
         } => AuthMethod::password_secret(password.clone().into_zeroizing()),
@@ -19,12 +23,18 @@ pub fn auth_method_from_saved_auth(
             keychain_id: Some(_),
             ..
         } => {
-            AuthMethod::password_secret(store.get_saved_auth_password(auth).ok()?.into_zeroizing())
+            // A retained reference does not prove the credential exists in this device's store.
+            // Use the runtime password prompt so its consent and successful-auth save path apply.
+            match store.get_saved_auth_password_optional(auth).ok()? {
+                Some(password) => AuthMethod::password_secret(password.into_zeroizing()),
+                None => AuthMethod::password_prompt(),
+            }
         }
         SavedAuth::Password {
             keychain_id: None,
             plaintext_password: None,
-        } => return None,
+            ..
+        } => AuthMethod::password_prompt(),
         SavedAuth::Key {
             key_path,
             plaintext_passphrase,
@@ -76,11 +86,18 @@ pub fn auth_method_from_saved_auth(
 }
 
 pub fn managed_key_resolver_from_store(store: &ConnectionStore) -> ManagedKeyResolver {
-    let store = store.clone();
+    let path = store.path().to_path_buf();
     Arc::new(move |key_id| {
+        let store = ConnectionStore::load_read_only(&path)
+            .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))?;
         store
             .resolve_managed_ssh_key_private_key(key_id)
-            .map(SecretString::into_zeroizing)
+            .and_then(|private_key| {
+                Ok(oxideterm_ssh::ManagedKeyMaterial {
+                    private_key: private_key.into_zeroizing(),
+                    certificate: store.managed_ssh_key_metadata(key_id)?.certificate,
+                })
+            })
             .map_err(|error| SshTransportError::AuthenticationFailed(error.to_string()))
     })
 }

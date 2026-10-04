@@ -7,7 +7,7 @@ use std::{
 
 use oxideterm_terminal::{
     TerminalCommandMark, TerminalCommandMarkClosedBy, TerminalCommandMarkConfidence,
-    TerminalCommandMarkDetectionSource,
+    TerminalCommandMarkDetectionSource, terminal_autosuggest_fuzzy_score,
 };
 use parking_lot::Mutex;
 
@@ -190,6 +190,8 @@ struct TransientLiteralQuery {
 
 #[derive(Default)]
 pub(crate) struct CommandFactLedger {
+    audit: Option<oxideterm_audit::AuditContext>,
+    audit_commands: HashMap<String, oxideterm_audit::AuditOperation>,
     facts: Vec<TerminalCommandFact>,
     ai_records: Vec<TerminalAiCommandRecord>,
     autosuggest_records: Vec<TerminalAutosuggestCommandRecord>,
@@ -197,6 +199,85 @@ pub(crate) struct CommandFactLedger {
 }
 
 impl CommandFactLedger {
+    pub(crate) fn set_audit_context(&mut self, context: Option<oxideterm_audit::AuditContext>) {
+        // In-flight guards retain their original connection snapshot.
+        self.audit = context;
+    }
+
+    pub(crate) fn with_audit(context: Option<oxideterm_audit::AuditContext>) -> Self {
+        Self {
+            audit: context,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn audit_enabled(&self) -> bool {
+        self.audit.is_some()
+    }
+
+    pub(crate) fn record_dispatch(
+        &self,
+        command_id: Option<&str>,
+        parent_id: Option<&str>,
+        source: oxideterm_audit::AuditSource,
+        sent: bool,
+    ) {
+        let Some(mut context) = self.audit.clone() else {
+            return;
+        };
+        let request = oxideterm_audit::AuditContext::current_request();
+        if let Some(request) = &request {
+            context.agent_id = request.agent_id.clone();
+            if context.parent_id.is_none() {
+                context.parent_id = request.parent_id.clone();
+            }
+        }
+        let request_source = request.map(|request| request.source);
+        context.source = request_source
+            .filter(|source| {
+                matches!(
+                    source,
+                    oxideterm_audit::AuditSource::Ai
+                        | oxideterm_audit::AuditSource::Mcp
+                        | oxideterm_audit::AuditSource::Plugin
+                        | oxideterm_audit::AuditSource::Cli
+                )
+            })
+            .unwrap_or(source);
+        let inherited_parent = context.parent_id.clone();
+        context.parent_id = command_id
+            .and_then(|id| self.audit_commands.get(id))
+            .and_then(oxideterm_audit::AuditOperation::id)
+            .map(str::to_string)
+            .or_else(|| parent_id.map(str::to_string))
+            .or(inherited_parent);
+        context
+            .operation(
+                oxideterm_audit::AuditCategory::Automation,
+                "command_dispatch",
+                None,
+            )
+            .finish(
+                if sent {
+                    oxideterm_audit::AuditOutcome::Sent
+                } else {
+                    oxideterm_audit::AuditOutcome::Failed
+                },
+                oxideterm_audit::AuditEvidence::Dispatch,
+                None,
+                None,
+            );
+    }
+
+    pub(crate) fn disable_audit(&mut self) {
+        self.audit = None;
+        self.audit_commands.clear();
+    }
+
+    pub(crate) fn interrupt_audit_commands(&mut self) {
+        self.audit_commands.clear();
+    }
+
     pub(crate) fn facts(&self) -> Vec<TerminalCommandFact> {
         self.facts.clone()
     }
@@ -239,15 +320,6 @@ impl CommandFactLedger {
             .filter(|suffix| !suffix.is_empty())
     }
 
-    #[cfg(test)]
-    pub(crate) fn autosuggest_candidates(
-        &self,
-        state: &TerminalAutosuggestInputState,
-        limit: usize,
-    ) -> Vec<TerminalAutosuggestCandidate> {
-        autosuggest_candidates_for_records(&self.autosuggest_records, state, limit)
-    }
-
     pub(crate) fn remove_autosuggest_command(&mut self, command: &str) -> bool {
         let previous_len = self.autosuggest_records.len();
         self.autosuggest_records
@@ -280,6 +352,48 @@ impl CommandFactLedger {
         }
 
         self.close_previous_open(mark.start_line);
+        if let Some(context) = &self.audit {
+            let mut context = context.clone();
+            let request = oxideterm_audit::AuditContext::current_request();
+            if let Some(request) = &request {
+                context.agent_id = request.agent_id.clone();
+                if context.parent_id.is_none() {
+                    context.parent_id = request.parent_id.clone();
+                }
+            }
+            let request_source = request.map(|request| request.source);
+            context.source = request_source
+                .filter(|source| {
+                    matches!(
+                        source,
+                        oxideterm_audit::AuditSource::Ai
+                            | oxideterm_audit::AuditSource::Mcp
+                            | oxideterm_audit::AuditSource::Plugin
+                            | oxideterm_audit::AuditSource::Cli
+                    )
+                })
+                .unwrap_or(match mark.submitted_by.unwrap_or(mark.detection_source) {
+                    TerminalCommandMarkDetectionSource::Ai => oxideterm_audit::AuditSource::Ai,
+                    TerminalCommandMarkDetectionSource::Broadcast => {
+                        oxideterm_audit::AuditSource::Broadcast
+                    }
+                    TerminalCommandMarkDetectionSource::CommandBar => {
+                        oxideterm_audit::AuditSource::CommandBar
+                    }
+                    TerminalCommandMarkDetectionSource::QuickCommand => {
+                        oxideterm_audit::AuditSource::QuickCommand
+                    }
+                    _ => oxideterm_audit::AuditSource::User,
+                });
+            self.audit_commands.insert(
+                mark.command_id.clone(),
+                context.operation(
+                    oxideterm_audit::AuditCategory::Command,
+                    "command_execute",
+                    mark.command.as_deref(),
+                ),
+            );
+        }
         // The pane owns one derived query for only the latest command fact. Replacing
         // it here prevents a prior grep query from leaking into later output.
         self.transient_command_highlight = mark
@@ -345,6 +459,25 @@ impl CommandFactLedger {
     }
 
     pub(crate) fn close_from_mark(&mut self, mark: &TerminalCommandMark) {
+        if let Some(operation) = self.audit_commands.remove(&mark.command_id) {
+            use oxideterm_audit::{AuditEvidence, AuditOutcome};
+            let evidence = if mark.closed_by == Some(TerminalCommandMarkClosedBy::ShellIntegration)
+            {
+                AuditEvidence::ShellIntegration
+            } else {
+                AuditEvidence::InputInference
+            };
+            let outcome = if evidence == AuditEvidence::ShellIntegration {
+                match mark.exit_code {
+                    Some(0) => AuditOutcome::Succeeded,
+                    Some(_) => AuditOutcome::Failed,
+                    None => AuditOutcome::Unknown,
+                }
+            } else {
+                AuditOutcome::Unknown
+            };
+            operation.finish(outcome, evidence, mark.exit_code, None);
+        }
         let mut closed_fact = None;
         if let Some(fact) = self
             .facts
@@ -386,6 +519,14 @@ impl CommandFactLedger {
     }
 
     fn close_previous_open(&mut self, next_start_line: usize) {
+        for (_, operation) in self.audit_commands.drain() {
+            operation.finish(
+                oxideterm_audit::AuditOutcome::Unknown,
+                oxideterm_audit::AuditEvidence::InputInference,
+                None,
+                None,
+            );
+        }
         let now = now_millis();
         for fact in &mut self.facts {
             if fact.status != TerminalCommandFactStatus::Open {
@@ -496,32 +637,47 @@ fn autosuggest_candidates_for_records(
         return Vec::new();
     }
 
-    let mut candidates_by_command = HashMap::<&str, TerminalAutosuggestCandidate>::new();
+    let mut candidates_by_command = HashMap::<&str, (f64, TerminalAutosuggestCandidate)>::new();
     for record in records {
-        if !record.command.starts_with(query) || record.command == query {
+        if record.command == query {
             continue;
         }
-        let candidate = candidates_by_command
-            .entry(&record.command)
-            .or_insert_with(|| TerminalAutosuggestCandidate {
-                command: record.command.clone(),
-                use_count: 0,
-                last_used_at: record.finished_at,
-            });
+        let candidate = match candidates_by_command.entry(&record.command) {
+            std::collections::hash_map::Entry::Occupied(entry) => &mut entry.into_mut().1,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let score = terminal_autosuggest_fuzzy_score(&record.command, query);
+                if score <= 0.0 {
+                    continue;
+                }
+                &mut entry
+                    .insert((
+                        score,
+                        TerminalAutosuggestCandidate {
+                            command: record.command.clone(),
+                            use_count: 0,
+                            last_used_at: record.finished_at,
+                        },
+                    ))
+                    .1
+            }
+        };
         candidate.use_count = candidate.use_count.saturating_add(1);
         candidate.last_used_at = candidate.last_used_at.max(record.finished_at);
     }
 
     let mut candidates = candidates_by_command.into_values().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        right
-            .use_count
-            .cmp(&left.use_count)
+    candidates.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| right.use_count.cmp(&left.use_count))
             .then_with(|| right.last_used_at.cmp(&left.last_used_at))
             .then_with(|| left.command.cmp(&right.command))
     });
     candidates.truncate(limit);
     candidates
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
 }
 
 fn trim_autosuggest_records(records: &mut Vec<TerminalAutosuggestCommandRecord>) {
@@ -631,6 +787,22 @@ fn now_millis() -> u64 {
 mod tests {
     use super::*;
 
+    struct Keys;
+    impl oxideterm_audit::AuditKeyProvider for Keys {
+        fn load(
+            &self,
+            _: &str,
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, oxideterm_audit::AuditError> {
+            Ok(zeroize::Zeroizing::new(vec![7; 32]))
+        }
+        fn create(
+            &self,
+            id: &str,
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, oxideterm_audit::AuditError> {
+            self.load(id)
+        }
+    }
+
     fn mark(command_id: &str, command: Option<&str>, closed: bool) -> TerminalCommandMark {
         TerminalCommandMark {
             command_id: command_id.to_string(),
@@ -651,6 +823,222 @@ mod tests {
             started_at: 100,
             finished_at: closed.then_some(120),
         }
+    }
+
+    #[test]
+    fn quick_command_dispatch_and_shell_result_share_one_command_identity() {
+        use oxideterm_audit::*;
+
+        let directory = tempfile::tempdir().unwrap();
+        oxideterm_audit::AuditStore::open(&directory.path().join("audit.db"), &Keys)
+            .unwrap()
+            .set_policy(oxideterm_audit::AuditPolicy {
+                enabled: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), Keys).unwrap();
+        let mut context = AuditContext::new(service.client(), AuditSource::User)
+            .session("ssh", "operator@example.invalid:22")
+            .consumer();
+        context.parent_id = Some("quick-batch-1".to_string());
+        let mut ledger = CommandFactLedger::with_audit(Some(context));
+        let mut started = mark("quick-target-1", Some("printf done"), false);
+        started.detection_source = TerminalCommandMarkDetectionSource::QuickCommand;
+        ledger.create_from_mark(&started);
+        ledger.record_dispatch(
+            Some(&started.command_id),
+            Some("quick-batch-1"),
+            AuditSource::QuickCommand,
+            true,
+        );
+        let mut closed = mark("quick-target-1", Some("printf done"), true);
+        closed.submitted_by = Some(TerminalCommandMarkDetectionSource::QuickCommand);
+        ledger.close_from_mark(&closed);
+
+        let page = futures::executor::block_on(service.client().query(AuditQuery {
+            limit: 20,
+            ..Default::default()
+        }))
+        .unwrap();
+        let command_records = page
+            .records
+            .iter()
+            .filter(|record| record.category == AuditCategory::Command)
+            .map(|record| record.details.operation.as_ref().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(command_records.len(), 2);
+        assert_eq!(command_records[0].id, command_records[1].id);
+        assert!(
+            command_records
+                .iter()
+                .all(|op| op.parent_id.as_deref() == Some("quick-batch-1")
+                    && op.source == AuditSource::QuickCommand)
+        );
+        assert!(
+            command_records
+                .iter()
+                .any(|op| op.outcome == AuditOutcome::Succeeded
+                    && op.evidence == AuditEvidence::ShellIntegration)
+        );
+        let dispatch = page
+            .records
+            .iter()
+            .filter(|record| record.category == AuditCategory::Automation)
+            .find_map(|record| {
+                record
+                    .details
+                    .operation
+                    .as_ref()
+                    .filter(|op| op.action == "command_dispatch")
+            })
+            .unwrap();
+        assert_eq!(
+            dispatch.parent_id.as_deref(),
+            Some(command_records[0].id.as_str())
+        );
+        assert_eq!(dispatch.outcome, AuditOutcome::Sent);
+    }
+
+    #[test]
+    fn audit_keeps_started_command_owner_when_the_terminal_context_changes() {
+        use oxideterm_audit::*;
+        let directory = tempfile::tempdir().unwrap();
+        oxideterm_audit::AuditStore::open(&directory.path().join("audit.db"), &Keys)
+            .unwrap()
+            .set_policy(oxideterm_audit::AuditPolicy {
+                enabled: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), Keys).unwrap();
+        let base = AuditContext::new(service.client(), AuditSource::User);
+        let old = base.session("ssh", "alice@old.example:22").consumer();
+        let new = base.session("ssh", "bob@new.example:2222").consumer();
+        let mut ledger = CommandFactLedger::with_audit(Some(old.clone()));
+        ledger.create_from_mark(&mark("old", Some("pwd"), false));
+        ledger.set_audit_context(Some(new.clone()));
+        ledger.close_from_mark(&mark("old", Some("pwd"), true));
+        ledger.create_from_mark(&mark("new", Some("date"), false));
+        ledger.close_from_mark(&mark("new", Some("date"), true));
+        let page = futures::executor::block_on(service.client().query(AuditQuery {
+            limit: 20,
+            ..Default::default()
+        }))
+        .unwrap();
+        let actual = page
+            .records
+            .iter()
+            .map(|record| {
+                let op = record.details.operation.as_ref().unwrap();
+                (
+                    record.details.target.as_ref().unwrap().as_str(),
+                    op.session_id.as_deref(),
+                    op.consumer_id.as_deref(),
+                    op.outcome,
+                    op.exit_code,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                (
+                    "bob@new.example:2222",
+                    new.session_id.as_deref(),
+                    new.consumer_id.as_deref(),
+                    AuditOutcome::Succeeded,
+                    Some(0)
+                ),
+                (
+                    "bob@new.example:2222",
+                    new.session_id.as_deref(),
+                    new.consumer_id.as_deref(),
+                    AuditOutcome::Started,
+                    None
+                ),
+                (
+                    "alice@old.example:22",
+                    old.session_id.as_deref(),
+                    old.consumer_id.as_deref(),
+                    AuditOutcome::Succeeded,
+                    Some(0)
+                ),
+                (
+                    "alice@old.example:22",
+                    old.session_id.as_deref(),
+                    old.consumer_id.as_deref(),
+                    AuditOutcome::Started,
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_reuses_command_identity_and_does_not_infer_success_from_next_prompt() {
+        use oxideterm_audit::*;
+        let directory = tempfile::tempdir().unwrap();
+        oxideterm_audit::AuditStore::open(&directory.path().join("audit.db"), &Keys)
+            .unwrap()
+            .set_policy(oxideterm_audit::AuditPolicy {
+                enabled: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), Keys).unwrap();
+        let mut context = AuditContext::new(service.client(), AuditSource::User);
+        context.session_id = Some("terminal-session".into());
+        let mut ledger = CommandFactLedger::with_audit(Some(context));
+        ledger.create_from_mark(&mark("cmd-unknown", None, false));
+        ledger.close_from_mark(&mark("cmd-unknown", None, true));
+        let first = mark("cmd-1", Some("pwd"), false);
+        ledger.create_from_mark(&first);
+        ledger.create_from_mark(&first);
+        let mut closed = mark("cmd-1", Some("pwd"), true);
+        closed.exit_code = Some(2);
+        ledger.close_from_mark(&closed);
+        ledger.close_from_mark(&closed);
+        ledger.create_from_mark(&mark("cmd-2", Some("ls"), false));
+        ledger.create_from_mark(&mark("cmd-3", Some("date"), false));
+        drop(ledger);
+        let page = futures::executor::block_on(service.client().query(AuditQuery {
+            limit: 20,
+            ..Default::default()
+        }))
+        .unwrap();
+        let observations = page
+            .records
+            .iter()
+            .map(|record| {
+                let operation = record.details.operation.as_ref().unwrap();
+                (
+                    record.details.detail.as_ref().map(|value| value.as_str()),
+                    operation.outcome,
+                    operation.exit_code,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observations,
+            [
+                (Some("date"), AuditOutcome::Unknown, None),
+                (Some("date"), AuditOutcome::Started, None),
+                (Some("ls"), AuditOutcome::Unknown, None),
+                (Some("ls"), AuditOutcome::Started, None),
+                (Some("pwd"), AuditOutcome::Failed, Some(2)),
+                (Some("pwd"), AuditOutcome::Started, None),
+                (None, AuditOutcome::Succeeded, Some(0)),
+                (None, AuditOutcome::Started, None),
+            ]
+        );
+        assert_eq!(
+            page.records[4].details.operation.as_ref().unwrap().id,
+            page.records[5].details.operation.as_ref().unwrap().id
+        );
     }
 
     #[test]
@@ -691,6 +1079,15 @@ mod tests {
         assert_eq!(records[0].command, "  git   status  ");
         assert_eq!(records[1].command, "  git   status  ");
         assert_eq!(records[2].command, "git status");
+        assert!(ledger.remove_autosuggest_command("  git   status  "));
+        assert_eq!(
+            ledger
+                .autosuggest_records()
+                .iter()
+                .map(|record| record.command.as_str())
+                .collect::<Vec<_>>(),
+            ["git status"],
+        );
 
         let mut ledger = CommandFactLedger::default();
         ledger.record_runtime_autosuggest_command("git status");
@@ -723,31 +1120,43 @@ mod tests {
     }
 
     #[test]
-    fn runtime_autosuggest_candidates_rank_activity_without_changing_history() {
-        let mut ledger = CommandFactLedger::default();
-        ledger.record_runtime_autosuggest_command("docker ps");
-        ledger.record_runtime_autosuggest_command("docker images");
-        ledger.record_runtime_autosuggest_command("docker ps");
-        ledger.record_runtime_autosuggest_command("docker compose up");
-
+    fn suggestions_rank_match_quality_before_activity_and_deduplicate_commands() {
+        let history = SharedTerminalCommandHistory::from_commands(vec![
+            "git status".into(),
+            "git status".into(),
+            "echo gts".into(),
+            "GTS-cache".into(),
+            "gts-tool".into(),
+            "docker ps".into(),
+        ]);
         let state = TerminalAutosuggestInputState {
-            value: "dock".to_string(),
-            cursor_index: 4,
+            value: "gts".into(),
+            cursor_index: 3,
             is_cursor_at_end: true,
         };
-        let candidates = ledger.autosuggest_candidates(&state, 3);
-
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0].command, "docker ps");
-        assert_eq!(candidates[0].use_count, 2);
-        assert_eq!(ledger.autosuggest_records().len(), 4);
-
-        assert!(ledger.remove_autosuggest_command("docker ps"));
-        assert!(
-            ledger
-                .autosuggest_records()
+        let candidates = history.candidates(&state, 8);
+        assert_eq!(
+            candidates
                 .iter()
-                .all(|record| record.command != "docker ps")
+                .map(|item| item.command.as_str())
+                .collect::<Vec<_>>(),
+            ["gts-tool", "GTS-cache", "echo gts", "git status"]
+        );
+        assert_eq!(candidates[3].use_count, 2);
+        assert_eq!(
+            history
+                .candidates(
+                    &TerminalAutosuggestInputState {
+                        value: "git status".into(),
+                        cursor_index: 10,
+                        is_cursor_at_end: true,
+                    },
+                    8
+                )
+                .iter()
+                .map(|item| item.command.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new()
         );
     }
 
@@ -763,19 +1172,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_history_seed_preserves_recency_order() {
+    fn shell_history_seed_preserves_recency_order_and_top_match_suffix() {
         let history = SharedTerminalCommandHistory::from_commands(vec![
             "docker ps".to_string(),
             "docker images".to_string(),
         ]);
-        let candidates = history.candidates(
-            &TerminalAutosuggestInputState {
-                value: "docker ".to_string(),
-                cursor_index: 7,
-                is_cursor_at_end: true,
-            },
-            2,
-        );
+        let state = TerminalAutosuggestInputState {
+            value: "docker ".to_string(),
+            cursor_index: 7,
+            is_cursor_at_end: true,
+        };
+        let candidates = history.candidates(&state, 2);
 
         assert_eq!(
             candidates
@@ -784,20 +1191,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["docker images", "docker ps"]
         );
-    }
-
-    #[test]
-    fn shared_command_history_projects_the_top_match_as_a_suffix() {
-        let history = SharedTerminalCommandHistory::from_commands(vec!["ls -la".to_string()]);
-
-        assert_eq!(
-            history.ghost_text(&TerminalAutosuggestInputState {
-                value: "ls".to_string(),
-                cursor_index: 2,
-                is_cursor_at_end: true,
-            }),
-            Some(" -la".to_string())
-        );
+        assert_eq!(history.ghost_text(&state), Some("images".to_string()));
     }
 
     #[test]

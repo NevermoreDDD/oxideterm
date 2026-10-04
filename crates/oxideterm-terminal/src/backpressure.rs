@@ -196,35 +196,41 @@ fn byte_bounded_channel_inner<T>(
 }
 
 impl<T> ByteBoundedSender<T> {
-    /// Blocks a dedicated worker thread until this data event fits the byte budget.
-    pub(crate) fn send(&self, value: T, byte_len: usize) -> Result<(), T> {
+    /// Waits for capacity for one worker turn so device controls remain reachable.
+    pub(crate) fn send_timeout(
+        &self,
+        value: T,
+        byte_len: usize,
+        timeout: Duration,
+    ) -> Result<(), crossbeam_channel::SendTimeoutError<T>> {
+        use crossbeam_channel::SendTimeoutError;
         if byte_len > self.inner.max_bytes {
-            return Err(value);
+            return Err(SendTimeoutError::Disconnected(value));
         }
-
-        let mut value = Some(value);
+        let started = std::time::Instant::now();
         let mut state = lock_state(&self.inner);
         loop {
             if !state.receiver_open {
-                return Err(value.take().expect("queued value must be present"));
+                return Err(SendTimeoutError::Disconnected(value));
             }
             if state.outstanding_bytes.saturating_add(byte_len) <= self.inner.max_bytes {
-                enqueue(
-                    &mut state,
-                    value.take().expect("queued value must be present"),
-                    byte_len,
-                );
+                enqueue(&mut state, value, byte_len);
                 drop(state);
                 if let Some(activity) = &self.inner.activity {
                     activity.notify();
                 }
                 return Ok(());
             }
-            state = self
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(SendTimeoutError::Timeout(value));
+            }
+            let (next, _) = self
                 .inner
                 .blocking_space
-                .wait(state)
+                .wait_timeout(state, remaining)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
         }
     }
 
@@ -500,7 +506,7 @@ impl MagicScanWindow {
                 continue;
             }
             if marker_crosses_chunk_boundary(&self.tail, chunk, marker)
-                || chunk_contains_marker(chunk, marker)
+                || memchr::memmem::find(chunk, marker).is_some()
             {
                 matches.push(*kind);
             }
@@ -537,17 +543,6 @@ fn marker_crosses_chunk_boundary(tail: &[u8], chunk: &[u8], marker: &[u8]) -> bo
     })
 }
 
-fn chunk_contains_marker(mut chunk: &[u8], marker: &[u8]) -> bool {
-    while let Some(offset) = chunk.iter().position(|byte| *byte == marker[0]) {
-        chunk = &chunk[offset..];
-        if chunk.starts_with(marker) {
-            return true;
-        }
-        chunk = &chunk[1..];
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,32 +567,36 @@ mod tests {
     }
 
     #[test]
-    fn utf8_guard_flushes_invalid_bytes_unchanged() {
-        let mut guard = Utf8ResidualGuard::default();
-        assert_eq!(
-            guard.push(&[0xff, b'a']).as_deref(),
-            Some(&[0xff, b'a'][..])
+    fn utf8_guard_preserves_complete_invalid_and_unfinished_chunks() {
+        let complete = "plain 中文 🚀".as_bytes();
+        for (bytes, emitted, residual, must_borrow) in [
+            (complete, Some(complete), None, true),
+            (&[0xff, b'a'][..], Some(&[0xff, b'a'][..]), None, false),
+            (&[0xe4, 0xbd][..], None, Some(&[0xe4, 0xbd][..]), false),
+        ] {
+            let mut guard = Utf8ResidualGuard::default();
+            let output = guard.push(bytes);
+            assert_eq!(output.as_deref(), emitted, "{bytes:?}");
+            if must_borrow {
+                assert!(matches!(output, Some(Cow::Borrowed(_))));
+            }
+            assert_eq!(guard.flush().as_deref(), residual, "{bytes:?}");
+            assert_eq!(guard.flush(), None);
+        }
+    }
+
+    #[test]
+    fn magic_scan_detects_complete_markers_and_every_cross_chunk_split() {
+        let mut scan = MagicScanWindow::default();
+        assert!(
+            scan.scan(b"time:12:34 status:ok ::TRZSZ:TRANSFEX:")
+                .is_empty()
         );
-    }
+        assert_eq!(
+            scan.scan(b"time:12:34 status:ok ::TRZSZ:TRANSFER:R:1"),
+            [TerminalMagicKind::TrzszTransfer]
+        );
 
-    #[test]
-    fn utf8_guard_borrows_complete_chunks() {
-        let mut guard = Utf8ResidualGuard::default();
-        let bytes = "plain 中文 🚀".as_bytes();
-
-        assert!(matches!(guard.push(bytes), Some(Cow::Borrowed(value)) if value == bytes));
-    }
-
-    #[test]
-    fn utf8_guard_flushes_residual_on_stream_end() {
-        let mut guard = Utf8ResidualGuard::default();
-        assert_eq!(guard.push(&[0xe4, 0xbd]), None);
-        assert_eq!(guard.flush(), Some(vec![0xe4, 0xbd]));
-        assert_eq!(guard.flush(), None);
-    }
-
-    #[test]
-    fn magic_scan_detects_every_cross_chunk_split() {
         let marker = TerminalMagicKind::TrzszTransfer.marker();
         for split in 1..marker.len() {
             let mut scan = MagicScanWindow::default();
@@ -612,16 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn magic_scan_skips_false_marker_prefixes_in_current_chunk() {
-        let mut scan = MagicScanWindow::default();
-        assert_eq!(
-            scan.scan(b"time:12:34 status:ok ::TRZSZ:TRANSFER:R:1")
-                .len(),
-            1
-        );
-    }
-
-    #[test]
     fn blocking_sender_stops_at_byte_limit_until_slow_consumer_drains() {
         const LIMIT_BYTES: usize = 64 * 1024;
         const CHUNK_BYTES: usize = 4 * 1024;
@@ -633,7 +622,9 @@ mod tests {
         let (finished_tx, finished_rx) = mpsc::channel();
         let producer = std::thread::spawn(move || {
             for _ in 0..CHUNK_COUNT {
-                sender.send(vec![0_u8; CHUNK_BYTES], CHUNK_BYTES).unwrap();
+                sender
+                    .send_timeout(vec![0_u8; CHUNK_BYTES], CHUNK_BYTES, Duration::from_secs(5))
+                    .unwrap();
                 producer_progress.fetch_add(1, Ordering::Release);
             }
             finished_tx.send(()).unwrap();
@@ -674,10 +665,13 @@ mod tests {
     fn closing_receiver_releases_blocked_sender() {
         const LIMIT_BYTES: usize = 8;
         let (sender, receiver) = byte_bounded_channel(LIMIT_BYTES);
-        sender.send(vec![1_u8; LIMIT_BYTES], LIMIT_BYTES).unwrap();
+        sender
+            .send_timeout(vec![1_u8; LIMIT_BYTES], LIMIT_BYTES, Duration::from_secs(5))
+            .unwrap();
         let (finished_tx, finished_rx) = mpsc::channel();
         let blocked_sender = std::thread::spawn(move || {
-            let result = sender.send(vec![2_u8; LIMIT_BYTES], LIMIT_BYTES);
+            let result =
+                sender.send_timeout(vec![2_u8; LIMIT_BYTES], LIMIT_BYTES, Duration::from_secs(5));
             finished_tx.send(result.is_err()).unwrap();
         });
 

@@ -23,13 +23,22 @@ impl WorkspaceApp {
         let window_button_layout_subscription =
             cx.observe_button_layout_changed(window, |_workspace, _window, cx| cx.notify());
         let mut settings_store = SettingsStore::load_default()?;
+        let mut connection_store = ConnectionStore::load(default_connections_path())?;
+        oxideterm_cloud_sync::sync_v3::RecoveryJournal::recover_pending(
+            &mut connection_store,
+            &mut settings_store,
+            &default_saved_forwards_path(),
+            &mut oxideterm_cloud_sync::secrets::CloudSyncKeychainSecretProvider::new(
+                Default::default(),
+            ),
+        )?;
         settings_store.settings_mut().sidebar_ui.zen_mode = false;
         if let Err(error) = ensure_bundled_workspace_backgrounds(settings_store.path()) {
             // A background-gallery failure must not prevent the workspace from opening.
             eprintln!("failed to install built-in workspace backgrounds: {error}");
         }
         let version_migration = VersionMigrationState::from_settings_path(settings_store.path())?;
-        let connection_store = ConnectionStore::load(default_connections_path())?;
+        let audit = audit::AuditState::new(settings_store.path().with_file_name("audit.sqlite3"));
         let settings = settings_store.settings().clone();
         let i18n = I18n::new(locale_from_settings(settings.general.language));
         // Shell history is already the user's persistence boundary; OxideTerm keeps only a
@@ -147,6 +156,9 @@ impl WorkspaceApp {
                 .worker_threads(Self::WORKSPACE_ASYNC_RUNTIME_WORKER_THREADS)
                 .build()?,
         );
+        cx.set_http_client(Arc::new(
+            oxideterm_gpui_platform::http_client::AssetHttpClient::new(forwarding_runtime.clone())?,
+        ));
         // The SSH pool idle timer is long-lived backend work, matching Tauri's
         // registry-owned timeout task rather than tying disconnects to a GPUI
         // render/update turn.
@@ -290,76 +302,8 @@ impl WorkspaceApp {
         });
         let sftp_subscription = cx.subscribe(
             &sftp_view,
-            |workspace, _sftp, event: &sftp::SftpWorkspaceEvent, cx| {
-                match event {
-                    sftp::SftpWorkspaceEvent::WorkerEffectsReady(effects) => {
-                        workspace.handle_sftp_worker_effects(effects, cx);
-                    }
-                    sftp::SftpWorkspaceEvent::OpenFileRequested { pane, file } => {
-                        workspace.open_or_preview_sftp_file(*pane, file, cx);
-                    }
-                    sftp::SftpWorkspaceEvent::TransferStateRequested { id, state } => {
-                        workspace.set_sftp_transfer_state(*id, *state, cx);
-                    }
-                    sftp::SftpWorkspaceEvent::CancelOrRemoveTransferRequested { id } => {
-                        workspace.cancel_or_remove_sftp_transfer(*id, cx);
-                    }
-                    sftp::SftpWorkspaceEvent::ResumeIncompleteTransferRequested { transfer_id } => {
-                        workspace.resume_sftp_incomplete_transfer(transfer_id.clone(), cx);
-                    }
-                    sftp::SftpWorkspaceEvent::DiscardIncompleteTransferRequested {
-                        transfer_id,
-                    } => {
-                        workspace.discard_sftp_incomplete_transfer(transfer_id.clone(), cx);
-                    }
-                    sftp::SftpWorkspaceEvent::TooltipRequested { id, label, x, y } => {
-                        workspace.queue_workspace_tooltip(id, label, *x, *y, cx);
-                    }
-                    sftp::SftpWorkspaceEvent::TooltipCleared { id } => {
-                        workspace.clear_workspace_tooltip(id, cx);
-                    }
-                    sftp::SftpWorkspaceEvent::PreviewSaveRequested {
-                        path,
-                        content,
-                        encoding,
-                        line_ending,
-                        generation,
-                        delivery,
-                    } => {
-                        if !workspace.spawn_remote_sftp_preview_save(
-                            path.clone(),
-                            content.clone(),
-                            encoding.clone(),
-                            *line_ending,
-                            *generation,
-                            delivery.clone(),
-                            cx,
-                        ) {
-                            let _ = delivery.send(sftp::SftpWorkerResult::PreviewSaved {
-                                generation: *generation,
-                                path: path.clone(),
-                                content: content.clone(),
-                                network_error_message: workspace
-                                    .i18n
-                                    .t("sftp.errors.connection_lost"),
-                                result: Err("SFTP connection unavailable".to_string()),
-                            });
-                        }
-                    }
-                    sftp::SftpWorkspaceEvent::RemoteLoadReady {
-                        surface_id,
-                        remote_id,
-                        delivery,
-                    } => {
-                        workspace.request_visible_sftp_remote_load(
-                            *surface_id,
-                            remote_id.clone(),
-                            delivery.clone(),
-                            cx,
-                        );
-                    }
-                }
-                cx.notify();
+            |workspace, _, event: &sftp::SftpWorkspaceEvent, cx| {
+                workspace.handle_sftp_surface_event(sftp::SftpSurfaceId::Sidebar, event, cx);
             },
         );
         let terminal = cx.new(|cx| {
@@ -388,6 +332,9 @@ impl WorkspaceApp {
                     ConnectionFlowEvent::ConnectionFormClosed => {
                         // Apply runtime cleanup after the Entity has already cleared ownership.
                         workspace.cleanup_cancelled_proxy_connect_runs(cx);
+                        if workspace.active_pane(cx).is_some() {
+                            workspace.needs_active_pane_focus = true;
+                        }
                     }
                     ConnectionFlowEvent::WorkerResultsReady => {
                         workspace.enqueue_connection_flow_window_effect(cx);
@@ -396,7 +343,7 @@ impl WorkspaceApp {
                 cx.notify();
             },
         );
-        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (profiler_update_tx, profiler_update_rx) = tokio::sync::mpsc::channel(1);
         let host_tools_messages = HostToolsMessages::from_i18n(&i18n);
         let host_tools = cx.new(|cx| {
             let mut host_tools = HostToolsEntity::new(
@@ -601,6 +548,9 @@ impl WorkspaceApp {
                 workspace.handle_ide_workspace_event(event, cx);
             },
         );
+        // The Knowledge workspace is tab-owned so its navigator and editor survive activity-bar
+        // navigation without occupying the global context sidebar.
+        let knowledge_workspace = cx.new(|_| knowledge::KnowledgeWorkspaceEntity::default());
         let mut workspace = Self {
             focus_handle,
             main_window_tabs: WorkspaceWindowTabState::new(),
@@ -609,11 +559,13 @@ impl WorkspaceApp {
             detached_tab_return_handoff: None,
             next_tab_window_handoff_generation: 0,
             main_window_tabbar_drop_bounds: None,
+            split_drop_regions: Rc::new(RefCell::new(Vec::new())),
+            split_drop_target: None,
             pending_auto_close_terminal_sessions: HashSet::new(),
             auto_close_terminal_sessions_scheduled: false,
             tab_host,
             _tab_host_subscription: tab_host_subscription,
-            search: SearchBarState::default(),
+            search: actions::TerminalSearchState::default(),
             terminal_recording_menu_open: false,
             terminal_highlight_popover_open: false,
             terminal_trigger_settings_pane: None,
@@ -642,6 +594,9 @@ impl WorkspaceApp {
             onboarding: OnboardingState::from_settings(&settings),
             shortcuts_modal: ShortcutsModalState {
                 open: false,
+                presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
+                motion_generation: 0,
+                exit_task: None,
                 query: String::new(),
                 scroll_handle: UniformListScrollHandle::new(),
             },
@@ -669,17 +624,35 @@ impl WorkspaceApp {
             plugin_entity,
             _plugin_entity_subscription: plugin_entity_subscription,
             split_drag: None,
+            disclosure_motions: disclosure_motion::DisclosureMotions::default(),
             sidebar_resizing: false,
             embedded_sftp_sidebar_resizing: false,
             sidebar_resize_hotzone_hovered: false,
             sidebar_collapsed: settings.sidebar_ui.collapsed,
             sidebar_rendered: !settings.sidebar_ui.collapsed,
             sidebar_motion_generation: 0,
+            sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion::new(
+                if settings.sidebar_ui.collapsed {
+                    0.0
+                } else {
+                    initial_sidebar_width - tokens.metrics.activity_bar_width
+                },
+            ),
             sidebar_width: initial_sidebar_width,
             context_sidebar_rendered: !settings.sidebar_ui.ai_sidebar_collapsed
                 && !settings.sidebar_ui.zen_mode
                 && settings.ai.enabled,
             context_sidebar_motion_generation: 0,
+            context_sidebar_motion: oxideterm_gpui_ui::motion::SidebarMotion::new(
+                if settings.sidebar_ui.ai_sidebar_collapsed
+                    || settings.sidebar_ui.zen_mode
+                    || !settings.ai.enabled
+                {
+                    0.0
+                } else {
+                    initial_context_sidebar_width
+                },
+            ),
             ai_entity,
             acp_entity,
             skill_registry,
@@ -697,6 +670,9 @@ impl WorkspaceApp {
             ),
             active_surface: ActiveSurface::Terminal,
             active_session_sidebar_view_mode: ActiveSessionSidebarViewMode::Tree,
+            session_sort_menu_open: false,
+            session_search_open: false,
+            session_search_query: String::new(),
             active_session_sidebar_focused_node_id: settings
                 .tree_ui
                 .focused_node_id
@@ -717,7 +693,22 @@ impl WorkspaceApp {
             )
             .measure_all(),
             active_session_sidebar_list_cache: RefCell::new(VirtualListSignatureCache::default()),
+            // Collections and documents scroll independently so an empty document result can own
+            // the full remaining navigator region instead of becoming one short list row.
+            knowledge_workspace_list_state: ListState::new(
+                KNOWLEDGE_WORKSPACE_SECTION_COUNT,
+                ListAlignment::Top,
+                TauriVirtualListSpec::new(
+                    px(KNOWLEDGE_WORKSPACE_SECTION_ESTIMATED_HEIGHT),
+                    KNOWLEDGE_WORKSPACE_SECTION_OVERSCAN,
+                )
+                .overdraw(),
+            )
+            .measure_all(),
             open_settings_select: None,
+            settings_theme_preview: None,
+            settings_theme_scroll: ScrollHandle::new(),
+            open_settings_select_owner_window_id: None,
             settings_select_focus_origin: None,
             // Settings tabs are variable-height browser sections, not a single
             // flex tree. Initialize the shared GPUI ListState here and let the
@@ -736,6 +727,7 @@ impl WorkspaceApp {
             standard_confirm_focused_action: None,
             skip_future_ssh_close_confirmations: false,
             select_anchors: HashMap::new(),
+            settings_select_anchors: HashMap::new(),
             text_input_anchors: TextInputAnchorStore::default(),
             selectable_text_values: HashMap::new(),
             selectable_text_layouts: HashMap::new(),
@@ -784,6 +776,7 @@ impl WorkspaceApp {
             sftp_progress_store,
             node_router,
             notification_center: NotificationCenterState::default(),
+            audit,
             notification_sidebar_list_state: tauri_virtual_list_state(
                 0,
                 ListAlignment::Top,
@@ -793,10 +786,11 @@ impl WorkspaceApp {
                 ),
             ),
             notification_sidebar_list_cache: RefCell::new(VirtualListSignatureCache::default()),
-            event_log_sidebar_scroll_handle: UniformListScrollHandle::new(),
             ssh_nodes: HashMap::new(),
             saved_ssh_nodes: HashMap::new(),
             expanded_ssh_nodes: HashSet::new(),
+            expanded_standalone_connections: HashSet::new(),
+            local_session_group_expanded: true,
             active_ssh_node_id: None,
             next_ssh_node_id: 1,
             forwarding,
@@ -807,6 +801,7 @@ impl WorkspaceApp {
             sftp_tab_nodes: HashMap::new(),
             standalone_sftp_tabs: HashMap::new(),
             standalone_sftp_sessions: HashMap::new(),
+            ftp_sessions: HashMap::new(),
             dedicated_sftp_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             ssh_consumer_prompt_handler,
             ssh_consumer_managed_key_resolver,
@@ -816,7 +811,11 @@ impl WorkspaceApp {
             sftp_presentation_request: None,
             ide_workspace,
             _ide_workspace_subscription: ide_workspace_subscription,
+            knowledge_workspace,
             sftp_view,
+            sftp_pages: HashMap::new(),
+            sftp_dispatch_surface: Rc::new(Cell::new(None)),
+            sftp_focused_surface: sftp::SftpSurfaceId::Sidebar,
             _sftp_observation: sftp_observation,
             _sftp_subscription: sftp_subscription,
             graphics,
@@ -878,6 +877,7 @@ impl WorkspaceApp {
         workspace.bootstrap_cloud_sync_controller(cx);
         workspace.start_public_mcp_delivery(cx);
         workspace.sync_ssh_config_sync_service();
+        workspace.start_audit_delivery(cx);
         workspace.restore_session_tree_snapshot();
         workspace.standalone_connections =
             standalone_connections::StandaloneConnectionRegistry::restore(
@@ -944,9 +944,14 @@ impl WorkspaceApp {
                 let root = tab.root_pane.as_ref()?;
                 root.contains_pane(pane_id).then(|| {
                     (
-                        tab_background_key(&tab.kind),
+                        tab_background_key(
+                            &self
+                                .terminal_tab_kind_for_pane(pane_id, cx)
+                                .unwrap_or_else(|| tab.kind.clone()),
+                        ),
                         root.session_id_for_pane(pane_id),
-                        tab.kind.clone(),
+                        self.terminal_tab_kind_for_pane(pane_id, cx)
+                            .unwrap_or_else(|| tab.kind.clone()),
                     )
                 })
             })
@@ -1178,6 +1183,17 @@ impl WorkspaceApp {
             background: self.terminal_background_preferences(background_key),
             transparent_background: self.window_background_preferences().is_some(),
             paste_labels: TerminalPasteLabels {
+                edit: self.i18n.t("terminal.paste.edit"),
+                edit_title: self.i18n.t("terminal.paste.edit_title"),
+                strip_fence: self.i18n.t("terminal.paste.strip_fence"),
+                undo: self.i18n.t("terminal.paste.undo"),
+                redo: self.i18n.t("terminal.paste.redo"),
+                editor_menu: oxideterm_gpui_editor::EditorContextMenuLabels {
+                    copy: self.i18n.t("menu.copy"),
+                    cut: self.i18n.t("fileManager.cut"),
+                    paste: self.i18n.t("menu.paste"),
+                    select_all: self.i18n.t("fileManager.selectAll"),
+                },
                 title_template: self.i18n.t("terminal.paste.title"),
                 more_lines_template: self.i18n.t("terminal.paste.more_lines"),
                 confirm: self.i18n.t("terminal.paste.confirm"),
@@ -1202,6 +1218,9 @@ impl WorkspaceApp {
             },
             autosuggest_labels: TerminalAutosuggestLabels {
                 history_source: self.i18n.t("terminal.command_bar.source_history"),
+                matches: self.i18n.t("terminal.autosuggest.matches"),
+                navigation_hint: self.i18n.t("terminal.autosuggest.navigation_hint"),
+                dismiss_hint: self.i18n.t("terminal.autosuggest.dismiss_hint"),
             },
             command_selection_labels: TerminalCommandSelectionLabels {
                 actions: self.i18n.t("terminal.command_selection.actions"),
@@ -1232,7 +1251,15 @@ impl WorkspaceApp {
                 ymodem_receive: self.i18n.t("terminal.modem.ymodem_receive"),
                 zmodem_upload: self.i18n.t("terminal.modem.zmodem_upload"),
                 zmodem_receive: self.i18n.t("terminal.modem.zmodem_receive"),
+                timeout: self.i18n.t("terminal.modem.timeout"),
+                protocol_error: self.i18n.t("terminal.modem.protocol_error"),
+                file_error: self.i18n.t("terminal.modem.file_error"),
+                file_too_large: self.i18n.t("terminal.modem.file_too_large"),
+                buffer_overflow: self.i18n.t("terminal.modem.buffer_overflow"),
+                worker_stopped: self.i18n.t("terminal.modem.worker_stopped"),
             },
+            control_bar_expand_label: self.i18n.t("terminal.control_bar.show_controls"),
+            control_bar_collapse_label: self.i18n.t("terminal.control_bar.hide_controls"),
             serial_control_labels: TerminalSerialControlLabels {
                 serial: self.i18n.t("terminal.serial_control.serial"),
                 connected: self.i18n.t("terminal.serial_control.connected"),
@@ -1419,6 +1446,11 @@ impl WorkspaceApp {
             || self
                 .terminal_background_preferences(background_key)
                 .is_some()
+    }
+
+    pub(in crate::workspace) fn workspace_chrome_divider(&self) -> Rgba {
+        // Long workspace seams need less contrast than control outlines.
+        rgba((self.tokens.ui.border << 8) | 0x66)
     }
 
     pub(in crate::workspace) fn workspace_chrome_background(&self, color: u32) -> Rgba {

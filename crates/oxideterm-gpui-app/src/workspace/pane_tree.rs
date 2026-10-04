@@ -1,4 +1,5 @@
 use super::*;
+use oxideterm_gpui_ui::button::{ButtonRadius, IconButtonOptions};
 use oxideterm_terminal_triggers::SavedConnectionKind;
 
 const SPLIT_HANDLE_LINE_ALPHA: u32 = 0xd9;
@@ -18,6 +19,7 @@ pub(super) struct SplitDrag {
     direction: SplitDirection,
     start_position: gpui::Point<Pixels>,
     start_sizes: Vec<f32>,
+    start_extent: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -38,15 +40,21 @@ enum TerminalSplitSource {
 }
 
 fn terminal_split_supported(
-    tab_kind: &TabKind,
-    contains_serial_terminal: bool,
+    kind: oxideterm_terminal::TerminalSessionKind,
     ssh_node_ready: bool,
 ) -> bool {
-    match tab_kind {
-        TabKind::LocalTerminal => !contains_serial_terminal,
-        TabKind::SshTerminal => ssh_node_ready,
+    use oxideterm_terminal::TerminalSessionKind;
+    match kind {
+        TerminalSessionKind::LocalPty => true,
+        TerminalSessionKind::SshPty => ssh_node_ready,
         _ => false,
     }
+}
+
+fn terminal_auto_closes_on_exit(kind: oxideterm_terminal::TerminalSessionKind) -> bool {
+    // A remote channel or device can end independently of the user's task. Retain
+    // its pane and scrollback until explicitly closed, even if the node stays connected.
+    kind == oxideterm_terminal::TerminalSessionKind::LocalPty
 }
 
 fn serial_profile_line_ending(
@@ -89,9 +97,6 @@ impl TerminalInputBroadcastRoute {
         let Some(terminal) = self.terminal.upgrade() else {
             return;
         };
-        if !terminal.read(cx).broadcast_enabled() {
-            return;
-        }
 
         let (live_panes, mut candidates) = {
             let tab_host = tab_host.read(cx);
@@ -109,11 +114,33 @@ impl TerminalInputBroadcastRoute {
 
         let targets = terminal.update(cx, |terminal, _cx| {
             terminal.retain_live_broadcast_targets(&live_panes);
-            if !terminal.broadcast_enabled() {
-                return Vec::new();
-            }
-            terminal.filter_broadcast_targets(candidates)
+            terminal.filter_broadcast_targets(self.source_pane_id, candidates)
         });
+        if targets.is_empty() {
+            return;
+        }
+        let explicit_send = matches!(kind, TerminalBroadcastInputKind::Paste)
+            || bytes.contains(&b'\r')
+            || bytes.contains(&b'\n');
+        let mut batch = explicit_send.then(|| {
+            let mut context = oxideterm_audit::AuditContext::current_request()
+                .or_else(oxideterm_audit::AuditContext::current);
+            if let Some(context) = &mut context {
+                context.source = oxideterm_audit::AuditSource::Broadcast;
+            }
+            oxideterm_audit::AuditOperation::in_context(
+                context.as_ref(),
+                oxideterm_audit::AuditCategory::Automation,
+                "broadcast_send_batch",
+                None,
+            )
+        });
+        let parent_id = batch
+            .as_ref()
+            .and_then(oxideterm_audit::AuditOperation::id)
+            .map(str::to_string);
+        let target_count = targets.len();
+        let mut sent_count = 0usize;
         for pane_id in targets {
             let session_id = tab_host
                 .read(cx)
@@ -132,11 +159,31 @@ impl TerminalInputBroadcastRoute {
             let Some(pane) = tab_host.read(cx).panes().get(&pane_id).cloned() else {
                 continue;
             };
-            let _ = pane.update(cx, |pane, cx| {
+            if pane.update(cx, |pane, cx| {
                 // Borrowed input is delivered synchronously and never retained
                 // outside the target pane's existing zeroizing write path.
-                pane.send_broadcast_input(kind, bytes, cx);
-            });
+                pane.send_broadcast_input_with_parent(kind, bytes, parent_id.as_deref(), cx)
+            }) {
+                sent_count += 1;
+            }
+        }
+        if let Some(mut batch) = batch.take() {
+            batch.summary(&format!(
+                "targets={target_count}; sent={sent_count}; input_bytes={}",
+                bytes.len()
+            ));
+            batch.finish(
+                if sent_count == target_count {
+                    oxideterm_audit::AuditOutcome::Sent
+                } else if sent_count > 0 {
+                    oxideterm_audit::AuditOutcome::Partial
+                } else {
+                    oxideterm_audit::AuditOutcome::Failed
+                },
+                oxideterm_audit::AuditEvidence::Dispatch,
+                None,
+                None,
+            );
         }
     }
 }
@@ -214,12 +261,11 @@ impl WorkspaceApp {
                 }
             }
             TerminalPaneEvent::SearchStatusChanged => {
-                if self.active_pane_id(cx) == Some(pane_id)
-                    && self.search.visible
-                    && let Some(pane) = self.active_pane(cx)
+                if let Some(search) = self.search.panes.get_mut(&pane_id)
+                    && search.visible
+                    && let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id)
                 {
-                    self.search
-                        .sync_from_terminal(pane.read(cx).search_status());
+                    search.sync_from_terminal(pane.read(cx).search_status());
                     cx.notify();
                 }
             }
@@ -363,26 +409,26 @@ impl WorkspaceApp {
         pane_id: &PaneId,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Entity<TerminalPane>> {
+        if self
+            .ai_entity
+            .read(cx)
+            .terminal_inline_panel()
+            .target
+            .is_some_and(|(id, _)| id == *pane_id)
+        {
+            self.ai_entity
+                .update(cx, |ai, _| ai.close_terminal_inline_panel());
+        }
+        if self.search.focused == Some(*pane_id) {
+            self.ime_marked_text = None;
+            self.clear_ime_selection();
+        }
+        self.search.remove(*pane_id);
+        self.terminal.update(cx, |terminal, _| {
+            terminal.sync_groups_mut().remove(*pane_id)
+        });
         self.tab_host
             .update(cx, |tab_host, _cx| tab_host.remove_terminal_pane(*pane_id))
-    }
-
-    fn terminal_session_keeps_tab_after_exit(
-        &self,
-        session_id: TerminalSessionId,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.serial_terminal_configs.contains_key(&session_id) {
-            return true;
-        }
-        let pane = {
-            let tab_host = self.tab_host.read(cx);
-            let location = tab_host.terminal_location(session_id);
-            location.and_then(|location| tab_host.panes().get(&location.pane_id).cloned())
-        };
-        pane.is_some_and(|pane| {
-            pane.read(cx).session_kind() == oxideterm_terminal::TerminalSessionKind::Telnet
-        })
     }
 
     pub(super) fn queue_auto_close_terminal_session(
@@ -390,12 +436,24 @@ impl WorkspaceApp {
         session_id: TerminalSessionId,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal_session_keeps_tab_after_exit(session_id, cx) {
+        if !self.terminal_session_auto_closes_on_exit(session_id, cx) {
             return;
         }
         if self.pending_auto_close_terminal_sessions.insert(session_id) {
             cx.notify();
         }
+    }
+
+    fn terminal_session_auto_closes_on_exit(
+        &self,
+        session_id: TerminalSessionId,
+        cx: &App,
+    ) -> bool {
+        self.tab_host
+            .read(cx)
+            .terminal_location(session_id)
+            .and_then(|location| self.terminal_kind_for_pane(location.pane_id, cx))
+            .is_some_and(terminal_auto_closes_on_exit)
     }
 
     pub(super) fn schedule_pending_auto_close_terminal_sessions(
@@ -425,26 +483,11 @@ impl WorkspaceApp {
     ) {
         let session_ids: Vec<_> = self.pending_auto_close_terminal_sessions.drain().collect();
         for session_id in session_ids {
-            if self.terminal_session_keeps_tab_after_exit(session_id, cx) {
+            if !self.terminal_session_auto_closes_on_exit(session_id, cx) {
                 continue;
             }
             self.close_terminal_session(session_id, window, cx);
         }
-    }
-
-    pub(super) fn active_tab_has_serial_terminal(&self, cx: &App) -> bool {
-        let Some(tab) = self.active_tab(cx) else {
-            return false;
-        };
-        let Some(root_pane) = tab.root_pane.as_ref() else {
-            return false;
-        };
-
-        let mut session_ids = Vec::new();
-        root_pane.collect_session_ids(&mut session_ids);
-        session_ids
-            .iter()
-            .any(|session_id| self.serial_terminal_configs.contains_key(session_id))
     }
 
     pub(super) fn can_split_active_pane(&self, cx: &App) -> bool {
@@ -452,36 +495,35 @@ impl WorkspaceApp {
     }
 
     fn active_pane_split_target(&self, cx: &App) -> Option<ActivePaneSplitTarget> {
-        let (tab_id, active_pane_id, pane_count, tab_kind) =
-            self.active_tab(cx).and_then(|tab| {
-                Some((
-                    tab.id,
-                    tab.active_pane_id?,
-                    tab.root_pane.as_ref()?.pane_count(),
-                    tab.kind.clone(),
-                ))
-            })?;
+        let (tab_id, active_pane_id, pane_count) = self.active_tab(cx).and_then(|tab| {
+            Some((
+                tab.id,
+                tab.active_pane_id?,
+                tab.root_pane.as_ref()?.pane_count(),
+            ))
+        })?;
         if pane_count >= MAX_PANES_PER_TAB {
             return None;
         }
 
-        let ssh_node_id = (tab_kind == TabKind::SshTerminal)
-            .then(|| self.active_ssh_terminal_node_id(cx))
-            .flatten();
-        let ssh_node_ready = ssh_node_id
-            .as_ref()
-            .is_some_and(|node_id| self.node_is_ready_for_terminal(node_id));
+        let kind = self.terminal_kind_for_pane(active_pane_id, cx)?;
+        let node = self.active_ssh_terminal_node_id(cx);
         if !terminal_split_supported(
-            &tab_kind,
-            self.active_tab_has_serial_terminal(cx),
-            ssh_node_ready,
+            kind,
+            node.as_ref()
+                .is_some_and(|id| self.node_is_ready_for_terminal(id)),
         ) {
             return None;
         }
-
-        let source = match tab_kind {
-            TabKind::LocalTerminal => TerminalSplitSource::Local,
-            TabKind::SshTerminal => TerminalSplitSource::Ssh(ssh_node_id?),
+        let source = match kind {
+            oxideterm_terminal::TerminalSessionKind::LocalPty => TerminalSplitSource::Local,
+            oxideterm_terminal::TerminalSessionKind::SshPty => {
+                let node = self.active_ssh_terminal_node_id(cx)?;
+                if !self.node_is_ready_for_terminal(&node) {
+                    return None;
+                }
+                TerminalSplitSource::Ssh(node)
+            }
             _ => return None,
         };
         Some(ActivePaneSplitTarget {
@@ -511,19 +553,48 @@ impl WorkspaceApp {
         let session_id = self.alloc_session_id(cx);
         let mut preferences =
             self.prepare_terminal_preferences_for_tab_kind(&TabKind::LocalTerminal, cx);
-        let local_config = self.local_terminal_config();
+        let host = self.tab_host.read(cx);
+        let source_instance = host
+            .tab_by_id(target.tab_id)
+            .and_then(|tab| tab.root_pane.as_ref())
+            .and_then(|root| root.session_id_for_pane(target.active_pane_id))
+            .and_then(|session_id| host.local_sessions.get(&session_id))
+            .cloned();
+        let mut local_config = self.local_terminal_config();
+        if let Some(instance) = &source_instance {
+            local_config.shell = instance.shell.clone();
+            local_config.cwd = instance.cwd.clone();
+        }
+        if let Some(pane) = self.tab_host.read(cx).panes().get(&target.active_pane_id) {
+            if let Some(snapshot) = terminal_cwd::terminal_cwd_snapshot_from_pane(
+                oxideterm_environment::CurrentDirectoryScope::Local,
+                pane.read(cx),
+            ) {
+                local_config.cwd = Some(std::path::PathBuf::from(snapshot.path()));
+            }
+        }
+        let instance = source_instance.unwrap_or_else(|| {
+            local_sessions::LocalTerminalInstance::new(
+                &local_config,
+                self.local_terminal_tab_title(),
+            )
+        });
         let local_preference_overrides =
             self.terminal_preference_overrides_for_local_shell(local_config.shell.as_ref());
         local_preference_overrides.apply_to(&mut preferences);
+        let shared_session = match TerminalPane::local_shared_session(local_config, &preferences) {
+            Ok(session) => session,
+            Err(error) => {
+                self.session_manager.update(cx, |manager, cx| {
+                    manager.set_status(Some(error.to_string()), cx)
+                });
+                return;
+            }
+        };
         let pane = cx.new(|cx| {
-            TerminalPane::new_local_with_config_and_preferences(
-                local_config,
-                preferences,
-                window,
-                cx,
-            )
-            .expect("failed to initialize split terminal pane")
-            .with_preference_overrides(local_preference_overrides)
+            TerminalPane::from_shared_session(shared_session, preferences, window, cx)
+                .expect("failed to initialize split terminal view")
+                .with_preference_overrides(local_preference_overrides)
         });
 
         if self.tab_host.update(cx, |tab_host, _| {
@@ -536,6 +607,9 @@ impl WorkspaceApp {
                 session_id,
             )
         }) {
+            self.tab_host.update(cx, |host, _| {
+                host.local_sessions.insert(session_id, instance);
+            });
             self.register_terminal_pane(pane_id, session_id, pane.clone(), window, cx);
             self.bind_terminal_location(target.tab_id, pane_id, session_id, cx);
             self.activate_embedded_sftp_sidebar_if_visible(cx);
@@ -601,24 +675,48 @@ impl WorkspaceApp {
     }
 
     pub(super) fn close_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((tab_id, active_pane_id, pane_count, session_id)) =
-            self.active_tab(cx).and_then(|tab| {
-                let active_pane_id = tab.active_pane_id?;
-                let root_pane = tab.root_pane.as_ref()?;
-                Some((
-                    tab.id,
-                    active_pane_id,
-                    root_pane.pane_count(),
-                    root_pane.session_id_for_pane(active_pane_id),
-                ))
-            })
-        else {
+        let Some((tab_id, active_pane_id, pane_count)) = self.active_tab(cx).and_then(|tab| {
+            let active_pane_id = tab.active_pane_id?;
+            let root_pane = tab.root_pane.as_ref()?;
+            Some((tab.id, active_pane_id, root_pane.pane_count()))
+        }) else {
             return;
         };
         if pane_count <= 1 {
             return;
         }
 
+        if let Some(page) = self
+            .tab_by_id(tab_id, cx)
+            .and_then(|tab| tab.root_pane.as_ref()?.page_id_for_pane(active_pane_id))
+        {
+            self.request_close_tab_by_id(page, window, cx);
+        } else {
+            self.close_terminal_pane_in_tab(tab_id, active_pane_id, window, cx);
+        }
+    }
+
+    pub(in crate::workspace) fn close_terminal_pane_in_tab(
+        &mut self,
+        tab_id: TabId,
+        active_pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self
+            .tab_by_id(tab_id, cx)
+            .and_then(|tab| tab.root_pane.as_ref())
+        else {
+            return;
+        };
+        let Some(session_id) = root.session_id_for_pane(active_pane_id) else {
+            return;
+        };
+        if root.pane_count() == 1 {
+            self.close_tab_by_id(tab_id, window, cx);
+            return;
+        }
+        let session_id = Some(session_id);
         if let Some(session_id) = session_id {
             self.standalone_connections.release_surface(
                 standalone_connections::StandaloneConnectionSurface::Terminal(session_id),
@@ -642,9 +740,13 @@ impl WorkspaceApp {
             })
             .is_some()
         {
-            self.activate_embedded_sftp_sidebar_if_visible(cx);
-            self.needs_active_pane_focus = true;
-            self.focus_active_pane(window, cx);
+            if self.active_tab_id(cx) == Some(tab_id) {
+                self.sync_active_tab_surface(cx);
+            }
+            if self.active_tab_id(cx) == Some(tab_id) || self.tab_host.read(cx).is_detached(tab_id)
+            {
+                self.focus_tab_terminal(tab_id, window, cx);
+            }
             cx.notify();
         }
     }
@@ -663,42 +765,16 @@ impl WorkspaceApp {
         if root_pane.pane_count() <= 1 {
             return;
         }
-        let Some(active_session_id) = root_pane.session_id_for_pane(active_pane_id) else {
-            return;
-        };
-
         let mut pane_ids = Vec::new();
         root_pane.collect_pane_ids(&mut pane_ids);
-        let mut session_ids = Vec::new();
-        root_pane.collect_session_ids(&mut session_ids);
-
-        for session_id in session_ids
-            .into_iter()
-            .filter(|session_id| *session_id != active_session_id)
-        {
-            self.standalone_connections.release_surface(
-                standalone_connections::StandaloneConnectionSurface::Terminal(session_id),
-            );
-            self.release_public_mcp_terminal_for_closed_session(session_id, cx);
-            self.serial_terminal_configs.remove(&session_id);
-            self.telnet_terminal_profile_ids.remove(&session_id);
-            self.terminal_saved_connection_refs.remove(&session_id);
-            self.clear_terminal_trigger_session_overrides(session_id);
-            self.unregister_ssh_terminal_session(session_id, cx);
-        }
-        for pane_id in pane_ids
-            .into_iter()
-            .filter(|pane_id| *pane_id != active_pane_id)
-        {
-            if let Some(pane) = self.remove_terminal_pane(&pane_id, cx) {
-                let _ = pane.update(cx, |pane, _cx| pane.shutdown());
+        for pane in pane_ids.into_iter().filter(|id| *id != active_pane_id) {
+            if let Some(page) = root_pane.page_id_for_pane(pane) {
+                self.close_tab_by_id(page, window, cx);
+            } else {
+                self.close_terminal_pane_in_tab(tab_id, pane, window, cx);
             }
         }
-
-        self.tab_host.update(cx, |tab_host, _| {
-            tab_host.reset_to_single_pane(tab_id, active_pane_id, active_session_id);
-        });
-        self.activate_embedded_sftp_sidebar_if_visible(cx);
+        self.sync_active_tab_surface(cx);
         self.needs_active_pane_focus = true;
         self.focus_active_pane(window, cx);
         cx.notify();
@@ -711,6 +787,7 @@ impl WorkspaceApp {
         handle_index: usize,
         direction: SplitDirection,
         sizes: &[f32],
+        extent: f32,
         event: &MouseDownEvent,
         cx: &mut Context<Self>,
     ) {
@@ -721,6 +798,7 @@ impl WorkspaceApp {
             direction,
             start_position: event.position,
             start_sizes: sizes.to_vec(),
+            start_extent: extent,
         });
         cx.notify();
     }
@@ -728,7 +806,7 @@ impl WorkspaceApp {
     pub(super) fn update_split_drag(
         &mut self,
         event: &MouseMoveEvent,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self.split_drag.clone() else {
@@ -736,16 +814,13 @@ impl WorkspaceApp {
         };
         // Splitters use root-level pointer capture. While dragging outside the
         // splitter element, the stored drag state owns motion until mouse-up.
-        let viewport = window.viewport_size();
         let delta_fraction = match drag.direction {
             SplitDirection::Horizontal => {
-                f32::from(event.position.x - drag.start_position.x)
-                    / f32::from(viewport.width).max(1.0)
+                f32::from(event.position.x - drag.start_position.x) / drag.start_extent.max(1.0)
                     * 100.0
             }
             SplitDirection::Vertical => {
-                f32::from(event.position.y - drag.start_position.y)
-                    / f32::from(viewport.height).max(1.0)
+                f32::from(event.position.y - drag.start_position.y) / drag.start_extent.max(1.0)
                     * 100.0
             }
         };
@@ -764,6 +839,12 @@ impl WorkspaceApp {
         }
     }
 
+    pub(in crate::workspace) fn split_drag_belongs_to_tab(&self, tab_id: TabId) -> bool {
+        self.split_drag
+            .as_ref()
+            .is_some_and(|drag| drag.tab_id == Some(tab_id))
+    }
+
     pub(super) fn reset_split_group_sizes(
         &mut self,
         tab_id: Option<TabId>,
@@ -778,25 +859,275 @@ impl WorkspaceApp {
         }
     }
 
-    pub(super) fn render_pane_tree(&self, node: &PaneNode, cx: &mut Context<Self>) -> AnyElement {
-        self.render_pane_tree_for_tab(self.active_tab_id(cx), node, cx)
+    fn pane_header_action(
+        &self,
+        icon: LucideIcon,
+        label_key: &'static str,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = self.i18n.t(label_key);
+        let tokens = self.tokens;
+        self.workspace_icon_action_button(
+            icon,
+            13.0,
+            rgb(tokens.ui.text_muted),
+            IconButtonOptions::opaque_toolbar(22.0, ButtonRadius::Md),
+            listener,
+            cx,
+        )
+        .id(label_key)
+        .flex_none()
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .tooltip(move |_, cx| {
+            oxideterm_gpui_ui::tooltip::tooltip_view(tokens, label.clone(), None, cx)
+        })
+        .into_any_element()
+    }
+
+    fn render_terminal_pane_header(
+        &self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.tokens.ui;
+        div()
+            .h(px(28.0))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .bg(self.workspace_chrome_background(theme.bg))
+            .border_b_1()
+            .border_color(rgb(if active { theme.accent } else { theme.border }))
+            .text_size(px(self.tokens.metrics.ui_text_xs))
+            .text_color(rgb(theme.text_muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(self.terminal_pane_label(pane_id, cx)),
+            )
+            .child(format!("#{}", pane_id.0))
+            .child(self.pane_header_action(
+                LucideIcon::AppWindow,
+                "tabbar.move_pane_to_tab",
+                move |this, _, window, cx| {
+                    this.move_terminal_pane_out(tab_id, pane_id, false, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ))
+            .child(self.pane_header_action(
+                LucideIcon::ExternalLink,
+                "tabbar.move_pane_to_window",
+                move |this, _, window, cx| {
+                    this.move_terminal_pane_out(tab_id, pane_id, true, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ))
+            .child(self.pane_header_action(
+                LucideIcon::X,
+                "command_palette.cmd_close_pane",
+                move |this, _, window, cx| {
+                    this.close_terminal_pane_in_tab(tab_id, pane_id, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    pub(super) fn render_pane_tree(
+        &mut self,
+        node: &PaneNode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_pane_tree_for_tab(self.active_tab_id(cx), node, window, cx)
+    }
+
+    fn render_workspace_page_header(
+        &self,
+        page: TabId,
+        title: &str,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.tokens.ui;
+        div()
+            .h(px(28.0))
+            .flex_none()
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .bg(self.workspace_chrome_background(theme.bg))
+            .border_b_1()
+            .border_color(rgb(if active { theme.accent } else { theme.border }))
+            .text_size(px(self.tokens.metrics.ui_text_xs))
+            .text_color(rgb(theme.text_muted))
+            .child(div().flex_1().min_w_0().truncate().child(title.to_owned()))
+            .child(self.pane_header_action(
+                LucideIcon::AppWindow,
+                "tabbar.move_pane_to_tab",
+                move |this, _, window, cx| {
+                    this.move_workspace_page_out(page, false, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ))
+            .child(self.pane_header_action(
+                LucideIcon::ExternalLink,
+                "tabbar.move_pane_to_window",
+                move |this, _, window, cx| {
+                    this.move_workspace_page_out(page, true, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ))
+            .child(self.pane_header_action(
+                LucideIcon::X,
+                "command_palette.cmd_close_pane",
+                move |this, _, window, cx| {
+                    this.request_close_tab_by_id(page, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn move_workspace_page_out(
+        &mut self,
+        page: TabId,
+        new_window: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(container) = self.tab_host.update(cx, |host, _| host.unembed_page(page)) else {
+            return;
+        };
+        if self
+            .tab_by_id(container, cx)
+            .is_some_and(|tab| tab.root_pane.is_none())
+        {
+            self.close_tab_by_id(container, window, cx);
+        }
+        self.set_main_window_active_tab(Some(page), cx);
+        self.sync_active_tab_surface(cx);
+        self.sync_ide_surface_mount(page, cx);
+        if new_window {
+            self.detach_tab_to_window(page, None, window, cx);
+        } else if let Some(main) = self
+            .window_registry
+            .handle_for_role(window_registry::WindowRole::Main)
+        {
+            if main.window_id() != window.window_handle().window_id() {
+                let _ = main.update(cx, |_, window, _| window.activate_window());
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn render_pane_tree_for_tab(
-        &self,
+        &mut self,
         tab_id: Option<TabId>,
         node: &PaneNode,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active_pane_id = tab_id
             .and_then(|tab_id| self.tab_by_id(tab_id, cx))
             .and_then(|tab| tab.active_pane_id);
-        match node {
+        let split = tab_id
+            .and_then(|id| self.tab_by_id(id, cx))
+            .and_then(|tab| tab.root_pane.as_ref())
+            .is_some_and(|root| root.pane_count() > 1);
+        let content = match node {
+            PaneNode::Page {
+                pane_id,
+                tab_id: page_id,
+            } => {
+                let Some(page) = self.tab_by_id(*page_id, cx).cloned() else {
+                    return div().into_any_element();
+                };
+                let (pane_id, page_id) = (*pane_id, *page_id);
+                let container = tab_id.unwrap_or(page_id);
+                let content = if page.kind == TabKind::Knowledge {
+                    self.render_knowledge_workspace_surface(
+                        KnowledgeWorkspaceLayout::SplitPane,
+                        window,
+                        cx,
+                    )
+                } else {
+                    self.render_tab_content_for_id(page_id, &page.kind, None, window, cx)
+                };
+                div()
+                    .id(("workspace-page", pane_id.0))
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .capture_any_mouse_down(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        let previous = this.tab_host.read(cx).focused_page_id(container);
+                        if previous != page_id {
+                            this.release_remote_desktop_inputs_for_tab(previous, cx);
+                        }
+                        if this
+                            .tab_host
+                            .update(cx, |host, _| host.set_active_pane(Some(container), pane_id))
+                        {
+                            this.blur_text_inputs(cx);
+                            if !this.tab_host.read(cx).is_detached(container) {
+                                this.sync_active_tab_surface(cx);
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .when(split, |frame| {
+                        frame.child(self.render_workspace_page_header(
+                            page_id,
+                            &page.title,
+                            Some(pane_id) == active_pane_id,
+                            cx,
+                        ))
+                    })
+                    .child(div().flex_1().min_h_0().relative().child(content))
+                    .into_any_element()
+            }
             PaneNode::Leaf { pane_id, .. } => {
                 let active = Some(*pane_id) == active_pane_id;
                 let Some(pane) = self.tab_host.read(cx).panes().get(pane_id).cloned() else {
                     return div().size_full().into_any_element();
                 };
+                let sync_header = self.render_terminal_sync_member_header(*pane_id, cx);
+                let terminal_top = if sync_header.is_some() {
+                    terminal_command_bar::TERMINAL_SYNC_HEADER_HEIGHT
+                } else {
+                    0.0
+                } + if split { 28.0 } else { 0.0 };
+                let header = div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .flex_col()
+                    .when(split, |header| {
+                        header.child(self.render_terminal_pane_header(
+                            tab_id.unwrap(),
+                            *pane_id,
+                            active,
+                            cx,
+                        ))
+                    })
+                    .children(sync_header);
                 div()
                     .id(("workspace-pane", pane_id.0))
                     .size_full()
@@ -808,11 +1139,11 @@ impl WorkspaceApp {
                         MouseButton::Left,
                         cx.listener({
                             let pane_id = *pane_id;
-                            let tab_id = tab_id;
                             move |this, _event, window, cx| {
                                 // Release logical input ownership before focusing the native pane.
                                 this.blur_text_inputs(cx);
                                 if let Some(tab_id) = tab_id {
+                                    this.release_remote_desktop_inputs_for_tab(tab_id, cx);
                                     this.tab_host.update(cx, |tab_host, _| {
                                         tab_host.set_active_pane(Some(tab_id), pane_id);
                                     });
@@ -824,7 +1155,12 @@ impl WorkspaceApp {
                                         tab_host.set_active_pane(None, pane_id);
                                     });
                                 }
-                                this.activate_embedded_sftp_sidebar_if_visible(cx);
+                                if tab_id.is_none_or(|id| !this.tab_host.read(cx).is_detached(id)) {
+                                    this.sync_active_tab_surface(cx);
+                                    this.sync_active_terminal_metadata_context(cx);
+                                    this.sync_active_terminal_recording_elapsed_tick(cx);
+                                    this.sync_active_privilege_prompt_inline_hint(cx);
+                                }
                                 if let Some(pane) =
                                     this.tab_host.read(cx).panes().get(&pane_id).cloned()
                                 {
@@ -834,18 +1170,32 @@ impl WorkspaceApp {
                             }
                         }),
                     )
+                    .child(header)
                     .child(
                         div()
                             .absolute()
-                            .top_0()
+                            .top(px(terminal_top))
                             .left_0()
                             .right_0()
                             .bottom_0()
                             .child(pane),
                     )
                     .when(
-                        active && self.ai_entity.read(cx).terminal_inline_panel().open,
+                        self.ai_entity.read(cx).terminal_inline_panel().open
+                            && self
+                                .ai_entity
+                                .read(cx)
+                                .terminal_inline_panel()
+                                .target
+                                .is_some_and(|(id, _)| id == *pane_id),
                         |pane_frame| pane_frame.child(self.render_terminal_ai_inline_panel(cx)),
+                    )
+                    .when(
+                        self.search
+                            .panes
+                            .get(pane_id)
+                            .is_some_and(|search| search.visible),
+                        |frame| frame.child(self.render_search_bar(*pane_id, cx)),
                     )
                     .into_any_element()
             }
@@ -855,6 +1205,7 @@ impl WorkspaceApp {
                 children,
             } => {
                 let sizes = node.split_sizes();
+                let extent = Rc::new(Cell::new(1.0_f32));
                 let mut group = div()
                     .id(("workspace-pane-group", id.0))
                     .size_full()
@@ -882,13 +1233,19 @@ impl WorkspaceApp {
                                     .left_0()
                                     .right_0()
                                     .bottom_0()
-                                    .child(self.render_pane_tree_for_tab(tab_id, &child.node, cx)),
+                                    .child(self.render_pane_tree_for_tab(
+                                        tab_id,
+                                        &child.node,
+                                        window,
+                                        cx,
+                                    )),
                             ),
                     );
                     if index + 1 < children.len() {
                         let group_id = *id;
                         let direction = *direction;
                         let start_sizes = sizes.clone();
+                        let drag_extent = extent.clone();
                         let active_drag = self.split_drag.as_ref().is_some_and(|drag| {
                             drag.tab_id == tab_id
                                 && drag.group_id == group_id
@@ -984,6 +1341,7 @@ impl WorkspaceApp {
                                         index,
                                         direction,
                                         &start_sizes,
+                                        drag_extent.get(),
                                         event,
                                         cx,
                                     );
@@ -1004,38 +1362,64 @@ impl WorkspaceApp {
                     }
                 }
 
-                group.into_any_element()
+                let direction = *direction;
+                div()
+                    .size_full()
+                    .child(group)
+                    .on_children_prepainted(move |bounds, _, _| {
+                        if let Some(bounds) = bounds.first() {
+                            extent.set(f32::from(match direction {
+                                SplitDirection::Horizontal => bounds.size.width,
+                                SplitDirection::Vertical => bounds.size.height,
+                            }));
+                        }
+                    })
+                    .into_any_element()
             }
+        };
+        match (tab_id, node) {
+            (Some(tab), PaneNode::Leaf { pane_id, .. } | PaneNode::Page { pane_id, .. }) => {
+                self.wrap_split_drop_region(tab, Some(*pane_id), content, window, cx)
+            }
+            _ => content,
         }
     }
 }
 
 #[cfg(test)]
-mod split_tests {
+mod tests {
     use super::*;
 
     #[test]
+    fn remote_terminal_exit_does_not_request_auto_close() {
+        use oxideterm_terminal::TerminalSessionKind::*;
+        for (kind, auto_close) in [
+            (LocalPty, true),
+            (SshPty, false),
+            (Telnet, false),
+            (Mosh, false),
+            (Serial, false),
+        ] {
+            assert_eq!(terminal_auto_closes_on_exit(kind), auto_close, "{kind:?}");
+        }
+    }
+
+    #[test]
     fn terminal_split_support_matches_transport_ownership() {
-        assert!(terminal_split_supported(
-            &TabKind::LocalTerminal,
-            false,
-            false
-        ));
-        assert!(!terminal_split_supported(
-            &TabKind::LocalTerminal,
-            true,
-            false
-        ));
-        assert!(terminal_split_supported(&TabKind::SshTerminal, false, true));
-        assert!(!terminal_split_supported(
-            &TabKind::SshTerminal,
-            false,
-            false
-        ));
-        assert!(!terminal_split_supported(
-            &TabKind::MoshTerminal,
-            false,
-            true
-        ));
+        use oxideterm_terminal::TerminalSessionKind::*;
+        for (kind, ready, supported) in [
+            (LocalPty, false, true),
+            (SshPty, true, true),
+            (SshPty, false, false),
+            (Serial, true, false),
+            (Telnet, true, false),
+            (Mosh, true, false),
+        ] {
+            assert_eq!(
+                terminal_split_supported(kind, ready),
+                supported,
+                "{kind:?}, ready={ready}"
+            );
+        }
     }
 }

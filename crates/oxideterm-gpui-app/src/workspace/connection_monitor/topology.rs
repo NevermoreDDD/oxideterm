@@ -378,7 +378,7 @@ impl WorkspaceApp {
         let connected_shadow = if node.view_status.is_connected() {
             vec![gpui::BoxShadow {
                 inset: false,
-                color: rgba((status_color << 8) | 0x30).into_color(),
+                color: rgba((status_color << 8) | 0x30).into(),
                 offset: point(px(0.0), px(0.0)),
                 blur_radius: px(15.0),
                 spread_radius: px(0.0),
@@ -410,7 +410,7 @@ impl WorkspaceApp {
                     .border_color(rgba((theme.accent << 8) | TOPOLOGY_PANEL_BORDER_ALPHA_50))
                     .shadow(vec![gpui::BoxShadow {
                         inset: false,
-                        color: rgba((theme.accent << 8) | 0x26).into_color(),
+                        color: rgba((theme.accent << 8) | 0x26).into(),
                         offset: point(px(0.0), px(0.0)),
                         blur_radius: px(20.0),
                         spread_radius: px(0.0),
@@ -439,7 +439,7 @@ impl WorkspaceApp {
                                     .when(is_down || is_connecting, |dot| {
                                         dot.shadow(vec![gpui::BoxShadow {
                                             inset: false,
-                                            color: rgba((status_color << 8) | 0x66).into_color(),
+                                            color: rgba((status_color << 8) | 0x66).into(),
                                             offset: point(px(0.0), px(0.0)),
                                             blur_radius: px(8.0),
                                             spread_radius: px(0.0),
@@ -471,7 +471,6 @@ impl WorkspaceApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener({
-                    let node = node;
                     move |this, event: &MouseDownEvent, window, cx| {
                         if event.click_count >= 2 {
                             let node_id =
@@ -553,7 +552,6 @@ impl WorkspaceApp {
                     false,
                     false,
                     {
-                        let node_id = node_id;
                         move |this, _event, window, _cx| {
                             if let Some(node_id) = node_id.clone() {
                                 this.open_sftp_tab(node_id, window, _cx);

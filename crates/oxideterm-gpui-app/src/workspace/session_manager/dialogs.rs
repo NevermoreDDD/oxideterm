@@ -256,7 +256,7 @@ impl WorkspaceApp {
         let has_background = self.background_surface_active("session_manager");
 
         let dialog = modal_backdrop(rgba(
-            (0x000000 << 8) | SESSION_MANAGER_LIGHT_DIALOG_BACKDROP_ALPHA,
+            SESSION_MANAGER_LIGHT_DIALOG_BACKDROP_ALPHA,
         ))
         .on_mouse_down(
             MouseButton::Left,
@@ -266,7 +266,7 @@ impl WorkspaceApp {
             }),
         )
         .child(overlay_content_boundary(
-            div()
+            material_surface(&self.tokens, div(), MaterialRole::Popover)
                 .w(px(460.0))
                 .flex()
                 .flex_col()
@@ -275,7 +275,6 @@ impl WorkspaceApp {
                 .rounded(px(self.tokens.radii.lg))
                 .border_1()
                 .border_color(rgb(theme.border))
-                .bg(rgb(theme.bg_panel))
                 .child(
                     div()
                         .flex()
@@ -332,7 +331,7 @@ impl WorkspaceApp {
                             ),
                         ),
                 )
-                .when_some(editor.clone(), |dialog, _editor| {
+                .when_some(editor, |dialog, _editor| {
                     dialog.child(
                         div()
                             .flex()
@@ -530,7 +529,7 @@ impl WorkspaceApp {
             MANAGER_BATCH_MOVE_MENU_HEIGHT,
             8.0,
         );
-        let popup = div()
+        let popup = material_surface(&self.tokens, div(), MaterialRole::Popover)
             .id("session-manager-batch-move-scroll")
             .w(px(MANAGER_BATCH_MOVE_MENU_WIDTH))
             .max_h(px(MANAGER_BATCH_MOVE_MENU_HEIGHT))
@@ -540,7 +539,6 @@ impl WorkspaceApp {
             .rounded(px(self.tokens.radii.md))
             .border_1()
             .border_color(rgb(theme.border))
-            .bg(rgb(theme.bg_panel))
             .shadow_lg()
             .child(self.render_batch_move_item(
                 None,

@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "Hiện các nút điều khiển",
+      "hide_controls": "Ẩn các nút điều khiển"
+    },
+    "autosuggest": {
+      "matches": "{{count}} kết quả",
+      "navigation_hint": "{{select}} chọn · {{run}} chạy · Nhấp để điền",
+      "dismiss_hint": "{{dismiss}} đóng · {{remove}} xóa"
+    },
     "processing_failed": "Quá trình xử lý thiết bị đầu cuối đã dừng. Hãy kết nối lại phiên này để tiếp tục.",
     "local_terminal": "Terminal cục bộ",
     "tmux": {
@@ -42,6 +51,11 @@
       "risk_configured": "đã cấu hình"
     },
     "paste": {
+      "edit": "Chỉnh sửa",
+      "edit_title": "Chỉnh sửa trước khi dán",
+      "strip_fence": "Xóa dấu phân cách khối mã",
+      "undo": "Hoàn tác",
+      "redo": "Làm lại",
       "title": "Phát hiện nhiều dòng ({{count}} dòng)",
       "more_lines": "... {{count}} dòng nữa",
       "confirm": "Xác nhận",
@@ -75,6 +89,12 @@
       "clear_screen": "Xóa màn hình"
     },
     "modem": {
+      "timeout": "Thiết bị bên kia không phản hồi kịp thời. Hãy khởi động chương trình truyền tệp trên thiết bị đó rồi thử lại.",
+      "protocol_error": "Thiết bị bên kia đã gửi dữ liệu truyền không hợp lệ hoặc ngoài dự kiến.",
+      "file_error": "Không thể đọc hoặc ghi tệp truyền. Hãy kiểm tra quyền truy cập và dung lượng trống.",
+      "file_too_large": "Tệp vượt quá giới hạn kích thước của giao thức này.",
+      "buffer_overflow": "Thiết bị bên kia đã gửi lượng dữ liệu vượt quá sức chứa của bộ đệm truyền.",
+      "worker_stopped": "Tiến trình truyền tệp đã dừng đột ngột. Vui lòng thử lại.",
       "binary_transfer": "Truyền nhị phân",
       "xmodem_upload": "Tải lên XMODEM",
       "xmodem_receive": "Nhận XMODEM",
@@ -259,7 +279,8 @@
       "add_group": "Add group",
       "edit_group": "Edit group",
       "delete_group": "Delete group",
-      "delete_group_description": "Các lệnh trong “{{name}}” sẽ được chuyển sang nhóm mặc định trước khi xóa nhóm.",
+      "delete_group_description": "Các lệnh trong “{{name}}” sẽ được chuyển sang “{{destination}}” trước khi xóa nhóm này.",
+      "reorder_groups": "Kéo tay cầm để sắp xếp lại các nhóm",
       "save_group": "Save group",
       "group_name_placeholder": "Group name",
       "icon_terminal": "Terminal",
@@ -469,6 +490,7 @@
       "execute": "Thực thi"
     },
     "sender": {
+      "group_hint": "Nhóm kết nối đã lưu chọn mọi cửa sổ terminal phù hợp. Cách ly trong đồng bộ tương tác không thay đổi các đích gửi được chỉ định ở đây.",
       "task": "Trình gửi",
       "placeholder": "Nhập lệnh hoặc byte thập lục phân...",
       "show": "Hiện trình gửi lệnh",
@@ -505,10 +527,18 @@
       "error_busy": "Một đích đang được tác vụ gửi khác sử dụng"
     },
     "broadcast": {
-      "groups": "Nhóm phát lệnh",
+      "members_hint": "Chọn từng phiên terminal rồi bật đồng bộ. Phiên mới không tự động tham gia. Hãy xóa phiên khỏi nhóm hiện tại trước khi chuyển nhóm.",
+      "isolate_member": "Cách ly",
+      "resume_member": "Tiếp tục đồng bộ",
+      "pause_group": "Tạm dừng",
+      "start_group": "Bật đồng bộ",
+      "sync_isolated": "Đã cách ly",
+      "sync_disabled": "Đã tạm dừng",
+      "sync_enabled": "Đang đồng bộ",
+      "groups": "Nhóm đồng bộ",
       "create_group": "Nhóm mới",
       "no_groups": "Chưa có nhóm được đặt tên",
-      "temporary_group": "Lựa chọn tạm thời",
+      "temporary_group": "Nhóm đồng bộ tạm thời",
       "group_name_placeholder": "Tên nhóm",
       "group_members": "Thành viên nhóm",
       "unsaved_target": "Chưa lưu",

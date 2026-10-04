@@ -259,55 +259,41 @@ mod tests {
     }
 
     #[test]
-    fn parent_handles_home_and_root_paths() {
-        assert_eq!(
-            current_directory_parent("~/Documents").as_deref(),
-            Some("~")
-        );
-        assert_eq!(
-            current_directory_parent("~/Documents/OxideTerm").as_deref(),
-            Some("~/Documents")
-        );
-        assert_eq!(current_directory_parent("/Users").as_deref(), Some("/"));
-        assert_eq!(
-            current_directory_parent("/Users/dominical").as_deref(),
-            Some("/Users")
-        );
-        assert_eq!(current_directory_parent("/"), None);
+    fn parent_handles_home_posix_and_windows_roots() {
+        for (path, expected) in [
+            ("~/Documents", Some("~")),
+            ("~/Documents/OxideTerm", Some("~/Documents")),
+            ("/Users", Some("/")),
+            ("/Users/dominical", Some("/Users")),
+            ("/", None),
+            ("C:\\Users\\dominical", Some("C:\\Users")),
+            ("C:\\Users", Some("C:\\")),
+            ("C:\\", None),
+        ] {
+            assert_eq!(
+                current_directory_parent(path).as_deref(),
+                expected,
+                "{path}"
+            );
+        }
     }
 
     #[test]
-    fn parent_handles_windows_drive_paths() {
-        assert_eq!(
-            current_directory_parent("C:\\Users\\dominical").as_deref(),
-            Some("C:\\Users")
-        );
-        assert_eq!(
-            current_directory_parent("C:\\Users").as_deref(),
-            Some("C:\\")
-        );
-        assert_eq!(current_directory_parent("C:\\"), None);
-    }
-
-    #[test]
-    fn cd_command_quotes_visible_shell_path() {
-        assert_eq!(
-            current_directory_cd_command("/Users/dominical/it's ok").as_deref(),
-            Some("cd '/Users/dominical/it'\\''s ok'")
-        );
-        assert_eq!(
-            current_directory_shell_path_argument("/Users/dominical/it's ok").as_deref(),
-            Some("'/Users/dominical/it'\\''s ok'")
-        );
-    }
-
-    #[test]
-    fn cd_command_preserves_home_expansion() {
-        assert_eq!(current_directory_cd_command("~").as_deref(), Some("cd ~"));
-        assert_eq!(
-            current_directory_cd_command("~/Project Files").as_deref(),
-            Some("cd \"$HOME\"/'Project Files'")
-        );
+    fn cd_commands_quote_paths_and_preserve_home_expansion() {
+        for (path, argument) in [
+            ("/Users/dominical/it's ok", "'/Users/dominical/it'\\''s ok'"),
+            ("~", "~"),
+            ("~/Project Files", "\"$HOME\"/'Project Files'"),
+        ] {
+            assert_eq!(
+                current_directory_shell_path_argument(path).as_deref(),
+                Some(argument)
+            );
+            assert_eq!(
+                current_directory_cd_command(path),
+                Some(format!("cd {argument}"))
+            );
+        }
     }
 
     #[test]

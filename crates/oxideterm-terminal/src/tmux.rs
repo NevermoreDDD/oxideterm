@@ -8,7 +8,11 @@ use std::{
 };
 
 use alacritty_terminal::{
-    event::EventListener, grid::Dimensions, sync::FairMutex, term::Term, vte::ansi::Processor,
+    event::EventListener,
+    grid::Dimensions,
+    sync::FairMutex,
+    term::{Term, TermMode},
+    vte::ansi::{NamedColor, Processor},
 };
 use oxideterm_terminal_encoding::{TerminalEncoding, TerminalOutputDecoder};
 use oxideterm_terminal_graphics::{GraphicsIngress, GraphicsOptions, TerminalGraphicsSegment};
@@ -19,9 +23,9 @@ use oxideterm_tmux::{
 
 use crate::{
     AlacEvent, LocalEventListener, LocalEventReceiver, TerminalEvent, TerminalGraphicsState,
-    TerminalImageId, TerminalSize, TerminalSnapshot, blank_snapshot_row, graphics_cursor_from_term,
-    incremental_snapshot_from_term, interactive_terminal_config,
-    shell_integration::TerminalShellIntegration, snapshot_from_term,
+    TerminalImageId, TerminalPalette, TerminalSize, TerminalSnapshot, blank_snapshot_row,
+    default_terminal_cell, graphics_cursor_from_term, incremental_snapshot_from_term,
+    interactive_terminal_config, shell_integration::TerminalShellIntegration, snapshot_from_term,
 };
 
 const INPUT_BYTES_PER_COMMAND: usize = 512;
@@ -35,10 +39,10 @@ struct SharedTmuxPane {
     graphics: Arc<Mutex<TerminalGraphicsState>>,
 }
 
-#[derive(Clone, Copy)]
-enum ExternalReply {
+pub(crate) enum ExternalReply {
     Ignore,
     Capture(PaneId),
+    Action(oxideterm_audit::AuditOperation),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,6 +137,8 @@ struct TmuxDisplayState {
     message: Option<String>,
     message_generation: u64,
     route_keys_through_client: bool,
+    // tmux 3.5+ answers pane color queries from colors the client reported earlier.
+    report_client_colors: bool,
 }
 
 /// Shares only the currently displayed emulator with the pane owner.
@@ -142,11 +148,39 @@ struct TmuxDisplayState {
 #[derive(Default)]
 pub(crate) struct TmuxDisplay {
     state: RwLock<TmuxDisplayState>,
+    // Pane emulators resolve colors from the owning session's palette for rendering and replies.
+    palette: RwLock<TerminalPalette>,
     snapshot_cache: Mutex<HashMap<PaneId, TerminalSnapshot>>,
     external_replies: Mutex<VecDeque<ExternalReply>>,
+    written_replies: Mutex<VecDeque<ReplyTag>>,
+}
+
+pub(crate) enum ReplyTag {
+    Query(BootstrapQuery),
+    External(ExternalReply),
+    PendingExternal,
 }
 
 impl TmuxDisplay {
+    pub(crate) fn palette(&self) -> TerminalPalette {
+        *self
+            .palette
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn set_palette(&self, palette: TerminalPalette) {
+        *self
+            .palette
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = palette;
+        // Cached pane rows were resolved with the previous palette.
+        self.snapshot_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.state
             .read()
@@ -194,7 +228,24 @@ impl TmuxDisplay {
         })
     }
 
-    pub(crate) fn action_command(&self, action: &TmuxAction) -> Option<Vec<u8>> {
+    pub(crate) fn action_command_with_audit(
+        &self,
+        action: &TmuxAction,
+        audit: oxideterm_audit::AuditOperation,
+    ) -> Option<(Vec<u8>, ExternalReply)> {
+        let Some(command) = self.build_action_command(action) else {
+            audit.finish(
+                oxideterm_audit::AuditOutcome::Unchanged,
+                oxideterm_audit::AuditEvidence::Dispatch,
+                None,
+                None,
+            );
+            return None;
+        };
+        Some((command, ExternalReply::Action(audit)))
+    }
+
+    fn build_action_command(&self, action: &TmuxAction) -> Option<Vec<u8>> {
         let state = self
             .state
             .read()
@@ -250,7 +301,6 @@ impl TmuxDisplay {
             TmuxAction::RunCommand(command) => normalize_tmux_command(&command)?,
             _ => return None,
         };
-        self.expect_ignored_replies(1);
         Some(command.into_bytes())
     }
 
@@ -444,8 +494,10 @@ impl TmuxDisplay {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         snapshot_cache.retain(|pane, _| state.panes.contains_key(pane));
+        let palette = self.palette();
+        let blank = default_terminal_cell(&palette, &Default::default());
         let mut lines = (0..size.rows)
-            .map(|row| blank_snapshot_row(size, 0, row))
+            .map(|row| blank_snapshot_row(size, 0, row, blank.clone()))
             .collect::<Vec<_>>();
         let mut cursor_col = 0;
         let mut cursor_row = 0;
@@ -471,9 +523,11 @@ impl TmuxDisplay {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let snapshot = if let Some(previous) = snapshot_cache.get(&pane) {
-                    incremental_snapshot_from_term(&mut term, pane_size, &graphics, previous)
+                    incremental_snapshot_from_term(
+                        &mut term, pane_size, &graphics, &palette, previous,
+                    )
                 } else {
-                    let snapshot = snapshot_from_term(&term, pane_size, &graphics);
+                    let snapshot = snapshot_from_term(&term, pane_size, &graphics, &palette);
                     term.reset_damage();
                     snapshot
                 };
@@ -555,6 +609,10 @@ impl TmuxDisplay {
     }
 
     fn enter(&self) {
+        self.written_replies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         {
             let mut state = self
                 .state
@@ -639,6 +697,49 @@ impl TmuxDisplay {
             .route_keys_through_client = enabled;
     }
 
+    fn set_client_color_reporting(&self, enabled: bool) {
+        self.state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .report_client_colors = enabled;
+    }
+
+    /// Refresh tmux's cached colors and notify subscribed applications in their own panes.
+    pub(crate) fn palette_report_commands(&self) -> Vec<Vec<u8>> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.ready {
+            return Vec::new();
+        }
+        let palette = self.palette();
+        let mut commands = Vec::new();
+        for (pane, shared_pane) in &state.panes {
+            let term = shared_pane.term.lock();
+            if state.report_client_colors {
+                for (osc, slot) in [(10, NamedColor::Foreground), (11, NamedColor::Background)] {
+                    let color =
+                        crate::color_for_alacritty_request(slot as usize, &palette, term.colors());
+                    let response = format!(
+                        "\x1b]{osc};rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}\x07",
+                        color.r, color.g, color.b
+                    );
+                    commands.extend(tmux_client_report_command(*pane, &response));
+                }
+            }
+            if term.mode().contains(TermMode::REPORT_COLOR_SCHEME) {
+                commands.extend(pane_reply_commands(
+                    *pane,
+                    palette.color_scheme_report().as_bytes(),
+                ));
+            }
+        }
+        drop(state);
+        self.expect_ignored_replies(commands.len());
+        commands
+    }
+
     fn expect_ignored_replies(&self, count: usize) {
         self.external_replies
             .lock()
@@ -648,6 +749,25 @@ impl TmuxDisplay {
 
     fn take_external_reply(&self) -> Option<ExternalReply> {
         self.external_replies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+    }
+
+    pub(crate) fn register_external_write(&self) {
+        let reply = self.take_external_reply().unwrap_or(ExternalReply::Ignore);
+        self.register_written_reply(ReplyTag::External(reply));
+    }
+
+    pub(crate) fn register_written_reply(&self, reply: ReplyTag) {
+        self.written_replies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(reply);
+    }
+
+    fn take_written_reply(&self) -> Option<ReplyTag> {
+        self.written_replies
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop_front()
@@ -673,11 +793,16 @@ impl TmuxDisplay {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+        self.written_replies
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 }
 
 pub(crate) struct TmuxAdvance {
     pub(crate) commands: Vec<Vec<u8>>,
+    pub(crate) replies: Vec<ReplyTag>,
     pub(crate) entered: bool,
     pub(crate) exited: bool,
     pub(crate) changed: bool,
@@ -687,6 +812,7 @@ impl TmuxAdvance {
     fn new() -> Self {
         Self {
             commands: Vec::new(),
+            replies: Vec::new(),
             entered: false,
             exited: false,
             changed: false,
@@ -709,7 +835,7 @@ struct TmuxPane {
 }
 
 #[derive(Clone, Copy)]
-enum BootstrapQuery {
+pub(crate) enum BootstrapQuery {
     Ignore,
     Configure,
     Version,
@@ -723,7 +849,7 @@ enum BootstrapQuery {
 }
 
 struct BootstrapReply {
-    query: BootstrapQuery,
+    query: ReplyTag,
     number: u64,
     lines: Vec<Vec<u8>>,
 }
@@ -752,6 +878,13 @@ pub(crate) struct TmuxController {
 }
 
 impl TmuxController {
+    pub(crate) fn register_written_reply(&self, reply: ReplyTag) {
+        self.display.register_written_reply(reply);
+    }
+
+    pub(crate) fn register_external_write(&self) {
+        self.display.register_external_write();
+    }
     pub(crate) fn new(
         display: Arc<TmuxDisplay>,
         listener: LocalEventListener,
@@ -803,7 +936,21 @@ impl TmuxController {
             _ => {}
         });
         self.stream = stream;
-        result.map(|()| outcome)
+        result.map(|()| {
+            debug_assert_eq!(self.pending_queries.len(), outcome.commands.len());
+            outcome.replies = outcome
+                .commands
+                .iter()
+                .map(|_| {
+                    ReplyTag::Query(
+                        self.pending_queries
+                            .pop_front()
+                            .expect("each tmux command has one reply tag"),
+                    )
+                })
+                .collect();
+            outcome
+        })
     }
 
     pub(crate) fn set_encoding(&mut self, encoding: TerminalEncoding) {
@@ -833,6 +980,7 @@ impl TmuxController {
         self.pane_modes.clear();
         self.route_keys_through_client = false;
         self.report_client_colors = false;
+        self.display.set_client_color_reporting(false);
         self.display.enter();
         self.pending_queries.clear();
         self.active_reply = None;
@@ -877,6 +1025,7 @@ impl TmuxController {
         self.pane_modes.clear();
         self.route_keys_through_client = false;
         self.report_client_colors = false;
+        self.display.set_client_color_reporting(false);
         outcome.exited = true;
         outcome.changed = true;
     }
@@ -911,15 +1060,9 @@ impl TmuxController {
         }
         if self.active_reply.is_none() {
             let query = self
-                .pending_queries
-                .pop_front()
-                .or_else(|| {
-                    self.display.take_external_reply().map(|reply| match reply {
-                        ExternalReply::Ignore => BootstrapQuery::Ignore,
-                        ExternalReply::Capture(pane) => BootstrapQuery::Capture(pane),
-                    })
-                })
-                .unwrap_or(BootstrapQuery::Ignore);
+                .display
+                .take_written_reply()
+                .unwrap_or(ReplyTag::Query(BootstrapQuery::Ignore));
             self.active_reply = Some(BootstrapReply {
                 query,
                 number: guard.number,
@@ -949,7 +1092,26 @@ impl TmuxController {
             self.display.set_error(Some(message));
         }
 
-        match reply.query {
+        let query = match reply.query {
+            ReplyTag::External(ExternalReply::Action(audit)) => {
+                audit.finish(
+                    if succeeded {
+                        oxideterm_audit::AuditOutcome::Succeeded
+                    } else {
+                        oxideterm_audit::AuditOutcome::Failed
+                    },
+                    oxideterm_audit::AuditEvidence::Protocol,
+                    None,
+                    None,
+                );
+                BootstrapQuery::Ignore
+            }
+            ReplyTag::External(ExternalReply::Capture(pane)) => BootstrapQuery::Capture(pane),
+            ReplyTag::External(ExternalReply::Ignore) => BootstrapQuery::Ignore,
+            ReplyTag::Query(query) => query,
+            ReplyTag::PendingExternal => BootstrapQuery::Ignore,
+        };
+        match query {
             BootstrapQuery::Ignore => {
                 if succeeded {
                     self.display.set_error(None);
@@ -960,6 +1122,8 @@ impl TmuxController {
                 let version = reply.lines.first().map(Vec::as_slice).unwrap_or_default();
                 self.route_keys_through_client = tmux_version_at_least(version, 3, 4);
                 self.report_client_colors = tmux_version_at_least(version, 3, 5);
+                self.display
+                    .set_client_color_reporting(self.report_client_colors);
                 self.display.set_key_routing(self.route_keys_through_client);
             }
             BootstrapQuery::Sessions => {
@@ -1043,6 +1207,7 @@ impl TmuxController {
                     format!("refresh-client -f pause-after={CONTROL_PAUSE_AFTER_SECONDS}\n")
                         .into_bytes(),
                 );
+                self.pending_queries.push_back(BootstrapQuery::Ignore);
             }
         }
         outcome.changed = true;
@@ -1303,12 +1468,18 @@ impl TmuxController {
                 AlacEvent::PtyWrite(text) => {
                     pane_inputs.extend(pane_reply_commands(pane, text.as_bytes()));
                 }
+                AlacEvent::ColorSchemeRequest => {
+                    pane_inputs.extend(pane_reply_commands(
+                        pane,
+                        self.display.palette().color_scheme_report().as_bytes(),
+                    ));
+                }
                 AlacEvent::ColorRequest(index, formatter) => {
-                    let override_color = (index <= 268)
-                        .then(|| pane_state.term.lock().colors()[index])
-                        .flatten();
-                    let color =
-                        crate::color_for_alacritty_request_with_override(index, override_color);
+                    let color = crate::color_for_alacritty_request(
+                        index,
+                        &self.display.palette(),
+                        pane_state.term.lock().colors(),
+                    );
                     let response = formatter(color);
                     pane_inputs.extend(pane_reply_commands(pane, response.as_bytes()));
                     if report_client_colors
@@ -1980,6 +2151,9 @@ mod tests {
         assert_eq!(ordinary, b"prompt");
         assert!(entered.entered);
         assert_eq!(entered.commands.len(), 5);
+        for reply in entered.replies {
+            display.register_written_reply(reply);
+        }
 
         controller
             .advance(b"%begin 1 1 1\n%end 1 1 1\n", |_| {}, false, |_| {})
@@ -2012,6 +2186,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bootstrap.commands.len(), 3);
+        for reply in bootstrap.replies {
+            display.register_written_reply(reply);
+        }
         controller
             .advance(
                 b"%begin 1 6 1\nready\n%end 1 6 1\n%begin 1 7 1\n%1 5 2\n%end 1 7 1\n%begin 1 8 1\n$1 @1 %1\n%end 1 8 1\n%output %1 \\015next\n",
@@ -2040,5 +2217,277 @@ mod tests {
             .unwrap();
         assert!(!display.is_active());
         assert!(ordinary.ends_with(b"shell"));
+    }
+
+    #[test]
+    fn palette_change_re_reports_client_colors_only_when_tmux_caches_them() {
+        for (version, expect_reports) in [("3.4", false), ("3.5", true)] {
+            let (listener, _) = crate::local_event_channel();
+            let display = Arc::new(TmuxDisplay::default());
+            let size = TerminalSize {
+                cols: 80,
+                rows: 24,
+                cell_width: 0,
+                cell_height: 0,
+            };
+            let mut controller = TmuxController::new(
+                display.clone(),
+                listener,
+                size,
+                TerminalEncoding::Utf8,
+                100,
+                GraphicsOptions::default(),
+            );
+            let mut advance = |bytes: &[u8]| {
+                let outcome = controller.advance(bytes, |_| {}, false, |_| {}).unwrap();
+                for reply in outcome.replies {
+                    display.register_written_reply(reply);
+                }
+                outcome.commands
+            };
+            advance(b"\x1bP1000p");
+            advance(b"%begin 1 1 1\n%end 1 1 1\n");
+            advance(format!("%begin 1 2 1\n{version}\n%end 1 2 1\n").as_bytes());
+            advance(b"%begin 1 3 1\n$1 demo\n%end 1 3 1\n");
+            advance(b"%begin 1 4 1\n@1 0 1 * shell\n%end 1 4 1\n");
+            advance(b"%begin 1 5 1\n%1 @1 1 80 24 5 2 80x24,0,0,1\n%end 1 5 1\n");
+            advance(b"%begin 1 6 1\n%end 1 6 1\n%begin 1 7 1\n%1 5 2\n%end 1 7 1\n%begin 1 8 1\n$1 @1 %1\n%end 1 8 1\n");
+            assert!(display.is_ready(), "tmux {version} bootstrap");
+
+            let mut ansi = crate::color::OXIDETERM_DARK_THEME.ansi;
+            ansi[0] = crate::TerminalColor::rgb(0x07, 0x36, 0x42);
+            display.set_palette(TerminalPalette::new(
+                crate::TerminalColor::rgb(0x65, 0x7b, 0x83),
+                crate::TerminalColor::rgb(0xfd, 0xf6, 0xe3),
+                crate::TerminalColor::rgb(0x58, 0x6e, 0x75),
+                ansi,
+            ));
+
+            let expected: Vec<Vec<u8>> = if expect_reports {
+                vec![
+                    b"refresh-client -r '%1:\x1b]10;rgb:6565/7b7b/8383\x07'\n".to_vec(),
+                    b"refresh-client -r '%1:\x1b]11;rgb:fdfd/f6f6/e3e3\x07'\n".to_vec(),
+                ]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                display.palette_report_commands(),
+                expected,
+                "tmux {version}"
+            );
+            let theme_report = b"send-keys -H -t %1 1b 5b 3f 39 39 37 3b 32 6e\n".to_vec();
+            assert_eq!(
+                advance(b"%output %1 \\033[?2031h\\033[?996n\n"),
+                vec![theme_report.clone()],
+                "tmux {version} must send DSR to the querying pane"
+            );
+            let mut subscribed = expected.clone();
+            subscribed.push(theme_report);
+            assert_eq!(
+                display.palette_report_commands(),
+                subscribed,
+                "tmux {version}"
+            );
+            advance(b"%output %1 \\033[?2031l\n");
+            assert_eq!(
+                display.palette_report_commands(),
+                expected,
+                "tmux {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_reply_before_later_internal_query_keeps_query_result_aligned() {
+        let (listener, _) = crate::local_event_channel();
+        let display = Arc::new(TmuxDisplay::default());
+        let size = TerminalSize {
+            cols: 80,
+            rows: 24,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let mut controller = TmuxController::new(
+            display.clone(),
+            listener,
+            size,
+            TerminalEncoding::Utf8,
+            100,
+            GraphicsOptions::default(),
+        );
+        controller
+            .advance(b"\x1bP1000p", |_| {}, false, |_| {})
+            .unwrap();
+        controller.pending_queries.clear();
+        display.written_replies.lock().unwrap().clear();
+        display.expect_ignored_replies(1);
+        display.register_external_write();
+        let internal = controller
+            .advance(b"%sessions-changed\n", |_| {}, false, |_| {})
+            .unwrap();
+        assert_eq!(internal.commands.len(), 1);
+        for reply in internal.replies {
+            display.register_written_reply(reply);
+        }
+        controller
+            .advance(
+                b"%begin 1 1 1\n$9 external\n%end 1 1 1\n",
+                |_| {},
+                false,
+                |_| {},
+            )
+            .unwrap();
+        assert!(
+            controller.sessions.is_empty(),
+            "an external reply must not populate the later internal query"
+        );
+        controller
+            .advance(
+                b"%begin 1 2 1\n$1 internal\n%end 1 2 1\n",
+                |_| {},
+                false,
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(
+            controller.sessions.get(&SessionId(1)).map(String::as_str),
+            Some("internal")
+        );
+    }
+
+    #[test]
+    fn toolbar_action_uses_protocol_reply_and_stream_exit_interrupts_pending_action() {
+        use oxideterm_audit::{
+            AuditCategory, AuditContext, AuditEvidence, AuditOperation, AuditOutcome, AuditQuery,
+            AuditService, AuditSource,
+        };
+
+        struct Keys;
+        impl oxideterm_audit::AuditKeyProvider for Keys {
+            fn load(
+                &self,
+                _: &str,
+            ) -> Result<zeroize::Zeroizing<Vec<u8>>, oxideterm_audit::AuditError> {
+                Ok(zeroize::Zeroizing::new(vec![7; 32]))
+            }
+            fn create(
+                &self,
+                id: &str,
+            ) -> Result<zeroize::Zeroizing<Vec<u8>>, oxideterm_audit::AuditError> {
+                self.load(id)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        oxideterm_audit::AuditStore::open(&directory.path().join("audit.db"), &Keys)
+            .unwrap()
+            .set_policy(oxideterm_audit::AuditPolicy {
+                enabled: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let service =
+            AuditService::with_key_provider(directory.path().join("audit.db"), Keys).unwrap();
+        let context =
+            AuditContext::new(service.client(), AuditSource::User).session("local", "localhost");
+        let (listener, _) = crate::local_event_channel();
+        let display = Arc::new(TmuxDisplay::default());
+        let size = TerminalSize {
+            cols: 80,
+            rows: 24,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let mut controller = TmuxController::new(
+            display.clone(),
+            listener,
+            size,
+            TerminalEncoding::Utf8,
+            100,
+            GraphicsOptions::default(),
+        );
+        controller
+            .advance(b"\x1bP1000p", |_| {}, false, |_| {})
+            .unwrap();
+        {
+            let mut state = display.state.write().unwrap();
+            state.ready = true;
+            state.pane = Some(PaneId(1));
+        }
+        for (action, response) in [
+            (
+                TmuxAction::PreviousWindow,
+                b"%begin 1 1 1\n%end 1 1 1\n".as_slice(),
+            ),
+            (
+                TmuxAction::NextWindow,
+                b"%begin 1 2 1\nrejected\n%error 1 2 1\n".as_slice(),
+            ),
+        ] {
+            let audit = AuditOperation::in_context(
+                Some(&context),
+                AuditCategory::Automation,
+                "tmux_control",
+                None,
+            );
+            let (_, reply) = display.action_command_with_audit(&action, audit).unwrap();
+            display.register_written_reply(ReplyTag::External(reply));
+            controller.advance(response, |_| {}, false, |_| {}).unwrap();
+        }
+        let audit = AuditOperation::in_context(
+            Some(&context),
+            AuditCategory::Automation,
+            "tmux_control",
+            None,
+        );
+        let (_, reply) = display
+            .action_command_with_audit(&TmuxAction::NewWindow, audit)
+            .unwrap();
+        display.register_written_reply(ReplyTag::External(reply));
+        controller
+            .advance(b"%exit\n\x1b\\", |_| {}, false, |_| {})
+            .unwrap();
+
+        let page = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(service.client().query(AuditQuery {
+                limit: 20,
+                ..Default::default()
+            }))
+            .unwrap();
+        let mut results = page
+            .records
+            .iter()
+            .filter_map(|record| record.details.operation.as_ref())
+            .filter(|operation| {
+                operation.action == "tmux_control"
+                    && operation.phase == Some(oxideterm_audit::AuditPhase::Result)
+            })
+            .map(|operation| {
+                (
+                    operation.outcome,
+                    operation.evidence,
+                    operation.session_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        results.sort_by_key(|(outcome, _, _)| format!("{outcome:?}"));
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&(
+            AuditOutcome::Succeeded,
+            AuditEvidence::Protocol,
+            context.session_id.clone()
+        )));
+        assert!(results.contains(&(
+            AuditOutcome::Failed,
+            AuditEvidence::Protocol,
+            context.session_id.clone()
+        )));
+        assert!(results.contains(&(
+            AuditOutcome::Unknown,
+            AuditEvidence::Lifecycle,
+            context.session_id.clone()
+        )));
     }
 }

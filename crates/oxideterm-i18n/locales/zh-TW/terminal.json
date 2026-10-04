@@ -1,5 +1,14 @@
 {
   "terminal": {
+    "control_bar": {
+      "show_controls": "展開操作列",
+      "hide_controls": "收起操作列"
+    },
+    "autosuggest": {
+      "matches": "{{count}} 筆符合",
+      "navigation_hint": "{{select}} 選擇 · {{run}} 執行 · 點擊填入",
+      "dismiss_hint": "{{dismiss}} 關閉 · {{remove}} 移除"
+    },
     "processing_failed": "終端處理已停止，請重新連線此工作階段。",
     "local_terminal": "本機終端機",
     "tmux": {
@@ -42,6 +51,11 @@
       "risk_configured": "依設定需確認"
     },
     "paste": {
+      "edit": "編輯",
+      "edit_title": "貼上前編輯",
+      "strip_fence": "移除程式碼區塊標記",
+      "undo": "復原",
+      "redo": "重做",
       "title": "偵測到多行內容（{{count}} 行）",
       "more_lines": "... 還有 {{count}} 行",
       "confirm": "確認",
@@ -75,6 +89,12 @@
       "clear_screen": "清除螢幕"
     },
     "modem": {
+      "timeout": "等待對端回應逾時。請啟動對端的傳輸程式後重試。",
+      "protocol_error": "對端傳送了無效或非預期的傳輸資料。",
+      "file_error": "無法讀寫傳輸檔案，請檢查存取權限和可用空間。",
+      "file_too_large": "檔案超出此協定支援的大小限制。",
+      "buffer_overflow": "對端傳送的資料超出了傳輸緩衝區容量。",
+      "worker_stopped": "傳輸工作意外停止，請重試。",
       "binary_transfer": "二進位傳輸",
       "xmodem_upload": "XMODEM 上傳",
       "xmodem_receive": "XMODEM 接收",
@@ -259,7 +279,8 @@
       "add_group": "新增组",
       "edit_group": "编辑组",
       "delete_group": "删除组",
-      "delete_group_description": "刪除前，「{{name}}」中的快速命令會移至預設群組。",
+      "delete_group_description": "刪除此群組前，「{{name}}」中的快速命令會移至「{{destination}}」。",
+      "reorder_groups": "拖曳把手調整群組順序",
       "save_group": "保存组",
       "group_name_placeholder": "组名称",
       "icon_terminal": "终端",
@@ -469,6 +490,7 @@
       "execute": "執行"
     },
     "sender": {
+      "group_hint": "儲存的連線群組會選取所有符合的終端窗格；互動同步中的臨時隔離不會改變此處指定的傳送目標。",
       "task": "傳送器",
       "placeholder": "輸入命令或十六進位位元組……",
       "show": "顯示命令傳送器",
@@ -505,10 +527,18 @@
       "error_busy": "目標正由另一個傳送工作使用"
     },
     "broadcast": {
-      "groups": "廣播群組",
+      "members_hint": "選擇個別終端後啟用同步，新開終端不會自動加入。移動終端前，請先將其移出原群組。",
+      "isolate_member": "臨時隔離",
+      "resume_member": "恢復同步",
+      "pause_group": "暫停同步",
+      "start_group": "啟用同步",
+      "sync_isolated": "已隔離",
+      "sync_disabled": "已暫停",
+      "sync_enabled": "同步中",
+      "groups": "同步群組",
       "create_group": "新增群組",
       "no_groups": "尚無命名群組",
-      "temporary_group": "暫時選擇",
+      "temporary_group": "臨時同步群組",
       "group_name_placeholder": "群組名稱",
       "group_members": "群組成員",
       "unsaved_target": "未儲存",

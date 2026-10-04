@@ -41,6 +41,25 @@ use self::actions::{open_path_external, reveal_path_external};
 use self::helpers::*;
 use super::sftp::native_video::{SharedSftpNativeVideoSurface, sftp_native_video_element};
 
+pub(in crate::workspace) fn local_file_audit_context(
+    source: oxideterm_audit::AuditSource,
+) -> Option<oxideterm_audit::AuditContext> {
+    let request = oxideterm_audit::AuditContext::current_request();
+    let is_scoped = request.is_some();
+    let mut context = request.or_else(oxideterm_audit::AuditContext::current)?;
+    if !is_scoped {
+        context.source = source;
+    }
+    context.target = Some(oxideterm_audit::redact("local"));
+    context.protocol = Some("local".into());
+    context.session_id = None;
+    context.consumer_id = None;
+    context.transport_id = None;
+    context.node_id = None;
+    context.connection_id = None;
+    Some(context)
+}
+
 const FILE_MANAGER_HEADER_HEIGHT: f32 = 40.0; // Tauri h-10.
 const FILE_MANAGER_HEADER_GAP: f32 = 6.0;
 const FILE_MANAGER_HEADER_TITLE_MIN_WIDTH: f32 = 32.0;
@@ -263,8 +282,7 @@ struct FileManagerListRow {
     display_name: SharedString,
     size_text: SharedString,
     modified_text: SharedString,
-    icon: LucideIcon,
-    icon_color: u32,
+    icon: oxideterm_gpui_ui::file_icons::FileIcon,
 }
 
 impl FileManagerListRow {
@@ -282,13 +300,12 @@ impl FileManagerListRow {
             format_file_size(file.size)
         };
         let modified_text = format_modified(file.modified);
-        let (icon, icon_color) = file_icon_for_entry(file);
+        let icon = file_icon_for_entry(file);
         Self {
             display_name: display_name.into(),
             size_text: size_text.into(),
             modified_text: modified_text.into(),
             icon,
-            icon_color,
         }
     }
 }
@@ -512,12 +529,30 @@ impl FileManagerState {
         if self.folder_picker_task.is_some() {
             return;
         }
+        let audit_context = local_file_audit_context(oxideterm_audit::AuditSource::User);
         self.folder_picker_task = Some(cx.spawn(async move |entity, cx| {
             let selected_path = selection.await;
             let _ = entity.update(cx, |file_manager, cx| {
                 file_manager.folder_picker_task = None;
                 if let Some(path) = selected_path {
-                    file_manager.set_path(path.to_string_lossy().to_string());
+                    let path = path.to_string_lossy().to_string();
+                    let audit = oxideterm_audit::AuditOperation::in_context(
+                        audit_context.as_ref(),
+                        oxideterm_audit::AuditCategory::File,
+                        "file_browse",
+                        Some(&path),
+                    );
+                    file_manager.set_path(path);
+                    audit.finish(
+                        if file_manager.error.is_none() {
+                            oxideterm_audit::AuditOutcome::Succeeded
+                        } else {
+                            oxideterm_audit::AuditOutcome::Failed
+                        },
+                        oxideterm_audit::AuditEvidence::Protocol,
+                        None,
+                        None,
+                    );
                 }
                 cx.notify();
             });
@@ -1026,22 +1061,26 @@ mod tests {
         let refreshed_rows = state.sorted_file_rows();
         assert!(!Arc::ptr_eq(&filtered, &refreshed));
         assert!(!Arc::ptr_eq(&filtered_rows, &refreshed_rows));
-        assert_eq!(refreshed.len(), 2);
-    }
-
-    #[test]
-    fn file_row_selection_is_owned_by_file_manager_entity() {
-        let mut state = FileManagerState::default();
-        let visible = vec![cache_entry("alpha"), cache_entry("beta")];
-
-        state.select_entry("alpha".to_string(), gpui::Modifiers::default(), &visible);
-
-        assert_eq!(state.selected, HashSet::from(["alpha".to_string()]));
-        assert_eq!(state.last_selected.as_deref(), Some("alpha"));
+        assert_eq!(
+            refreshed
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beta", "beta-2"]
+        );
+        assert_eq!(
+            refreshed_rows
+                .iter()
+                .map(|row| row.display_name.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["beta", "beta-2"]
+        );
     }
 
     #[gpui::test]
-    fn file_activation_emits_typed_workspace_intent(cx: &mut TestAppContext) {
+    fn selecting_and_opening_a_file_preserves_selection_and_emits_its_identity(
+        cx: &mut TestAppContext,
+    ) {
         let file_manager = cx.new(|_| FileManagerState::default());
         let observed = Arc::new(AtomicBool::new(false));
         let observed_event = observed.clone();
@@ -1060,7 +1099,11 @@ mod tests {
         });
 
         file_manager.update(cx, |file_manager, cx| {
+            let visible = vec![cache_entry("alpha"), cache_entry("beta")];
+            file_manager.select_entry("alpha".to_string(), gpui::Modifiers::default(), &visible);
             file_manager.activate_entry(cache_entry("alpha"), cx);
+            assert_eq!(file_manager.selected, HashSet::from(["alpha".to_string()]));
+            assert_eq!(file_manager.last_selected.as_deref(), Some("alpha"));
         });
 
         assert!(observed.load(Ordering::Acquire));

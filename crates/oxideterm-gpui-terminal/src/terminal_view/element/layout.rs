@@ -1,8 +1,10 @@
 use std::ops::Range;
 
-use gpui::{Bounds, IntoColor, Pixels, point, px, rgba, size};
+use gpui::{Bounds, Pixels, point, px, rgba, size};
 use oxideterm_terminal::{TerminalSearchMatch, TerminalSnapshot};
 use oxideterm_terminal_unicode::visual_line_for_row_if_bidi;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::terminal_ui::*;
 use crate::terminal_view::element::{TerminalHorizontalScrollbar, TerminalRect, TerminalScrollbar};
@@ -122,7 +124,7 @@ pub(crate) fn search_match_rects_for_rows(
                 row: row_index,
                 col: start_col,
                 cells,
-                color: rgba(0xffcc6644).into_color(),
+                color: rgba(0xffcc6644).into(),
             });
         }
     }
@@ -151,9 +153,9 @@ pub(crate) fn visible_search_match_rects(
                     col: range.start_col,
                     cells: range.end_col.saturating_sub(range.start_col),
                     color: if selected_match == Some(index) {
-                        rgba(0xffdd8899).into_color()
+                        rgba(0xffdd8899).into()
                     } else {
-                        rgba(0xffcc6644).into_color()
+                        rgba(0xffcc6644).into()
                     },
                 })
             })
@@ -174,6 +176,24 @@ pub(crate) fn terminal_content_bounds_for_rows(
             px(rows as f32 * metrics.line_height_f32()),
         ),
     )
+}
+
+/// Returns the grid cells covered by composing text before a UTF-16 offset.
+///
+/// IME ranges are UTF-16 offsets, while the preedit is painted on the terminal
+/// grid. An offset inside a grapheme advances to its trailing edge, never splitting
+/// surrogate pairs, combining marks, or joined emoji into separate cells.
+pub(crate) fn marked_text_cells_before_utf16(text: &str, utf16_offset: usize) -> usize {
+    let mut utf16_position = 0;
+    let mut cells = 0;
+    for grapheme in text.graphemes(true) {
+        if utf16_position >= utf16_offset {
+            break;
+        }
+        utf16_position += grapheme.encode_utf16().count();
+        cells += grapheme.width();
+    }
+    cells
 }
 
 pub(crate) fn ime_cursor_bounds_for_snapshot(

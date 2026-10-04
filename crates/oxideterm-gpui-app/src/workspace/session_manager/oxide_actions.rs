@@ -49,6 +49,8 @@ pub(super) enum OxideWorkerDelivery {
         result: Result<OxideCoreImportResult, OxideFileError>,
         options: OxideClientStateImportOptions,
         password: zeroize::Zeroizing<String>,
+        audit: oxideterm_audit::AuditOperation,
+        child_context: Option<oxideterm_audit::AuditContext>,
     },
     ExportProgress {
         generation: u64,
@@ -79,6 +81,8 @@ pub(super) enum OxideWorkspaceEffect {
         result: Result<OxideCoreImportResult, OxideFileError>,
         options: OxideClientStateImportOptions,
         password: zeroize::Zeroizing<String>,
+        audit: oxideterm_audit::AuditOperation,
+        child_context: Option<oxideterm_audit::AuditContext>,
     },
     ExportDone {
         generation: u64,
@@ -121,7 +125,7 @@ impl SessionManagerState {
             release_wake.stop();
         })
         .detach();
-        let task_wake = wake.clone();
+        let task_wake = wake;
         let delivery_task = cx.spawn(async move |session_manager, cx| {
             loop {
                 task_wake.wait().await;
@@ -216,6 +220,8 @@ impl SessionManagerState {
                     result,
                     options,
                     password,
+                    audit,
+                    child_context,
                 } => {
                     self.reap_oxide_worker(OxideWorkerKey::Import(generation));
                     if self
@@ -228,7 +234,20 @@ impl SessionManagerState {
                             result,
                             options,
                             password,
+                            audit,
+                            child_context,
                         });
+                    } else {
+                        audit.finish(
+                            if result.is_ok() {
+                                oxideterm_audit::AuditOutcome::Partial
+                            } else {
+                                oxideterm_audit::AuditOutcome::Failed
+                            },
+                            oxideterm_audit::AuditEvidence::Protocol,
+                            None,
+                            None,
+                        );
                     }
                 }
                 OxideWorkerDelivery::ExportDone {
@@ -381,18 +400,22 @@ impl SessionManagerState {
                             let metadata = file.metadata;
                             dialog.file_path = Some(path);
                             dialog.file_data = Some(bytes);
-                            dialog.metadata_summary = Some(format!(
-                                "{} 个连接 · {}",
-                                metadata.num_connections,
-                                metadata
-                                    .exported_at
-                                    .with_timezone(&Local)
-                                    .format("%Y-%m-%d %H:%M")
-                            ));
-                            dialog.selected_names =
-                                metadata.connection_names.iter().cloned().collect();
+                            dialog.metadata_summary = metadata.as_ref().map(|metadata| {
+                                format!(
+                                    "{} 个连接 · {}",
+                                    metadata.num_connections,
+                                    metadata
+                                        .exported_at
+                                        .with_timezone(&Local)
+                                        .format("%Y-%m-%d %H:%M")
+                                )
+                            });
+                            dialog.selected_names = metadata
+                                .as_ref()
+                                .map(|metadata| metadata.connection_names.iter().cloned().collect())
+                                .unwrap_or_default();
                             dialog.expanded_app_settings_sections.clear();
-                            dialog.metadata = Some(metadata);
+                            dialog.metadata = metadata;
                             dialog.preview = None;
                             dialog.error = None;
                             dialog.result_summary = None;
@@ -508,15 +531,6 @@ impl WorkspaceApp {
         })
     }
 
-    pub(in crate::workspace) fn open_oxide_import_dialog(&mut self, cx: &mut Context<Self>) {
-        self.session_manager.update(cx, |session_manager, cx| {
-            session_manager.oxide_import_dialog = Some(OxideImportDialogState::default());
-            session_manager.focused_input = None;
-            session_manager.status = None;
-            cx.notify();
-        });
-    }
-
     pub(in crate::workspace) fn open_oxide_import_portable_migration_dialog(
         &mut self,
         cx: &mut Context<Self>,
@@ -534,17 +548,13 @@ impl WorkspaceApp {
         });
     }
 
-    pub(in crate::workspace) fn open_oxide_export_dialog(&mut self, cx: &mut Context<Self>) {
-        self.open_oxide_export_dialog_with_portable_mode(false, cx);
-    }
-
     pub(in crate::workspace) fn active_session_manager_input(
         &self,
         cx: &App,
     ) -> Option<SessionManagerInput> {
         let input = self.session_manager.read(cx).focused_input?;
         let session_manager_tab_active = self
-            .active_tab(cx)
+            .keyboard_content_tab(cx)
             .is_some_and(|tab| tab.kind == oxideterm_workspace::TabKind::SessionManager);
         let session_manager = self.session_manager.read(cx);
         session_manager_input_is_active(
@@ -1140,25 +1150,49 @@ impl WorkspaceApp {
         };
         let mut store = self.connection_store.clone();
         let oxide_options = options.oxide_options.clone();
+        let mut audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Configuration,
+            "configuration_import",
+            None,
+            Some("oxide_file"),
+        );
+        audit.summary(&format!(
+            "mode=oxide,selected_connections={}",
+            oxide_options
+                .selected_names
+                .as_ref()
+                .map_or(0, |names| names.len())
+        ));
+        let child_context = oxideterm_audit::AuditContext::current_request()
+            .or_else(oxideterm_audit::AuditContext::current)
+            .map(|mut context| {
+                context.parent_id = audit.id().map(str::to_owned);
+                context
+            });
         let worker = std::thread::spawn(move || {
-            let result = apply_oxide_import_with_options_with_progress(
-                &mut store,
-                bytes.as_ref(),
-                &password,
-                oxide_options,
-                |stage, current, total| {
-                    let _ = sender.send(OxideWorkerDelivery::ImportProgress {
-                        generation,
-                        progress: OxideTransferProgress::new(stage, current, total),
-                    });
-                },
-            )
-            .map(|envelope| OxideCoreImportResult { store, envelope });
+            let result =
+                oxideterm_audit::AuditContext::with_sync_request(child_context.as_ref(), || {
+                    apply_oxide_import_with_options_with_progress(
+                        &mut store,
+                        bytes.as_ref(),
+                        &password,
+                        oxide_options,
+                        |stage, current, total| {
+                            let _ = sender.send(OxideWorkerDelivery::ImportProgress {
+                                generation,
+                                progress: OxideTransferProgress::new(stage, current, total),
+                            });
+                        },
+                    )
+                })
+                .map(|envelope| OxideCoreImportResult { store, envelope });
             let _ = sender.send(OxideWorkerDelivery::ImportDone {
                 generation,
                 result,
                 options,
                 password,
+                audit,
+                child_context,
             });
         });
         self.session_manager.update(cx, |session_manager, _cx| {
@@ -1208,6 +1242,7 @@ impl WorkspaceApp {
                     dialog.progress_stage = None;
                     match result {
                         Ok(preview) => {
+                            dialog.metadata = Some(preview.metadata.clone());
                             dialog.selected_names = preview
                                 .records
                                 .iter()
@@ -1243,6 +1278,8 @@ impl WorkspaceApp {
                 result,
                 options,
                 password,
+                mut audit,
+                child_context,
             } => {
                 let still_current = self
                     .session_manager
@@ -1251,15 +1288,47 @@ impl WorkspaceApp {
                     .as_ref()
                     .is_some_and(|dialog| dialog.operation_generation == generation);
                 if !still_current {
+                    audit.finish(
+                        if result.is_ok() {
+                            oxideterm_audit::AuditOutcome::Partial
+                        } else {
+                            oxideterm_audit::AuditOutcome::Failed
+                        },
+                        oxideterm_audit::AuditEvidence::Protocol,
+                        None,
+                        None,
+                    );
                     return;
                 }
                 match result {
                     Ok(core) => {
                         // A successful import no longer needs the decryption password.
                         drop(password);
-                        self.finish_oxide_import_core_result(core, options, cx);
+                        let (applied, errors) = oxideterm_audit::AuditContext::with_sync_request(
+                            child_context.as_ref(),
+                            || self.finish_oxide_import_core_result(core, options, cx),
+                        );
+                        audit.summary(&format!("mode=oxide,applied={applied},errors={errors}"));
+                        audit.finish(
+                            if errors > 0 {
+                                oxideterm_audit::AuditOutcome::Partial
+                            } else if applied == 0 {
+                                oxideterm_audit::AuditOutcome::Unchanged
+                            } else {
+                                oxideterm_audit::AuditOutcome::Succeeded
+                            },
+                            oxideterm_audit::AuditEvidence::Protocol,
+                            None,
+                            None,
+                        );
                     }
                     Err(error) => {
+                        audit.finish(
+                            oxideterm_audit::AuditOutcome::Failed,
+                            oxideterm_audit::AuditEvidence::Protocol,
+                            None,
+                            None,
+                        );
                         let error = oxide_file_error_message(error, &self.i18n);
                         self.session_manager.update(cx, |session_manager, cx| {
                             let Some(dialog) = session_manager.oxide_import_dialog.as_mut() else {
@@ -1325,7 +1394,7 @@ impl WorkspaceApp {
         core: OxideCoreImportResult,
         options: OxideClientStateImportOptions,
         cx: &mut Context<Self>,
-    ) {
+    ) -> (usize, usize) {
         self.connection_store = core.store;
         let mut envelope = core.envelope;
 
@@ -1340,11 +1409,15 @@ impl WorkspaceApp {
                 cx,
             );
 
-        let imported_plugin_settings = self.apply_oxide_import_plugin_settings(
-            &envelope.plugin_settings,
-            options.import_plugin_settings,
-            options.selected_plugin_ids.as_ref(),
-        );
+        let (imported_plugin_settings, plugin_settings_failed) = match self
+            .try_apply_oxide_import_plugin_settings(
+                &envelope.plugin_settings,
+                options.import_plugin_settings,
+                options.selected_plugin_ids.as_ref(),
+            ) {
+            Ok(count) => (count, false),
+            Err(_) => (0, true),
+        };
         let skipped_plugin_settings =
             !options.import_plugin_settings && !envelope.plugin_settings.is_empty();
 
@@ -1368,7 +1441,29 @@ impl WorkspaceApp {
             imported_plugin_settings,
             skipped_plugin_settings,
         };
+        let applied = result.envelope.imported
+            + result.envelope.merged
+            + result.envelope.replaced
+            + result.envelope.renamed
+            + result.envelope.imported_forwards
+            + result.envelope.imported_serial_profiles
+            + result.envelope.imported_telnet_profiles
+            + result.envelope.imported_mosh_profiles
+            + result.envelope.imported_standalone_sftp_profiles
+            + result.envelope.imported_remote_desktop_profiles
+            + result.envelope.restored_managed_keys
+            + result.envelope.restored_profile_credentials
+            + result.envelope.cleared_profile_credentials
+            + result.imported_quick_commands
+            + result.imported_plugin_settings
+            + usize::from(result.imported_app_settings)
+            + result.envelope.imported_portable_secrets;
+        let errors = result.envelope.errors.len()
+            + result.quick_commands_errors.len()
+            + usize::from(plugin_settings_failed)
+            + usize::from(options.import_app_settings && result.skipped_app_settings);
         self.present_oxide_import_result(result, cx);
+        (applied, errors)
     }
 
     pub(super) fn present_oxide_import_result(
@@ -1661,6 +1756,13 @@ impl WorkspaceApp {
         exported_count: usize,
         cx: &mut Context<Self>,
     ) {
+        let mut audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Configuration,
+            "configuration_export",
+            None,
+            Some("oxide_file"),
+        );
+        audit.summary(&format!("connections={exported_count}"));
         let directory = std::env::var_os("HOME")
             .map(PathBuf::from)
             .map(|home| home.join("Downloads"))
@@ -1671,7 +1773,7 @@ impl WorkspaceApp {
         );
         let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
         let save = async move {
-            match receiver.await {
+            let result = match receiver.await {
                 Ok(Ok(Some(path))) => Some(
                     fs::write(&path, bytes)
                         .map(|_| path)
@@ -1680,7 +1782,18 @@ impl WorkspaceApp {
                 Ok(Ok(None)) => None,
                 Ok(Err(error)) => Some(Err(error.to_string())),
                 Err(error) => Some(Err(error.to_string())),
-            }
+            };
+            audit.finish(
+                match &result {
+                    Some(Ok(_)) => oxideterm_audit::AuditOutcome::Succeeded,
+                    Some(Err(_)) => oxideterm_audit::AuditOutcome::Failed,
+                    None => oxideterm_audit::AuditOutcome::Cancelled,
+                },
+                oxideterm_audit::AuditEvidence::Protocol,
+                None,
+                None,
+            );
+            result
         };
         let settings_path = self.settings_store.path().to_path_buf();
         let success_template = self.i18n.t("export.success");
@@ -1788,7 +1901,6 @@ impl WorkspaceApp {
                 .available_forwards
                 .iter()
                 .cloned()
-                .into_iter()
                 .filter_map(|forward| {
                     let owner_id = forward.owner_connection_id?;
                     (selected_ids.contains(&owner_id)
@@ -1934,8 +2046,22 @@ impl WorkspaceApp {
         should_import: bool,
         selected_plugin_ids: Option<&HashSet<String>>,
     ) -> usize {
+        self.try_apply_oxide_import_plugin_settings(
+            plugin_settings,
+            should_import,
+            selected_plugin_ids,
+        )
+        .unwrap_or(0)
+    }
+
+    pub(in crate::workspace) fn try_apply_oxide_import_plugin_settings(
+        &mut self,
+        plugin_settings: &[oxideterm_connections::oxide_file::EncryptedPluginSetting],
+        should_import: bool,
+        selected_plugin_ids: Option<&HashSet<String>>,
+    ) -> Result<usize, String> {
         if !should_import || plugin_settings.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         let filtered = plugin_settings
@@ -1952,7 +2078,6 @@ impl WorkspaceApp {
             self.settings_store.path(),
             &filtered,
         )
-        .unwrap_or(0)
     }
 
     #[allow(dead_code)]
@@ -1976,8 +2101,27 @@ impl WorkspaceApp {
             selected_sections,
         ) {
             Ok(merged) => {
-                self.edit_settings(|settings| *settings = merged, cx);
-                (true, false)
+                let previous = self.settings_store.settings().clone();
+                match self.settings_store.replace_and_save(merged) {
+                    Ok(saved) => {
+                        self.apply_loaded_settings_to_runtime(&previous, &saved.settings, cx);
+                        self.settings_workspace.update(cx, |settings, _cx| {
+                            settings.acknowledge_external_store_state()
+                        });
+                        self.emit_native_plugin_settings_events(&previous, &saved.settings, cx);
+                        self.sync_tab_titles(cx);
+                        cx.notify();
+                        (true, false)
+                    }
+                    Err(_) => {
+                        let status = self.i18n.t("modals.import.skipped_app_settings");
+                        self.session_manager.update(cx, |session_manager, cx| {
+                            session_manager.status.replace(status);
+                            cx.notify();
+                        });
+                        (false, true)
+                    }
+                }
             }
             Err(error) => {
                 self.session_manager.update(cx, |session_manager, cx| {

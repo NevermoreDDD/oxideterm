@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} läuft noch (möglicherweise im Infobereich), oder seine Dateien werden von einer anderen Anwendung verwendet. Speichern Sie Ihre Arbeit. Mit OK werden die betroffenen Anwendungen geschlossen und die Installation fortgesetzt. Abbrechen beendet die Installation. Installationsordner: {{path}}",
+    "application_close_failed": "Die Dateibelegung in {{path}} konnte nicht aufgehoben oder geprüft werden. Beenden Sie {{app}} im Infobereich und schließen Sie andere Anwendungen, die diesen Ordner verwenden. Klicken Sie dann auf Wiederholen. Abbrechen beendet die Installation, ohne Dateien zu ersetzen."
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Shell-Launcher"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "Nicht unterstütztes Mermaid-Diagramm",
-    "mermaid_expand": "Vergrößern"
+    "mermaid_expand": "Vergrößern",
+    "mermaid_loading": "Diagramm wird gerendert…",
+    "html_details": "Details"
   },
   "layout": {
     "empty": {
@@ -204,8 +210,29 @@
     "native_sidebar_empty_title": "Plugin-System nicht verfügbar",
     "native_sidebar_empty_description": "Öffne den Plugin-Tab für den aktuellen native-Status.",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "Aktualisieren Sie Ihren Synchronisierungsserver auf eine Version, die das neue Cloud-Synchronisierungsprotokoll unterstützt, und synchronisieren Sie erneut.",
+        "password_change_pending": "Eine Passwortänderung ist noch offen. Versuchen Sie es mit demselben neuen Passwort erneut.",
+        "change_password": "Synchronisierungspasswort ändern",
+        "change_password_description": "Ein neuer Synchronisierungsbereich wird mit dem neuen Passwort erstellt. Nach Prüfung des Uploads wird gewechselt. Der bisherige Bereich bleibt erhalten.",
+        "password_change_separate_settings": "Speichern Sie andere Einstellungen, bevor Sie das Synchronisierungspasswort ändern.",
+        "password_too_short": "Das Passwort muss mindestens 6 Zeichen lang sein.",
+        "sync": "Synchronisieren",
+        "cleanup_pending": "Die Bereinigung steht noch aus. Synchronisieren Sie erneut.",
+        "keep": "Behalten",
+        "preview": "Synchronisierungsvorschau",
+        "changes": "Geänderte Felder",
+        "upgrade": "Vorhandene Cloud-Daten werden aktualisiert. Die ursprünglichen Dateien bleiben erhalten.",
+        "candidate": "Version",
+        "apply": "Anwenden und synchronisieren",
+        "configuration": "Konfiguration",
+        "protected": "Geschützter Wert",
+        "current": "Dieses Gerät",
+        "conflict_hint": "Wählen Sie bei Konflikten eine Version aus. Ohne Auswahl bleibt der aktuelle Wert dieses Geräts erhalten."
+      },
       "panel_title": "Oxide Cloud-Synchronisierung",
       "backend": {
+        "local_file": "Lokale Datei",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -278,6 +305,7 @@
         "sync_scope": "Synchronisierungsumfang",
         "conflict_recovery": "Konfliktbehebung",
         "import_preview": "Importvorschau",
+        "export_preview": "Exportvorschau",
         "upload_preview": "Uploadvorschau",
         "rollback_preview": "Rollback-Vorschau",
         "rollback_backups": "Rollback-Sicherungen",
@@ -336,6 +364,7 @@
         "google_drive_permission_warning": "Wenn Google access_denied, admin_policy_enforced, invalid_client oder eine deaktivierte Drive API meldet, prüfe Zustimmungsbildschirm, Desktop-Client-Typ, API-Status, Administratorrichtlinie und Testnutzer."
       },
       "settings": {
+        "sync_method": "Synchronisierungsmethode",
         "backend_type": "Backend-Typ",
         "auth_mode": "Authentifizierung",
         "endpoint": "Endpoint",
@@ -438,6 +467,7 @@
         "summary_line": "{{connections}} Verbindungen, {{forwards}} Weiterleitungen, {{quickCommands}} Schnellbefehle, {{serialProfiles}} serielle Profile, {{telnetProfiles}} Telnet-Profile, {{pluginSettingsCount}} Plugin-Einstellungen, {{sensitiveCredentials}} sensible Anmeldedaten"
       },
       "errors": {
+        "local_forward_requires_connection": "Wählen Sie für den lokalen Export auch die Verbindungen der ausgewählten Weiterleitungsregeln aus.",
         "operation_in_progress": "Ein anderer Cloud-Sync-Vorgang wird bereits ausgeführt.",
         "missing_endpoint": "Konfigurieren Sie den Backend-Endpoint vor der Synchronisierung.",
         "missing_namespace": "Konfigurieren Sie den Namespace oder das Pfadpräfix vor der Synchronisierung.",
@@ -568,6 +598,7 @@
         "downloading": "Downloading objects"
       },
       "preview": {
+        "standalone_sftp_profiles": "Dateiübertragungsverbindungen ({{count}})",
         "summary_header": "Remote-Vorschau Zusammenfassung",
         "apply_plan_title": "Anwendungsplan",
         "upload_scope_title": "Uploadumfang",
@@ -1171,6 +1202,12 @@
     "hint_other": "Zen-Modus — Drücken Sie Ctrl+Shift+Z zum Beenden"
   },
   "tabbar": {
+    "drag_to_dock": "Zum Andocken ziehen",
+    "workspace": "Arbeitsbereich",
+    "merge_into_horizontal": "Mit „{{title}}“ zusammenführen (nebeneinander)",
+    "merge_into_vertical": "Mit „{{title}}“ zusammenführen (übereinander)",
+    "move_pane_to_tab": "In neuen Tab verschieben",
+    "move_pane_to_window": "In neues Fenster verschieben",
     "offline": "Offline",
     "cancel_reconnect": "Wiederverbindung abbrechen",
     "reconnect": "Erneut verbinden",
@@ -1287,5 +1324,13 @@
     "setup_pending": "Portabler Keystore wird erstellt...",
     "unlock_submit": "Entsperren und fortfahren",
     "unlock_pending": "Portable Daten werden entsperrt..."
+  },
+  "local_session": {
+    "directory": "Startverzeichnis",
+    "inherit_directory": "Standardverzeichnis aus den Einstellungen verwenden",
+    "inherit_shell": "Standard-Shell aus den Einstellungen verwenden",
+    "shell_unavailable": "Die gespeicherte Shell ist auf diesem Gerät nicht verfügbar. Bearbeiten Sie die Sitzung und wählen Sie eine installierte Shell.",
+    "directory_unavailable": "Das Startverzeichnis ist nicht verfügbar. Wählen Sie in der Sitzung ein vorhandenes Verzeichnis.",
+    "name_required": "Geben Sie einen Namen zum Speichern der lokalen Sitzung ein."
   }
 }

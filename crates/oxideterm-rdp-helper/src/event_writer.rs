@@ -118,7 +118,7 @@ fn push_frame_event(queue: &mut EventWriterQueue, event: RemoteDesktopHelperEven
     }
 
     if let Some(existing) = queue.frames.back_mut() {
-        if let Err(incoming) = try_merge_frame_event(existing, event) {
+        if let Some(incoming) = merge_frame_event(existing, event) {
             queue.frames.push_back(incoming);
         }
     } else {
@@ -126,20 +126,21 @@ fn push_frame_event(queue: &mut EventWriterQueue, event: RemoteDesktopHelperEven
     }
 }
 
-fn try_merge_frame_event(
+// Unmerged frames need a separate queue slot; this is not a transport error.
+fn merge_frame_event(
     existing: &mut RemoteDesktopHelperEvent,
     incoming: RemoteDesktopHelperEvent,
-) -> Result<(), RemoteDesktopHelperEvent> {
+) -> Option<RemoteDesktopHelperEvent> {
     match existing {
         RemoteDesktopHelperEvent::Frame { frame } => match incoming {
             RemoteDesktopHelperEvent::FrameUpdate { update } => {
                 if !frame.apply_update(&update) {
-                    return Err(RemoteDesktopHelperEvent::FrameUpdate { update });
+                    return Some(RemoteDesktopHelperEvent::FrameUpdate { update });
                 }
             }
             RemoteDesktopHelperEvent::FrameUpdateBatch { batch } => {
                 if !frame.apply_update_batch(&batch) {
-                    return Err(RemoteDesktopHelperEvent::FrameUpdateBatch { batch });
+                    return Some(RemoteDesktopHelperEvent::FrameUpdateBatch { batch });
                 }
             }
             incoming => {
@@ -151,13 +152,13 @@ fn try_merge_frame_event(
                 update: incoming_update,
             } => {
                 if !update.merge(&incoming_update) {
-                    return Err(RemoteDesktopHelperEvent::FrameUpdate {
+                    return Some(RemoteDesktopHelperEvent::FrameUpdate {
                         update: incoming_update,
                     });
                 }
             }
             incoming @ RemoteDesktopHelperEvent::FrameUpdateBatch { .. } => {
-                return Err(incoming);
+                return Some(incoming);
             }
             incoming => {
                 *existing = incoming;
@@ -171,18 +172,18 @@ fn try_merge_frame_event(
                     incoming_batch,
                     REMOTE_DESKTOP_MAX_FRAME_UPDATE_BATCH_REGIONS,
                 ) {
-                    return Err(RemoteDesktopHelperEvent::FrameUpdateBatch {
+                    return Some(RemoteDesktopHelperEvent::FrameUpdateBatch {
                         batch: incoming_batch,
                     });
                 }
             }
-            incoming => return Err(incoming),
+            incoming => return Some(incoming),
         },
         slot => {
             *slot = incoming;
         }
     }
-    Ok(())
+    None
 }
 
 pub(crate) fn send_event(
@@ -223,6 +224,20 @@ mod tests {
                 .send(dirty_update_at((index as u32) * 2))
                 .expect("dirty update should enqueue");
         }
+        writer
+            .send(dirty_update_at(99))
+            .expect("dirty update should enqueue despite sparse backlog");
+
+        let (queue, _) = &*writer.queue;
+        {
+            let queue = queue.lock().unwrap();
+            assert_eq!(queue.frames.len(), 33);
+            let Some(RemoteDesktopHelperEvent::FrameUpdate { update }) = queue.frames.back() else {
+                panic!("expected the newest sparse update");
+            };
+            assert_eq!(update.rect, RemoteDesktopRect::new(99, 0, 1, 1));
+            assert_eq!(update.bytes, [99, 0, 0, 0xff]);
+        }
 
         writer
             .send(RemoteDesktopHelperEvent::Frame {
@@ -237,30 +252,19 @@ mod tests {
             })
             .expect("base frame should enqueue");
 
-        let (queue, _) = &*writer.queue;
         let queue = queue.lock().unwrap();
         assert_eq!(queue.frames.len(), 1);
-        assert!(matches!(
-            queue.frames.front(),
-            Some(RemoteDesktopHelperEvent::Frame { .. })
-        ));
-    }
-
-    #[test]
-    fn dirty_updates_continue_when_writer_has_sparse_backlog() {
-        let writer = SharedEventWriter::inert_for_tests();
-        let backlog_count = 32;
-        for index in 0..backlog_count {
-            writer
-                .send(dirty_update_at((index as u32) * 2))
-                .expect("dirty update should enqueue");
-        }
-        writer
-            .send(dirty_update_at(99))
-            .expect("dirty update should enqueue");
-
-        let (queue, _) = &*writer.queue;
-        let queue = queue.lock().unwrap();
-        assert_eq!(queue.frames.len(), backlog_count + 1);
+        let Some(RemoteDesktopHelperEvent::Frame { frame }) = queue.frames.front() else {
+            panic!("expected the replacement base frame");
+        };
+        assert_eq!(
+            frame.size,
+            RemoteDesktopSize {
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(frame.format, RemoteDesktopFrameFormat::Rgba8);
+        assert_eq!(frame.bytes, [0, 0, 0, 0xff]);
     }
 }

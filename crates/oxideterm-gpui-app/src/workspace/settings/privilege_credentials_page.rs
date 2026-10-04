@@ -221,6 +221,7 @@ impl WorkspaceApp {
     ) -> AnyElement {
         match section_index {
             0 => self.settings_privilege_credentials_card(cx),
+            1 => self.settings_totp_credentials_card(cx),
             _ => div().into_any_element(),
         }
     }
@@ -279,12 +280,12 @@ impl WorkspaceApp {
                     .border_color(if selected {
                         rgba((theme.accent << 8) | 0x99)
                     } else {
-                        rgba((theme.border << 8) | 0x00)
+                        rgba(theme.border << 8)
                     })
                     .bg(if selected {
                         rgba((theme.accent << 8) | 0x14)
                     } else {
-                        rgba((theme.bg_panel << 8) | 0x00)
+                        rgba(theme.bg_panel << 8)
                     })
                     .px(px(10.0))
                     .py(px(8.0))

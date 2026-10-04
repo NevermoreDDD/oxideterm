@@ -1,4 +1,8 @@
 {
+  "installer": {
+    "close_running_application": "{{app}} vẫn đang chạy (có thể trong khay hệ thống), hoặc tệp của ứng dụng đang được chương trình khác sử dụng. Hãy lưu công việc. Nhấn OK để đóng các ứng dụng đang dùng những tệp này và tiếp tục cài đặt, hoặc Hủy để dừng. Thư mục cài đặt: {{path}}",
+    "application_close_failed": "Không thể giải phóng hoặc kiểm tra các tệp đang được sử dụng trong {{path}}. Hãy thoát {{app}} từ khay hệ thống và đóng các ứng dụng khác đang dùng thư mục này, rồi nhấn Thử lại. Hủy sẽ dừng cài đặt mà không thay thế tệp."
+  },
   "app": {
     "name": "OxideTerm",
     "shellLauncher": "Trình khởi chạy shell"
@@ -24,7 +28,9 @@
   },
   "markdown": {
     "mermaid_unsupported": "Sơ đồ Mermaid không được hỗ trợ",
-    "mermaid_expand": "Phóng to"
+    "mermaid_expand": "Phóng to",
+    "mermaid_loading": "Đang kết xuất sơ đồ…",
+    "html_details": "Chi tiết"
   },
   "layout": {
     "empty": {
@@ -204,8 +210,29 @@
     "native_sidebar_empty_title": "Hệ thống plugin chưa khả dụng",
     "native_sidebar_empty_description": "Mở tab plugin để xem trạng thái native hiện tại.",
     "cloud_sync": {
+      "causal": {
+        "protocol_upgrade_required": "Hãy nâng cấp máy chủ đồng bộ lên phiên bản hỗ trợ giao thức đồng bộ đám mây mới, rồi đồng bộ lại.",
+        "password_change_pending": "Lần đổi mật khẩu trước chưa hoàn tất. Hãy thử lại bằng mật khẩu mới đã nhập lần trước.",
+        "change_password": "Đổi mật khẩu đồng bộ",
+        "change_password_description": "Tạo không gian đồng bộ mới bằng mật khẩu mới và chuyển sang đó sau khi xác minh dữ liệu tải lên. Không gian cũ vẫn được giữ lại.",
+        "password_change_separate_settings": "Hãy lưu các cài đặt khác trước khi đổi mật khẩu đồng bộ.",
+        "password_too_short": "Mật khẩu phải có ít nhất 6 ký tự.",
+        "sync": "Đồng bộ",
+        "cleanup_pending": "Chưa dọn dẹp xong. Hãy đồng bộ lại để hoàn tất.",
+        "keep": "Giữ lại",
+        "preview": "Xem trước đồng bộ",
+        "changes": "Các trường đã thay đổi",
+        "upgrade": "Dữ liệu đám mây hiện có sẽ được nâng cấp. Các tệp gốc sẽ được giữ lại.",
+        "candidate": "Phiên bản",
+        "apply": "Áp dụng và đồng bộ",
+        "configuration": "Cấu hình",
+        "protected": "Giá trị được bảo vệ",
+        "current": "Thiết bị này",
+        "conflict_hint": "Chọn phiên bản cho các trường xung đột. Các trường chưa chọn sẽ giữ giá trị hiện tại của thiết bị này."
+      },
       "panel_title": "Đồng bộ đám mây Oxide",
       "backend": {
+        "local_file": "Tệp cục bộ",
         "webdav": "WebDAV",
         "http_json": "HTTP JSON",
         "dropbox": "Dropbox",
@@ -278,6 +305,7 @@
         "sync_scope": "Phạm vi đồng bộ",
         "conflict_recovery": "Xử lý xung đột",
         "import_preview": "Xem trước nhập",
+        "export_preview": "Xem trước xuất tệp",
         "upload_preview": "Xem trước tải lên",
         "rollback_preview": "Xem trước hoàn tác",
         "rollback_backups": "Bản sao lưu hoàn tác",
@@ -336,6 +364,7 @@
         "google_drive_permission_warning": "Nếu Google báo access_denied, admin_policy_enforced, invalid_client hoặc Drive API chưa bật, hãy kiểm tra màn hình đồng ý, loại khách desktop, trạng thái API, chính sách quản trị và người dùng thử nghiệm."
       },
       "settings": {
+        "sync_method": "Phương thức đồng bộ",
         "backend_type": "Loại backend",
         "auth_mode": "Xác thực",
         "endpoint": "Endpoint",
@@ -438,6 +467,7 @@
         "summary_line": "{{connections}} kết nối, {{forwards}} chuyển tiếp, {{quickCommands}} lệnh nhanh, {{serialProfiles}} hồ sơ serial, {{telnetProfiles}} hồ sơ Telnet, {{pluginSettingsCount}} cài đặt plugin, {{sensitiveCredentials}} thông tin xác thực nhạy cảm"
       },
       "errors": {
+        "local_forward_requires_connection": "Để xuất tệp cục bộ, hãy chọn cả các kết nối sở hữu quy tắc chuyển tiếp đã chọn.",
         "operation_in_progress": "Một thao tác đồng bộ đám mây khác đang chạy.",
         "missing_endpoint": "Cấu hình endpoint backend trước khi đồng bộ.",
         "missing_namespace": "Cấu hình namespace hoặc tiền tố đường dẫn trước khi đồng bộ.",
@@ -568,6 +598,7 @@
         "downloading": "Downloading objects"
       },
       "preview": {
+        "standalone_sftp_profiles": "Kết nối truyền tệp ({{count}})",
         "summary_header": "Tóm tắt xem trước từ xa",
         "apply_plan_title": "Kế hoạch áp dụng",
         "upload_scope_title": "Phạm vi tải lên",
@@ -1171,6 +1202,12 @@
     "hint_other": "Chế độ Zen — Nhấn Ctrl+Shift+Z để thoát"
   },
   "tabbar": {
+    "drag_to_dock": "Kéo để ghép",
+    "workspace": "Không gian làm việc",
+    "merge_into_horizontal": "Ghép vào “{{title}}” (cạnh nhau)",
+    "merge_into_vertical": "Ghép vào “{{title}}” (trên dưới)",
+    "move_pane_to_tab": "Chuyển sang thẻ mới",
+    "move_pane_to_window": "Chuyển sang cửa sổ mới",
     "offline": "Ngoại tuyến",
     "cancel_reconnect": "Hủy kết nối lại",
     "reconnect": "Kết nối lại",
@@ -1287,5 +1324,13 @@
     "setup_pending": "Đang tạo kho khóa portable...",
     "unlock_submit": "Mở khóa và tiếp tục",
     "unlock_pending": "Đang mở khóa dữ liệu portable..."
+  },
+  "local_session": {
+    "directory": "Thư mục khởi động",
+    "inherit_directory": "Dùng thư mục mặc định trong Cài đặt",
+    "inherit_shell": "Dùng shell mặc định trong Cài đặt",
+    "shell_unavailable": "Shell đã lưu không có trên thiết bị này. Hãy sửa phiên và chọn shell đã cài đặt.",
+    "directory_unavailable": "Thư mục khởi động không tồn tại. Hãy sửa phiên và chọn thư mục có sẵn.",
+    "name_required": "Nhập tên để lưu phiên cục bộ này."
   }
 }

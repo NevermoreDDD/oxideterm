@@ -8,9 +8,8 @@ use std::{
 
 use gpui::{
     App, Bounds, ContentMask, CursorStyle, Element, ElementId, Entity, FocusHandle,
-    GlobalElementId, Hsla, InspectorElementId, IntoColor, IntoElement, LayoutId, LineLayout,
-    LinePaintCache, Pixels, SharedString, Style, TextRun, Window, fill, point, px, relative, rgb,
-    rgba, size,
+    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LineLayout, LinePaintCache,
+    Pixels, SharedString, Style, TextRun, Window, fill, point, px, relative, rgb, rgba, size,
 };
 use oxideterm_terminal::{
     TerminalColor, TerminalCommandMark, TerminalCursorShape, TerminalSearchMatch, TerminalSnapshot,
@@ -21,7 +20,8 @@ use oxideterm_terminal_semantic::{
 };
 use oxideterm_terminal_unicode::{TerminalVisualLine, visual_line_for_row_if_bidi};
 use parking_lot::Mutex;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use zeroize::Zeroizing;
 
 use crate::app::{
@@ -60,6 +60,7 @@ pub(crate) struct TerminalElement {
     theme: TerminalUiTheme,
     cursor_visible: bool,
     marked_text: Option<String>,
+    marked_text_caret_utf16: Option<usize>,
     ghost_text: Option<String>,
     search_query: Option<String>,
     search_matches: Arc<[TerminalSearchMatch]>,
@@ -531,6 +532,7 @@ impl TerminalElement {
             theme,
             cursor_visible,
             marked_text,
+            marked_text_caret_utf16: None,
             search_query,
             search_matches: search_matches.into(),
             search_matches_precomputed: false,
@@ -616,6 +618,12 @@ impl TerminalElement {
         self.semantic_scheme
             .as_deref()
             .unwrap_or_else(|| compiled_builtin_scheme(SemanticScheme::Balanced))
+    }
+
+    /// Places the composition caret inside the marked text; `None` keeps it at the end.
+    pub(crate) fn marked_text_caret(mut self, caret_utf16: Option<usize>) -> Self {
+        self.marked_text_caret_utf16 = caret_utf16;
+        self
     }
 
     pub(crate) fn detect_file_paths_as_links(mut self, enabled: bool) -> Self {
@@ -790,7 +798,7 @@ impl TerminalElement {
                     .map(|query| query.as_str()),
                 visible_rows.clone(),
                 rgba((self.theme.tokens.ui.warning << 8) | TRANSIENT_COMMAND_HIGHLIGHT_ALPHA)
-                    .into_color(),
+                    .into(),
             ),
         );
         let command_mark_overlays = command_mark_overlays_for_rows(
@@ -827,6 +835,7 @@ impl TerminalElement {
         let ime_cursor_bounds = cursor_row_visible
             .then(|| ime_cursor_bounds_for_snapshot(&self.snapshot, &self.metrics))
             .flatten();
+        let marked_text = self.marked_text_run(ime_cursor_bounds.is_some());
         let link_ranges = if let Some(cache) = cache.as_deref_mut() {
             self.cached_link_ranges_for_rows(visible_rows.clone(), cache)
         } else {
@@ -897,6 +906,9 @@ impl TerminalElement {
                 timestamp_runs.push(timestamp_run);
             }
         }
+        if let Some(marked_text) = &marked_text {
+            cursor = self.composition_caret(marked_text);
+        }
 
         TerminalElementLayout {
             backgrounds,
@@ -922,24 +934,7 @@ impl TerminalElement {
             images,
             text_runs,
             timestamp_runs,
-            marked_text: self.marked_text.as_ref().and_then(|text| {
-                ime_cursor_bounds?;
-                let marked_col = self
-                    .snapshot
-                    .lines
-                    .get(self.snapshot.cursor_row)
-                    .and_then(|row| visual_line_for_row_with_bidi(row, self.bidi_enabled))
-                    .map(|line| line.visual_col_for_logical_col(self.snapshot.cursor_col))
-                    .unwrap_or(self.snapshot.cursor_col);
-                Some(BatchedTextRun {
-                    row: self.snapshot.cursor_row,
-                    col: marked_col,
-                    text: SharedString::from(text.clone()),
-                    cells: text.encode_utf16().count().max(1),
-                    style: marked_text_run(text, &self.metrics),
-                    cache: None,
-                })
-            }),
+            marked_text,
             ghost_text: self.ghost_text_run(cursor_row_visible),
             ime_cursor_bounds,
             cursor,
@@ -1016,7 +1011,7 @@ impl TerminalElement {
             (
                 highlight,
                 rgba((self.theme.tokens.ui.warning << 8) | TRANSIENT_COMMAND_HIGHLIGHT_ALPHA)
-                    .into_color(),
+                    .into(),
             )
         });
         let mut layout = terminal_highlights_for_rows(
@@ -1098,7 +1093,7 @@ impl TerminalElement {
                 .as_ref()
                 .map(|line| line.visual_col_for_logical_col(col_index))
                 .unwrap_or(col_index);
-            if self.cursor_visible
+            if self.grid_cursor_visible()
                 && cell.cursor
                 && self.snapshot.cursor_shape != TerminalCursorShape::Hidden
             {
@@ -1108,7 +1103,7 @@ impl TerminalElement {
                 });
             }
 
-            let block_cursor = self.cursor_visible
+            let block_cursor = self.grid_cursor_visible()
                 && cell.cursor
                 && self.snapshot.cursor_shape == TerminalCursorShape::Block;
             let fg = if block_cursor {
@@ -1118,12 +1113,12 @@ impl TerminalElement {
             {
                 highlight_fg
             } else {
-                to_hsla(resolve_terminal_foreground(cell.fg, &self.theme))
+                to_hsla(cell.fg)
             };
             let bg = if block_cursor {
                 to_hsla(terminal_color_from_hex(self.theme.header_foreground))
             } else {
-                to_hsla(resolve_terminal_background(cell.bg, &self.theme))
+                to_hsla(cell.bg)
             };
             let cell_width = if cell.wide { 2 } else { 1 };
 
@@ -1159,7 +1154,7 @@ impl TerminalElement {
 
             if cell.ch != ' '
                 || !cell.zerowidth().is_empty()
-                || (self.cursor_visible && cell.cursor)
+                || (self.grid_cursor_visible() && cell.cursor)
             {
                 let link = !block_cursor
                     && (cell.hyperlink().is_some() || is_link_stylable_cell(cell))
@@ -1220,7 +1215,7 @@ impl TerminalElement {
                 link_ranges,
                 self.hovered_link.as_ref(),
                 &self.metrics,
-                self.cursor_visible,
+                self.grid_cursor_visible(),
                 self.snapshot.cursor_shape,
                 &self.theme,
                 highlight_layout,
@@ -1261,7 +1256,7 @@ impl TerminalElement {
             has_cursor.hash(&mut hasher);
             if has_cursor {
                 self.snapshot.cursor_shape.hash(&mut hasher);
-                self.cursor_visible.hash(&mut hasher);
+                self.grid_cursor_visible().hash(&mut hasher);
             }
         }
         logical_line.signature.hash(&mut hasher);
@@ -1405,6 +1400,51 @@ impl TerminalElement {
         }
     }
 
+    fn marked_text_run(&self, cursor_cell_visible: bool) -> Option<BatchedTextRun> {
+        if !cursor_cell_visible {
+            return None;
+        }
+        let text = self.marked_text.as_ref()?;
+        let marked_col = self
+            .snapshot
+            .lines
+            .get(self.snapshot.cursor_row)
+            .and_then(|row| visual_line_for_row_with_bidi(row, self.bidi_enabled))
+            .map(|line| line.visual_col_for_logical_col(self.snapshot.cursor_col))
+            .unwrap_or(self.snapshot.cursor_col);
+        Some(BatchedTextRun {
+            row: self.snapshot.cursor_row,
+            col: marked_col,
+            text: SharedString::from(text.clone()),
+            cells: marked_text_cells_before_utf16(text, usize::MAX).max(1),
+            style: marked_text_run(text, &self.theme, &self.metrics),
+            cache: None,
+        })
+    }
+
+    fn composition_caret(&self, marked_text: &BatchedTextRun) -> Option<TerminalCursor> {
+        if !self.cursor_visible {
+            return None;
+        }
+        let caret_cells = self
+            .marked_text_caret_utf16
+            .map(|caret| marked_text_cells_before_utf16(&marked_text.text, caret))
+            .unwrap_or(marked_text.cells);
+        // A bar keeps preedit glyphs readable when the IME caret sits between
+        // composed characters, independent of the program's grid cursor shape.
+        Some(TerminalCursor {
+            row: marked_text.row,
+            col: marked_text.col + caret_cells,
+            shape: TerminalCursorShape::Bar,
+        })
+    }
+
+    fn grid_cursor_visible(&self) -> bool {
+        // The IME preedit is painted over the terminal cursor cell, so the
+        // composition caret replaces the grid cursor until text is committed.
+        self.cursor_visible && self.marked_text.is_none()
+    }
+
     fn ghost_text_run(&self, cursor_row_visible: bool) -> Option<BatchedTextRun> {
         if self.marked_text.is_some()
             || !cursor_row_visible
@@ -1442,21 +1482,16 @@ impl TerminalElement {
 }
 
 fn ghost_text_prefix_for_cells(text: &str, max_cells: usize) -> (String, usize) {
-    // Ghost text is painted on the terminal grid, so clipping must use terminal
-    // cell width rather than Rust char count. Otherwise CJK hints can overlap
-    // the following columns while the layout believes they still fit.
+    // Clipping and painting must agree on complete graphemes so a viewport edge
+    // cannot split a joined emoji or detach a combining mark.
     let mut prefix = String::new();
     let mut cells = 0;
-    for ch in text.chars() {
-        let width = ch.width().unwrap_or(0);
-        if width == 0 {
-            prefix.push(ch);
-            continue;
-        }
+    for grapheme in text.graphemes(true) {
+        let width = grapheme.width();
         if cells + width > max_cells {
             break;
         }
-        prefix.push(ch);
+        prefix.push_str(grapheme);
         cells += width;
     }
     (prefix, cells)
@@ -1696,22 +1731,6 @@ fn hash_selection_for_row(
         crate::terminal_view::selection::TerminalSelectionMode::Lines => 3,
     }
     .hash(hasher);
-}
-
-fn resolve_terminal_foreground(color: TerminalColor, theme: &TerminalUiTheme) -> TerminalColor {
-    if color == terminal_color_from_hex(OXIDETERM_TERMINAL_FOREGROUND) {
-        terminal_color_from_hex(theme.foreground)
-    } else {
-        color
-    }
-}
-
-fn resolve_terminal_background(color: TerminalColor, theme: &TerminalUiTheme) -> TerminalColor {
-    if color == terminal_color_from_hex(OXIDETERM_TERMINAL_BACKGROUND) {
-        terminal_color_from_hex(theme.background)
-    } else {
-        color
-    }
 }
 
 fn hash_highlight_rules(rules: &[TerminalHighlightRule], hasher: &mut impl Hasher) {
@@ -1982,7 +2001,11 @@ fn push_visual_text_runs(
             continue;
         }
 
-        if let Some(run) = &mut current_run
+        // Runs are painted with a one-cell forced advance, so a wide glyph must stay alone
+        // in its run, matching the logical path where its spacer cell ends the run.
+        let wide = cluster.cells > 1;
+        if !wide
+            && let Some(run) = &mut current_run
             && run.col + run.cells == cluster.visual_col
             && text_run_style_matches(&run.style, &style)
             && current_run_is_drawing == is_drawing
@@ -1996,13 +2019,18 @@ fn push_visual_text_runs(
         if let Some(run) = current_run.take() {
             text_runs.push(run);
         }
-        current_run_is_drawing = is_drawing;
-        current_run = Some(PendingTerminalRowTextRun {
+        let run = PendingTerminalRowTextRun {
             col: cluster.visual_col,
             text: cluster.text.clone(),
             cells: cluster.cells,
             style,
-        });
+        };
+        if wide {
+            text_runs.push(run);
+        } else {
+            current_run_is_drawing = is_drawing;
+            current_run = Some(run);
+        }
     }
 
     if let Some(run) = current_run.take() {
@@ -2275,10 +2303,10 @@ impl Element for TerminalElement {
                     );
                 }
                 if let Some(ghost_text) = &layout.ghost_text {
-                    paint_ghost_text_run(ghost_text, origin, &self.metrics, window, cx);
+                    paint_grid_text_run(ghost_text, origin, &self.metrics, window, cx);
                 }
                 if let Some(marked_text) = &layout.marked_text {
-                    paint_text_run(marked_text, origin, &self.metrics, window, cx);
+                    paint_grid_text_run(marked_text, origin, &self.metrics, window, cx);
                 }
                 for image in layout
                     .images
@@ -2312,9 +2340,7 @@ impl Element for TerminalElement {
                 cx,
             );
         }
-        if layout.marked_text.is_none()
-            && let Some(cursor) = layout.cursor
-        {
+        if let Some(cursor) = layout.cursor {
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: grid_mask_bounds,
@@ -2385,14 +2411,18 @@ mod cache_tests {
     }
 
     fn row_with_text_and_cursor(absolute_line: i64, text: &str, cursor_col: usize) -> TerminalRow {
+        // Default-colored cells carry the theme defaults that the backend palette resolves.
+        let theme = TerminalUiTheme::default();
+        let fg = terminal_color_from_hex(theme.foreground);
+        let bg = terminal_color_from_hex(theme.background);
         let mut cells = text
             .chars()
             .enumerate()
             .map(|(col, ch)| TerminalCell {
                 ch,
                 wide: false,
-                fg: TerminalColor::rgb(0xe6, 0xe8, 0xeb),
-                bg: TerminalColor::rgb(0x0d, 0x0f, 0x12),
+                fg,
+                bg,
                 style_origin: Default::default(),
                 attrs: Default::default(),
                 extra: None,
@@ -2402,8 +2432,8 @@ mod cache_tests {
         cells.resize_with(cursor_col.saturating_add(1), || TerminalCell {
             ch: ' ',
             wide: false,
-            fg: TerminalColor::rgb(0xe6, 0xe8, 0xeb),
-            bg: TerminalColor::rgb(0x0d, 0x0f, 0x12),
+            fg,
+            bg,
             style_origin: Default::default(),
             attrs: Default::default(),
             extra: None,

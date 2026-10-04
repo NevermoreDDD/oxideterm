@@ -105,11 +105,16 @@ impl WorkspaceApp {
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _event, _window, cx| {
-                                    this.sftp_view.update(cx, |sftp_view, cx| {
+                                self.sftp_listener(cx, move |this, _event, _window, cx| {
+                                    this.sftp_view().update(cx, |sftp_view, cx| {
                                         // Drive selection is committed navigation, so refresh the
                                         // file list and reset selection state through one path.
-                                        sftp_view.apply_local_path(path.clone());
+                                        let audit = oxideterm_audit::AuditOperation::in_context(
+                                            crate::workspace::file_manager::local_file_audit_context(oxideterm_audit::AuditSource::User).as_ref(),
+                                            oxideterm_audit::AuditCategory::File, "file_browse", Some(&path),
+                                        );
+                                        let result = sftp_view.apply_local_path(path.clone());
+                                        audit.result(&result);
                                         cx.notify();
                                     });
                                     this.close_sftp_dialog(cx);
@@ -135,7 +140,7 @@ impl WorkspaceApp {
                 div()
                     .id("sftp-drives-scroll")
                     .max_h(px(128.0))
-                    .selectable_overflow_y_scroll(&self.sftp_view.read(cx).drives_scroll)
+                    .selectable_overflow_y_scroll(&self.sftp_view().read(cx).drives_scroll)
                     .rounded(px(self.tokens.radii.sm))
                     .bg(rgb(theme.bg_sunken))
                     .p(px(8.0))
@@ -153,7 +158,7 @@ impl WorkspaceApp {
     ) -> AnyElement {
         let theme = self.tokens.ui;
         let (focused, dialog_value) = {
-            let sftp_view = self.sftp_view.read(cx);
+            let sftp_view = self.sftp_view().read(cx);
             (
                 sftp_view.focused_input == Some(SftpInput::DialogValue),
                 sftp_view.dialog_value.clone(),
@@ -187,8 +192,8 @@ impl WorkspaceApp {
                     ))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _event, _window, cx| {
-                            this.sftp_view.update(cx, |sftp_view, cx| {
+                        self.sftp_listener(cx, |this, _event, _window, cx| {
+                            this.sftp_view().update(cx, |sftp_view, cx| {
                                 sftp_view.focused_input = Some(SftpInput::DialogValue);
                                 cx.notify();
                             });

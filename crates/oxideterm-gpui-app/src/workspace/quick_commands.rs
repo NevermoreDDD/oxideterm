@@ -7,7 +7,8 @@ pub(super) use oxideterm_quick_commands::{
 };
 use std::{cell::RefCell, collections::HashMap, path::Path, path::PathBuf};
 
-use gpui::{ListAlignment, ListState, px};
+use gpui::{Entity, ListAlignment, ListState, ScrollHandle, Subscription, px};
+use oxideterm_gpui_editor::TextEditorView;
 use oxideterm_gpui_ui::text_input::TextInputViewport;
 use zeroize::Zeroizing;
 
@@ -123,11 +124,15 @@ pub(in crate::workspace) struct TerminalQuickCommandsState {
     pub(super) open: bool,
     pub(super) manager_open: bool,
     pub(super) pinned: bool,
+    pub(super) panel: panel::QuickCommandsPanelState,
     pub(super) pending_execution: Option<QuickCommandExecutionDraft>,
     pub(super) pending_category_delete: Option<QuickCommandCategoryDeletePrompt>,
     pub(super) list_state: ListState,
     pub(super) list_cache: RefCell<VirtualListSignatureCache>,
     pub(super) input_viewports: RefCell<HashMap<QuickCommandInput, TextInputViewport>>,
+    pub(super) command_input: Option<Entity<TextEditorView>>,
+    pub(super) command_input_subscription: Option<Subscription>,
+    pub(super) editor_scroll: ScrollHandle,
 }
 
 impl TerminalQuickCommandsState {
@@ -137,6 +142,7 @@ impl TerminalQuickCommandsState {
             open: false,
             manager_open: false,
             pinned: false,
+            panel: panel::QuickCommandsPanelState::default(),
             pending_execution: None,
             pending_category_delete: None,
             // User-defined command sets are unbounded, so the surface owns a
@@ -154,6 +160,9 @@ impl TerminalQuickCommandsState {
             list_cache: RefCell::new(VirtualListSignatureCache::default()),
             // Each editor field keeps browser-like horizontal position across redraws.
             input_viewports: RefCell::new(HashMap::new()),
+            command_input: None,
+            command_input_subscription: None,
+            editor_scroll: ScrollHandle::new(),
         }
     }
 
@@ -172,5 +181,8 @@ mod buttons;
 mod store;
 #[path = "quick_commands_view.rs"]
 mod view;
+
+#[path = "quick_commands_panel.rs"]
+mod panel;
 
 pub(in crate::workspace) use view::quick_command_input_uses_monospace;

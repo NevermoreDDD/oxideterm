@@ -94,6 +94,7 @@ fn apply_oxide_import_with_options_inner(
         })?
     };
     let EncryptedPayload {
+        totp_credentials,
         connections,
         app_settings_json,
         quick_commands_json,
@@ -192,6 +193,16 @@ fn apply_oxide_import_with_options_inner(
         })
         .transpose()?;
     if options.import_standalone_sftp_profiles {
+        for profile in standalone_sftp_profiles_snapshot
+            .as_ref()
+            .and_then(|s| s.ftp.as_ref())
+            .into_iter()
+            .flat_map(|s| &s.records)
+        {
+            profile.validate().map_err(|error| {
+                OxideFileError::InvalidFormat(format!("Invalid FTP profile: {error}"))
+            })?;
+        }
         for profile in standalone_sftp_profiles_snapshot
             .as_ref()
             .into_iter()
@@ -427,6 +438,19 @@ fn apply_oxide_import_with_options_inner(
     // owner state before the first write. Secret-bearing connection upserts run
     // last, leaving no fallible archive stage after credentials are committed.
     let checkpoint = store.create_checkpoint()?;
+    let credential_selection = crate::CredentialSyncSelection {
+        totp_ids: connections_to_save
+            .iter()
+            .flat_map(|p| {
+                p.options.totp_credential_id.iter().cloned().chain(
+                    p.proxy_chain.iter().filter_map(|h| h.totp_credential_id.clone()),
+                )
+            })
+            .collect(),
+        connection_ids: connections_to_save.iter().map(|p| p.id.clone()).collect(),
+        ..Default::default()
+    };
+    let mut prepared_totp = None;
     let apply_result = (|| {
         current_step += 1;
         report_progress("saving_config", current_step);
@@ -480,7 +504,7 @@ fn apply_oxide_import_with_options_inner(
             }
         }
         if let Some(standalone_sftp_profiles_snapshot) = standalone_sftp_profiles_snapshot {
-            let profile_count = standalone_sftp_profiles_snapshot.records.len();
+            let profile_count = standalone_sftp_profiles_snapshot.record_count();
             if options.import_standalone_sftp_profiles {
                 result.imported_standalone_sftp_profiles = store
                     .apply_standalone_sftp_profiles_snapshot(standalone_sftp_profiles_snapshot)
@@ -514,6 +538,31 @@ fn apply_oxide_import_with_options_inner(
 
         current_step += 1;
         report_progress("applying_connections", current_step);
+        let credentials = totp_credentials
+            .into_iter()
+            .filter(|p| credential_selection.totp_ids.contains(&p.id))
+            .collect();
+        store.merge_totp_credentials(
+            credentials,
+            options.conflict_strategy == ImportConflictStrategy::Replace,
+        )?;
+        if options.import_portable_secrets && !options.defer_totp_secrets {
+            let secrets = portable_secrets
+                .iter()
+                .filter(|secret| {
+                    crate::is_profile_credential(secret)
+                        && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
+                            .is_ok_and(|target| matches!(target.owner, crate::CredentialOwner::Totp(_)))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            prepared_totp = Some(store.prepare_profile_credentials(
+                &secrets, &credential_selection, &mut None,
+            )?);
+            result.portable_secrets.retain(|secret| {
+                !secrets.iter().any(|handled| handled.id == secret.id && handled.kind == secret.kind)
+            });
+        }
         store.upsert_imported_connections_and_managed_keys_transaction(
             connections_to_save,
             imported_managed_keys,
@@ -522,16 +571,37 @@ fn apply_oxide_import_with_options_inner(
     })();
 
     if let Err(import_error) = apply_result {
+        let secret_rollback = prepared_totp.take()
+            .map(|prepared| store.rollback_profile_credentials(prepared)).transpose();
+        // Restore metadata even if protected-slot cleanup fails.
         return match store.restore_checkpoint(&checkpoint) {
-            Ok(()) => Err(import_error),
+            Ok(()) => {
+                secret_rollback?;
+                Err(import_error)
+            }
             Err(rollback_error) => Err(OxideFileError::Store(format!(
                 "Import transaction failed ({import_error}); the connection store checkpoint also could not be restored ({rollback_error:#})"
             ))),
         };
     }
 
+    if let Some(mut prepared) = prepared_totp {
+        result.restored_profile_credentials += prepared.summary.restored;
+        result.cleared_profile_credentials += prepared.summary.cleared;
+        result.skipped_profile_credentials += prepared.summary.skipped;
+        // Durable metadata is already committed; cleanup retains failed references for retry.
+        let _ = store.commit_profile_credentials(&mut prepared);
+    }
+
     if options.import_portable_secrets {
         for secret in &portable_secrets {
+            if !options.defer_totp_secrets
+                && crate::is_profile_credential(secret)
+                && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
+                    .is_ok_and(|target| matches!(target.owner, crate::CredentialOwner::Totp(_)))
+            {
+                continue;
+            }
             if secret.kind == "ai_provider_key" && !secret.id.trim().is_empty() {
                 result.imported_portable_secrets += 1;
             } else {
@@ -615,7 +685,7 @@ fn count_sensitive_credentials_for_auth(
     // This reports only presence/count metadata; secret values stay in their
     // zeroizing archive owners and are never cloned into UI-facing summaries.
     match auth {
-        EncryptedAuth::Password { password } => {
+        EncryptedAuth::Password { password, .. } => {
             if !password.is_empty() {
                 counts.restored_connection_passwords += 1;
             }
@@ -805,6 +875,7 @@ fn import_proxy_hop(
     import_options: &OxideImportOptions,
 ) -> Result<SavedProxyHop, OxideFileError> {
     Ok(SavedProxyHop {
+        totp_credential_id: hop.totp_credential_id,
         host: hop.host,
         port: hop.port,
         username: hop.username,
@@ -856,13 +927,23 @@ fn import_upstream_proxy_auth(auth: EncryptedUpstreamProxyAuth) -> SavedUpstream
 
 fn import_auth(
     store: &ConnectionStore,
-    auth: EncryptedAuth,
+    mut auth: EncryptedAuth,
     restored_managed_keys: &mut HashMap<String, String>,
     imported_managed_keys: &mut Vec<ImportedManagedSshKey>,
     import_options: &OxideImportOptions,
 ) -> Result<SavedAuth, OxideFileError> {
+    if import_options.restore_managed_keys && matches!(&auth,EncryptedAuth::Certificate {embedded_key:Some(_),embedded_cert:Some(_),..}) {
+        prepare_sync_auth(&mut auth,&mut Vec::new(),&mut HashMap::new())?;
+        let options=OxideImportOptions {restore_managed_key_passphrases:true,..import_options.clone()};
+        return import_auth(store,auth,restored_managed_keys,imported_managed_keys,&options);
+    }
     Ok(match auth {
-        EncryptedAuth::Password { password } => SavedAuth::Password {
+        EncryptedAuth::Password {
+            password,
+            empty_password,
+        } => SavedAuth::Password {
+            empty_password,
+
             keychain_id: None,
             plaintext_password: (!password.is_empty()).then(|| SecretString::from(password)),
         },
@@ -971,7 +1052,7 @@ fn prepare_managed_key_restore(
         if let Some(existing) = store
             .managed_ssh_keys()
             .into_iter()
-            .find(|key| key.fingerprint == fingerprint)
+            .find(|key| key.fingerprint == fingerprint && store.managed_ssh_key_metadata(&key.id).is_ok_and(|key|key.certificate==metadata.certificate))
         {
             restored_managed_keys.insert(metadata.key_id, existing.id.clone());
             return Ok(Some(SavedAuth::ManagedKey {
@@ -983,7 +1064,7 @@ fn prepare_managed_key_restore(
 
         if let Some(pending) = imported_managed_keys
             .iter()
-            .find(|entry| entry.key.fingerprint == fingerprint)
+            .find(|entry| entry.key.fingerprint == fingerprint && entry.key.certificate==metadata.certificate)
         {
             restored_managed_keys.insert(metadata.key_id, pending.key.id.clone());
             return Ok(Some(SavedAuth::ManagedKey {
@@ -1012,6 +1093,7 @@ fn prepare_managed_key_restore(
         .clone()
         .unwrap_or_else(|| format!("imported-{key_id}"));
     let key = ManagedSshKey {
+        certificate: metadata.certificate,
         id: key_id.clone(),
         secret_id,
         name: metadata
@@ -1028,6 +1110,10 @@ fn prepare_managed_key_restore(
         created_at: now,
         updated_at: now,
     };
+    if key.certificate.is_some() {
+        crate::ManagedSshKeySyncRecord {metadata:key.clone(),private_key:SecretString::from(private_key.as_str())}
+            .validate_certificate().map_err(|error|OxideFileError::InvalidFormat(error.to_string()))?;
+    }
     let saved_auth = SavedAuth::ManagedKey {
         key_id: key_id.clone(),
         passphrase_keychain_id: None,
@@ -1131,6 +1217,8 @@ fn merge_auth(existing: SavedAuth, imported: SavedAuth) -> SavedAuth {
                 ..
             },
             SavedAuth::Password {
+                empty_password: false,
+
                 plaintext_password: None,
                 keychain_id: None,
             },
