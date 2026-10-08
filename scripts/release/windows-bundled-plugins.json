@@ -1,0 +1,14 @@
+{
+  "plugins": [
+    { "id": "com.oxideterm.examples.host-tools-dashboard", "minimumVersion": "0.4.2" },
+    { "id": "com.oxideterm.language.c", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.language.c-sharp", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.language.cpp", "minimumVersion": "0.1.1" },
+    { "id": "com.oxideterm.language.groovy", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.language.rust", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.language.typescript", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.language.xml", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.remote-desktop.rdp", "minimumVersion": "0.1.0" },
+    { "id": "com.oxideterm.remote-desktop.vnc", "minimumVersion": "0.1.0" }
+  ]
+}

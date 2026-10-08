@@ -470,6 +470,23 @@ impl NativePluginRegistry {
         )
     }
 
+    /// Packaging can target another platform while keeping the runtime's
+    /// release compatibility and platform precedence rules.
+    pub fn resolve_registry_release_for_target(
+        entry: &NativePluginRegistryEntry,
+        target: &str,
+    ) -> Result<(NativePluginRegistryEntry, NativePluginRegistryPackage), String> {
+        let release = select_registry_release_for(entry, env!("CARGO_PKG_VERSION"), target, true)
+            .ok_or_else(|| {
+            format!(
+                "Plugin \"{}\" has no compatible release for {target}",
+                entry.id
+            )
+        })?;
+        let package = resolve_registry_package_for_target(&release, target)?;
+        Ok((release, package))
+    }
+
     /// Allows the UI to explain why a newer platform release cannot be installed.
     pub fn latest_registry_release(
         entry: &NativePluginRegistryEntry,
@@ -1410,6 +1427,37 @@ mod release_tests {
         );
         assert!(
             select_registry_release_for(&legacy, "0.9.0", "aarch64-apple-darwin", true).is_none()
+        );
+    }
+
+    #[test]
+    fn packaging_resolves_foreign_target_without_selecting_an_incompatible_release() {
+        let catalog = catalog();
+        for (target, version, package_target) in [
+            ("x86_64-pc-windows-msvc", "1.11.0", "x86_64-pc-windows-msvc"),
+            ("aarch64-pc-windows-msvc", "1.10.0", "any"),
+        ] {
+            let (release, package) = NativePluginRegistry::resolve_registry_release_for_target(
+                &catalog.plugins[0],
+                target,
+            )
+            .unwrap();
+            assert_eq!(release.version, version, "{target}");
+            assert_eq!(
+                package.download_url,
+                format!("https://example.com/{package_target}/{version}.zip")
+            );
+        }
+        let mut incompatible = catalog.plugins[0].clone();
+        incompatible
+            .releases
+            .retain(|release| release.version == "3.0.0");
+        assert!(
+            NativePluginRegistry::resolve_registry_release_for_target(
+                &incompatible,
+                "x86_64-pc-windows-msvc",
+            )
+            .is_err()
         );
     }
 

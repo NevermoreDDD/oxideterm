@@ -72,7 +72,7 @@ jobs:
         run: python scripts/quality/audit_i18n.py
 
       - name: Test native packaging helpers
-        run: python -m unittest scripts.tests.test_package_native scripts.tests.test_verify_native_package scripts.tests.test_compose_release_notes
+        run: python -m unittest scripts.tests.test_package_native scripts.tests.test_verify_native_package scripts.tests.test_compose_release_notes scripts.tests.test_bundle_portable_plugins
 
   repository-policy:
     name: Repository automation policies
