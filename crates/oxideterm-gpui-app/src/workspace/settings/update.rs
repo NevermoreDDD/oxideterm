@@ -212,8 +212,11 @@ impl SettingsWorkspaceEntity {
         }
 
         // Delay manifest traffic until session restoration and the first frame settle.
+        let timer = cx
+            .background_executor()
+            .timer(AUTOMATIC_NATIVE_UPDATE_DELAY);
         self.native_update.automatic_check_task = Some(cx.spawn(async move |settings, cx| {
-            Timer::after(AUTOMATIC_NATIVE_UPDATE_DELAY).await;
+            timer.await;
             let _ = settings.update(cx, |settings, cx| {
                 settings.native_update.automatic_check_task = None;
                 if matches!(settings.native_update.state, NativeUpdateUiState::Idle) {
