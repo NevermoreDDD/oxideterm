@@ -12,7 +12,9 @@ impl IdeSurface {
     pub fn active_editor_tab_id(&self) -> Option<String> {
         // AI target discovery follows Tauri's IDE store shape, where tabId is
         // the active editor tab id rather than the outer application tab id.
-        self.workspace.active_tab().map(|tab_id| tab_id.0.to_string())
+        self.workspace
+            .active_tab()
+            .map(|tab_id| tab_id.0.to_string())
     }
 
     pub fn open_file_paths(&self) -> Vec<String> {
@@ -142,7 +144,11 @@ impl IdeSurface {
         let Some(node_id) = self.node_id.clone() else {
             return false;
         };
-        self.open_remote_file(IdeLocation::remote(node_id, path), Some(oxideterm_audit::AuditSource::Plugin), cx);
+        self.open_remote_file(
+            IdeLocation::remote(node_id, path),
+            Some(oxideterm_audit::AuditSource::Plugin),
+            cx,
+        );
         true
     }
 
@@ -304,7 +310,12 @@ impl IdeSurface {
         cx.notify();
     }
 
-    fn load_directory(&mut self, directory: IdeLocation, source: Option<oxideterm_audit::AuditSource>, cx: &mut Context<Self>) {
+    fn load_directory(
+        &mut self,
+        directory: IdeLocation,
+        source: Option<oxideterm_audit::AuditSource>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.ensure_remote_actions_ready(cx) {
             return;
         }
@@ -433,8 +444,7 @@ impl IdeSurface {
         });
         self.agent_watch_backend_abort = Some(watch_backend_task.abort_handle());
         self.agent_watch_task = Some(cx.spawn(async move |weak, cx| {
-            let watch = await_ide_backend(watch_backend_task)
-                .await;
+            let watch = await_ide_backend(watch_backend_task).await;
 
             match watch {
                 Ok(Some(mut subscription)) => {
@@ -494,11 +504,7 @@ impl IdeSurface {
         self.stop_agent_watch_with_restart(false, cx);
     }
 
-    fn stop_agent_watch_with_restart(
-        &mut self,
-        restart_after_stop: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn stop_agent_watch_with_restart(&mut self, restart_after_stop: bool, cx: &mut Context<Self>) {
         self.agent_watch_generation = self.agent_watch_generation.wrapping_add(1);
         self.agent_watch_task = None;
         self.agent_watch_retry_task = None;
@@ -700,12 +706,7 @@ impl IdeSurface {
         .detach();
     }
 
-    fn put_search_cache(
-        &mut self,
-        key: String,
-        results: Vec<SearchResultGroup>,
-        truncated: bool,
-    ) {
+    fn put_search_cache(&mut self, key: String, results: Vec<SearchResultGroup>, truncated: bool) {
         self.search_cache_order.retain(|existing| existing != &key);
         self.search_cache_order.push(key.clone());
         self.search_cache.insert(
@@ -743,15 +744,14 @@ impl IdeSurface {
             // Printable and composing text is committed by EntityInputHandler.
             return;
         }
-        let uses_text_modifier = event.keystroke.modifiers.platform
-            || event.keystroke.modifiers.control;
+        let uses_text_modifier =
+            event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
         let mut query_changed = false;
         match key {
             "escape" => self.close_project_search(window, cx),
             "enter" => self.run_project_search(cx),
             "a" if uses_text_modifier => {
-                self.search.selection_range =
-                    Some(0..self.search.query.encode_utf16().count());
+                self.search.selection_range = Some(0..self.search.query.encode_utf16().count());
                 cx.notify();
             }
             "c" if uses_text_modifier => {
@@ -960,7 +960,11 @@ impl IdeSurface {
         let path = resolve_search_match_path(&root_path, &hit.path);
         self.pending_search_queries
             .insert(path.clone(), self.search.query.clone());
-        self.open_remote_file(IdeLocation::remote(node_id, path), Some(oxideterm_audit::AuditSource::User), cx);
+        self.open_remote_file(
+            IdeLocation::remote(node_id, path),
+            Some(oxideterm_audit::AuditSource::User),
+            cx,
+        );
     }
 
     fn go_to_symbol_definition(&mut self, word: String, cx: &mut Context<Self>) {
@@ -1030,7 +1034,11 @@ impl IdeSurface {
                 column: definition.column,
             },
         );
-        self.open_remote_file(IdeLocation::remote(node_id, definition.path), Some(oxideterm_audit::AuditSource::User), cx);
+        self.open_remote_file(
+            IdeLocation::remote(node_id, definition.path),
+            Some(oxideterm_audit::AuditSource::User),
+            cx,
+        );
     }
 
     fn apply_pending_search_query_for_location(
@@ -1085,6 +1093,38 @@ impl IdeSurface {
         }
     }
 
+    fn select_tree_row(
+        &mut self,
+        entry: FileTreeEntry,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if modifiers.platform || modifiers.control || modifiers.shift {
+            let Some(root) = self
+                .workspace
+                .snapshot()
+                .ok()
+                .map(|snapshot| snapshot.project.root)
+            else {
+                return;
+            };
+            let visible = self
+                .flatten_tree_rows(root)
+                .iter()
+                .map(|row| row.entry.location.clone())
+                .collect::<Vec<_>>();
+            let _ = self.workspace.select_tree_entries(
+                entry.location,
+                &visible,
+                modifiers.platform || modifiers.control,
+                modifiers.shift,
+            );
+            cx.notify();
+        } else {
+            self.open_tree_entry(entry, cx);
+        }
+    }
+
     fn open_tree_entry(&mut self, entry: FileTreeEntry, cx: &mut Context<Self>) {
         let _ = self
             .workspace
@@ -1098,7 +1138,11 @@ impl IdeSurface {
                     let _ = self.workspace.set_tree_expanded(&entry.location, false);
                     cx.notify();
                 } else {
-                    self.load_directory(entry.location, Some(oxideterm_audit::AuditSource::User), cx);
+                    self.load_directory(
+                        entry.location,
+                        Some(oxideterm_audit::AuditSource::User),
+                        cx,
+                    );
                 }
             }
             FileKind::File | FileKind::Symlink | FileKind::Other => {
@@ -1107,7 +1151,12 @@ impl IdeSurface {
         }
     }
 
-    fn open_remote_file(&mut self, location: IdeLocation, source: Option<oxideterm_audit::AuditSource>, cx: &mut Context<Self>) {
+    fn open_remote_file(
+        &mut self,
+        location: IdeLocation,
+        source: Option<oxideterm_audit::AuditSource>,
+        cx: &mut Context<Self>,
+    ) {
         if !self.ensure_remote_actions_ready(cx) {
             return;
         }
@@ -1229,7 +1278,10 @@ impl IdeSurface {
     ) {
         let tokens = self.tokens;
         let runtime_settings = self.runtime_settings.clone();
-        let language = language_for_location(location, &text);
+        let language_path = match location {
+            IdeLocation::Local { path } => path.clone(),
+            IdeLocation::Remote { path, .. } => std::path::PathBuf::from(path),
+        };
         // The IDE owns this editor; callbacks must not retain the IDE in return.
         let surface = cx.weak_entity();
         let save_surface = surface.clone();
@@ -1245,15 +1297,15 @@ impl IdeSurface {
             editor.apply_ide_runtime_settings(
                 &tokens,
                 runtime_settings.editor_font_family.clone(),
-            runtime_settings.editor_font_weight,
-            runtime_settings.editor_font_fallback.clone(),
+                runtime_settings.editor_font_weight,
+                runtime_settings.editor_font_fallback.clone(),
                 runtime_settings.editor_font_size,
                 runtime_settings.editor_line_height,
                 runtime_settings.word_wrap,
                 runtime_settings.background_active,
                 cx,
             );
-            editor.set_language(language, cx);
+            editor.set_language_from_path(language_path, None, cx);
             editor.set_on_save(Box::new(move |text, _window, cx| {
                 let _ = save_surface.update(cx, |surface, cx| {
                     surface.save_tab_with_text(tab_id, text, cx);
@@ -1373,15 +1425,25 @@ impl IdeSurface {
         if !self.ensure_remote_actions_ready(cx) {
             return;
         }
-        let affected = self.workspace.affected_tabs_under(&location);
+        let entries = self.tree_operation_entries(location, name, is_directory);
+        let affected = entries
+            .iter()
+            .flat_map(|entry| self.workspace.affected_tabs_under(&entry.location))
+            .collect::<HashSet<_>>();
         let unsaved_tab_count = affected
             .iter()
             .filter(|tab_id| self.is_tab_dirty(**tab_id, cx))
             .count();
         self.delete_confirm = Some(DeleteConfirmState {
-            location,
-            name,
-            is_directory,
+            name: entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            is_directory: entries
+                .iter()
+                .any(|entry| entry.kind == FileKind::Directory),
+            entries,
             affected_tab_count: affected.len(),
             unsaved_tab_count,
             deleting: false,
@@ -1399,11 +1461,10 @@ impl IdeSurface {
         if !self.ensure_remote_actions_ready(cx) {
             return;
         }
+        let entries = self.tree_operation_entries(location, name, is_directory);
         self.tree_clipboard = Some(TreeClipboardState {
             operation: TreeClipboardOperation::Copy,
-            location,
-            name,
-            is_directory,
+            entries,
         });
         cx.notify();
     }
@@ -1418,13 +1479,69 @@ impl IdeSurface {
         if !self.ensure_remote_actions_ready(cx) {
             return;
         }
+        let entries = self.tree_operation_entries(location, name, is_directory);
         self.tree_clipboard = Some(TreeClipboardState {
             operation: TreeClipboardOperation::Cut,
-            location,
-            name,
-            is_directory,
+            entries,
         });
         cx.notify();
+    }
+
+    fn tree_operation_entries(
+        &self,
+        location: IdeLocation,
+        name: String,
+        is_directory: bool,
+    ) -> Vec<FileTreeEntry> {
+        let tree = self.workspace.file_tree();
+        let mut entries = if tree.selection().contains(&location) {
+            tree.snapshot()
+                .directories
+                .into_iter()
+                .flat_map(|directory| directory.children)
+                .filter(|entry| tree.selection().contains(&entry.location))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if entries.is_empty() {
+            entries.push(FileTreeEntry {
+                location,
+                name,
+                kind: if is_directory {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                version: SavedFileVersion::unknown(),
+            });
+        }
+        // A selected directory already owns its descendants during copy, move and delete.
+        let parents = entries
+            .iter()
+            .filter(|entry| entry.kind == FileKind::Directory)
+            .map(|entry| entry.location.clone())
+            .collect::<Vec<_>>();
+        entries.retain(|entry| {
+            !parents.iter().any(|parent| {
+                parent != &entry.location
+                    && match (parent, &entry.location) {
+                        (
+                            IdeLocation::Remote {
+                                node_id: parent_node,
+                                path: parent_path,
+                            },
+                            IdeLocation::Remote { node_id, path },
+                        ) => parent_node == node_id && remote_path_contains_path(parent_path, path),
+                        (IdeLocation::Local { path: parent }, IdeLocation::Local { path }) => {
+                            path.starts_with(parent)
+                        }
+                        _ => false,
+                    }
+            })
+        });
+        entries.sort_by_key(|entry| entry.location.stable_key());
+        entries
     }
 
     fn paste_tree_clipboard(
@@ -1444,45 +1561,74 @@ impl IdeSurface {
         else {
             return;
         };
-        let (source_node_id, source_path) = match &clipboard.location {
-            IdeLocation::Remote { node_id, path } => (node_id.clone(), path.clone()),
-            IdeLocation::Local { .. } => return,
-        };
-        if source_node_id != node_id {
-            self.last_error = Some("Cannot paste between different remote connections".to_string());
-            cx.notify();
-            return;
+        let mut jobs = Vec::new();
+        for entry in &clipboard.entries {
+            let IdeLocation::Remote {
+                node_id: source_node_id,
+                path: source_path,
+            } = &entry.location
+            else {
+                return;
+            };
+            if source_node_id != &node_id {
+                self.last_error =
+                    Some("Cannot paste between different remote connections".to_string());
+                cx.notify();
+                return;
+            }
+            let target_path = join_remote_child(&target_dir, &entry.name);
+            if normalize_remote_path(source_path) == normalize_remote_path(&target_path) {
+                continue;
+            }
+            if entry.kind == FileKind::Directory
+                && remote_path_contains_path(source_path, &target_path)
+            {
+                self.last_error = Some("Cannot paste a directory into itself".to_string());
+                cx.notify();
+                return;
+            }
+            jobs.push((entry.location.clone(), source_path.clone(), target_path));
         }
-        let target_path = join_remote_child(&target_dir, &clipboard.name);
-        if normalize_remote_path(&source_path) == normalize_remote_path(&target_path) {
-            return;
-        }
-        if clipboard.is_directory && remote_path_contains_path(&source_path, &target_path) {
-            self.last_error = Some("Cannot paste a directory into itself".to_string());
-            cx.notify();
+        if jobs.is_empty() {
             return;
         }
 
         let fs = self.fs.clone();
         let backend_runtime = self.backend_runtime.clone();
         let generation = self.generation;
-        let source_parent = parent_remote_path(&source_path);
+        let operation = clipboard.operation;
         cx.notify();
 
         cx.spawn(async move |weak, cx| {
-            let result = await_ide_backend(backend_runtime.spawn({
+            let delivery = await_ide_backend(backend_runtime.spawn({
                 let node_id = node_id.clone();
-                let source_path = source_path.clone();
-                let target_path = target_path.clone();
                 async move {
-                    match clipboard.operation {
-                        TreeClipboardOperation::Copy => {
-                            fs.copy_item(node_id, source_path, target_path).await
+                    let mut completed = Vec::new();
+                    for (location, source_path, target_path) in jobs {
+                        let result = match operation {
+                            TreeClipboardOperation::Copy => {
+                                fs.copy_item(
+                                    node_id.clone(),
+                                    source_path.clone(),
+                                    target_path.clone(),
+                                )
+                                .await
+                            }
+                            TreeClipboardOperation::Cut => {
+                                fs.rename_item(
+                                    node_id.clone(),
+                                    source_path.clone(),
+                                    target_path.clone(),
+                                )
+                                .await
+                            }
+                        };
+                        if let Err(error) = result {
+                            return Ok((completed, Some(error)));
                         }
-                        TreeClipboardOperation::Cut => {
-                            fs.rename_item(node_id, source_path, target_path).await
-                        }
+                        completed.push((location, source_path, target_path));
                     }
+                    Ok((completed, None))
                 }
             }))
             .await;
@@ -1490,27 +1636,41 @@ impl IdeSurface {
                 if this.generation != generation {
                     return;
                 }
-                match result {
-                    Ok(()) => {
-                        if clipboard.operation == TreeClipboardOperation::Cut {
-                            let new_location =
-                                IdeLocation::remote(source_node_id.clone(), target_path.clone());
-                            if let Err(error) =
-                                this.workspace.rename_tabs_under(&clipboard.location, &new_location)
-                            {
-                                this.last_error = Some(error.to_string());
+                match delivery {
+                    Ok((completed, error)) => {
+                        let mut refresh = HashSet::from([target_dir]);
+                        for (location, source_path, target_path) in &completed {
+                            if operation == TreeClipboardOperation::Cut {
+                                let new_location =
+                                    IdeLocation::remote(node_id.clone(), target_path.clone());
+                                if let Err(error) =
+                                    this.workspace.rename_tabs_under(location, &new_location)
+                                {
+                                    this.last_error = Some(error.to_string());
+                                }
+                                refresh.insert(parent_remote_path(source_path));
                             }
-                            this.tree_clipboard = None;
+                        }
+                        if operation == TreeClipboardOperation::Cut
+                            && this.tree_clipboard.as_ref() == Some(&clipboard)
+                        {
+                            let mut remaining = clipboard;
+                            remaining.entries.retain(|entry| {
+                                !completed
+                                    .iter()
+                                    .any(|(location, _, _)| location == &entry.location)
+                            });
+                            this.tree_clipboard =
+                                (!remaining.entries.is_empty()).then_some(remaining);
+                            let _ = this.workspace.select_tree_entry(None);
+                        }
+                        if let Some(error) = error {
+                            this.last_error = Some(this.file_error_message(&error));
                         }
                         this.clear_search_cache();
-                        this.load_directory(
-                            IdeLocation::remote(source_node_id.clone(), target_dir),
-                            None,
-                            cx,
-                        );
-                        if source_parent != parent_remote_path(&target_path) {
+                        for path in refresh {
                             this.load_directory(
-                                IdeLocation::remote(source_node_id, source_parent),
+                                IdeLocation::remote(node_id.clone(), path),
                                 None,
                                 cx,
                             );
@@ -1632,7 +1792,9 @@ impl IdeSurface {
                             fs.create_folder(node_id_for_task, new_path_for_task).await
                         }
                         TreeNameInputKind::Rename => {
-                            if let IdeLocation::Remote { path: old_path, .. } = &old_location_for_task {
+                            if let IdeLocation::Remote { path: old_path, .. } =
+                                &old_location_for_task
+                            {
                                 if normalize_remote_path(old_path)
                                     == normalize_remote_path(&new_path_for_task)
                                 {
@@ -1659,16 +1821,22 @@ impl IdeSurface {
                 match result {
                     Ok(()) => {
                         if input.kind == TreeNameInputKind::Rename {
-                            let new_location = IdeLocation::remote(node_id.clone(), new_path.clone());
-                            if let Err(error) =
-                                this.workspace.rename_tabs_under(&old_location, &new_location)
+                            let new_location =
+                                IdeLocation::remote(node_id.clone(), new_path.clone());
+                            if let Err(error) = this
+                                .workspace
+                                .rename_tabs_under(&old_location, &new_location)
                             {
                                 this.last_error = Some(error.to_string());
                             }
                         }
                         this.clear_search_cache();
                         this.tree_name_input = None;
-                        this.load_directory(IdeLocation::remote(node_id.clone(), parent_path), None, cx);
+                        this.load_directory(
+                            IdeLocation::remote(node_id.clone(), parent_path),
+                            None,
+                            cx,
+                        );
                         if input.kind == TreeNameInputKind::NewFile {
                             this.open_remote_file(IdeLocation::remote(node_id, new_path), None, cx);
                         }
@@ -1703,8 +1871,8 @@ impl IdeSurface {
             // handler. Stopping propagation here can suppress platform input.
             return;
         }
-        let uses_text_modifier = event.keystroke.modifiers.platform
-            || event.keystroke.modifiers.control;
+        let uses_text_modifier =
+            event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
         match key {
             "escape" => self.cancel_tree_name_input(cx),
             "enter" => self.submit_tree_name_input(cx),
@@ -1819,55 +1987,82 @@ impl IdeSurface {
         if confirm.deleting || confirm.unsaved_tab_count > 0 {
             return;
         }
-        let (node_id, path) = match &confirm.location {
-            IdeLocation::Remote { node_id, path } => (node_id.clone(), path.clone()),
-            IdeLocation::Local { .. } => return,
-        };
         self.sync_all_editors(cx);
-        match self.workspace.close_clean_tabs_under(&confirm.location) {
-            Ok(closed_tabs) => {
-                for tab_id in closed_tabs {
-                    self.editors.remove(&tab_id);
+        confirm.unsaved_tab_count = confirm
+            .entries
+            .iter()
+            .flat_map(|entry| self.workspace.affected_tabs_under(&entry.location))
+            .collect::<HashSet<_>>()
+            .iter()
+            .filter(|tab| self.is_tab_dirty(**tab, cx))
+            .count();
+        if confirm.unsaved_tab_count > 0 {
+            self.delete_confirm = Some(confirm);
+            cx.notify();
+            return;
+        }
+        for entry in &confirm.entries {
+            match self.workspace.close_clean_tabs_under(&entry.location) {
+                Ok(closed_tabs) => {
+                    for tab_id in closed_tabs {
+                        self.editors.remove(&tab_id);
+                    }
                 }
-            }
-            Err(error) => {
-                self.last_error = Some(error.to_string());
-                self.delete_confirm = None;
-                cx.notify();
-                return;
+                Err(error) => {
+                    self.last_error = Some(error.to_string());
+                    self.delete_confirm = None;
+                    cx.notify();
+                    return;
+                }
             }
         }
         confirm.deleting = true;
         self.delete_confirm = Some(confirm.clone());
         let fs = self.fs.clone();
         let backend_runtime = self.backend_runtime.clone();
-        let parent_path = parent_remote_path(&path);
+        let parents = confirm
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.location {
+                IdeLocation::Remote { node_id, path } => {
+                    Some((node_id.clone(), parent_remote_path(path)))
+                }
+                IdeLocation::Local { .. } => None,
+            })
+            .collect::<HashSet<_>>();
         let root_path = self.root_path.clone();
         let generation = self.generation;
         cx.notify();
 
         cx.spawn(async move |weak, cx| {
             let result = await_ide_backend(backend_runtime.spawn(async move {
-                fs.delete_item(node_id, path, confirm.is_directory).await
+                for entry in confirm.entries {
+                    if let IdeLocation::Remote { node_id, path } = entry.location {
+                        fs.delete_item(node_id, path, entry.kind == FileKind::Directory)
+                            .await?;
+                    }
+                }
+                Ok(())
             }))
             .await;
             let _ = weak.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
                 }
+                // Earlier items may have succeeded before a later deletion failed.
+                this.clear_search_cache();
+                this.delete_confirm = None;
+                let _ = this.workspace.select_tree_entry(None);
+                for (node_id, path) in parents {
+                    this.load_directory(IdeLocation::remote(node_id, path), None, cx);
+                }
                 match result {
                     Ok(()) => {
-                        this.clear_search_cache();
-                        this.delete_confirm = None;
-                        if let Some(node_id) = this.node_id.clone() {
-                            this.load_directory(IdeLocation::remote(node_id, parent_path), None, cx);
-                        }
                         if root_path.as_deref() == this.root_path.as_deref() {
                             this.start_agent_watch_if_ready(cx);
                         }
                     }
                     Err(error) => {
-                        this.delete_confirm = None;
                         this.last_error = Some(this.file_error_message(&error));
                     }
                 }
@@ -1967,7 +2162,12 @@ impl IdeSurface {
         self.save_tab_with_source(tab_id, oxideterm_audit::AuditSource::User, cx);
     }
 
-    fn save_tab_with_source(&mut self, tab_id: EditorTabId, source: oxideterm_audit::AuditSource, cx: &mut Context<Self>) {
+    fn save_tab_with_source(
+        &mut self,
+        tab_id: EditorTabId,
+        source: oxideterm_audit::AuditSource,
+        cx: &mut Context<Self>,
+    ) {
         self.sync_editor_to_workspace(tab_id, cx);
         self.save_tab_current(tab_id, source, cx);
     }
@@ -1977,7 +2177,12 @@ impl IdeSurface {
         self.save_tab_current(tab_id, oxideterm_audit::AuditSource::User, cx);
     }
 
-    fn save_tab_current(&mut self, tab_id: EditorTabId, source: oxideterm_audit::AuditSource, cx: &mut Context<Self>) {
+    fn save_tab_current(
+        &mut self,
+        tab_id: EditorTabId,
+        source: oxideterm_audit::AuditSource,
+        cx: &mut Context<Self>,
+    ) {
         let close_request = self.save_after_close.take();
         if !self.ensure_remote_actions_ready(cx) {
             return;
@@ -2024,27 +2229,27 @@ impl IdeSurface {
             let result = backend_runtime
                 .spawn(async move {
                     let task = async {
-                    match fs
-                        .write_file(
-                            &buffer.location,
-                            &buffer.text,
-                            &buffer.format,
-                            Some(&buffer.version),
-                            mode,
-                        )
-                        .await
-                    {
-                        Ok(version) => Ok(version),
-                        Err(error) if error.kind == IdeFileErrorKind::Conflict => {
-                            let remote_version = fs
-                                .stat(&buffer.location)
-                                .await
-                                .ok()
-                                .map(|stat| stat.version);
-                            Err((error, remote_version))
+                        match fs
+                            .write_file(
+                                &buffer.location,
+                                &buffer.text,
+                                &buffer.format,
+                                Some(&buffer.version),
+                                mode,
+                            )
+                            .await
+                        {
+                            Ok(version) => Ok(version),
+                            Err(error) if error.kind == IdeFileErrorKind::Conflict => {
+                                let remote_version = fs
+                                    .stat(&buffer.location)
+                                    .await
+                                    .ok()
+                                    .map(|stat| stat.version);
+                                Err((error, remote_version))
+                            }
+                            Err(error) => Err((error, None)),
                         }
-                        Err(error) => Err((error, None)),
-                    }
                     };
                     if let Some(context) = audit_request {
                         context.scope(task).await
@@ -2100,9 +2305,7 @@ impl IdeSurface {
                         };
                         if close_request.is_some() && clean_after_save {
                             this.editors.remove(&tab_id);
-                        } else if clean_after_save
-                            && let Some(editor) = this.editors.get(&tab_id)
-                        {
+                        } else if clean_after_save && let Some(editor) = this.editors.get(&tab_id) {
                             editor.update(cx, |editor, cx| editor.mark_saved_external(cx));
                         }
                     }
@@ -2152,8 +2355,18 @@ impl IdeSurface {
             && let Some(mut context) = oxideterm_audit::AuditContext::current()
         {
             context.source = oxideterm_audit::AuditSource::User;
-            context.operation(oxideterm_audit::AuditCategory::File, "file_conflict_cancel", Some(&buffer.location.stable_key()))
-                .finish(oxideterm_audit::AuditOutcome::Cancelled, oxideterm_audit::AuditEvidence::Request, None, None);
+            context
+                .operation(
+                    oxideterm_audit::AuditCategory::File,
+                    "file_conflict_cancel",
+                    Some(&buffer.location.stable_key()),
+                )
+                .finish(
+                    oxideterm_audit::AuditOutcome::Cancelled,
+                    oxideterm_audit::AuditEvidence::Request,
+                    None,
+                    None,
+                );
         }
         self.conflict_state = None;
         cx.notify();
@@ -2202,7 +2415,12 @@ impl IdeSurface {
                 context
             })
         });
-        let audit = oxideterm_audit::AuditOperation::in_context(audit_context.as_ref(), oxideterm_audit::AuditCategory::File, "file_conflict_overwrite", Some(&buffer.location.stable_key()));
+        let audit = oxideterm_audit::AuditOperation::in_context(
+            audit_context.as_ref(),
+            oxideterm_audit::AuditCategory::File,
+            "file_conflict_overwrite",
+            Some(&buffer.location.stable_key()),
+        );
         let child_context = audit_context.map(|mut context| {
             context.parent_id = audit.id().map(str::to_owned);
             context
@@ -2216,14 +2434,19 @@ impl IdeSurface {
                 WriteMode::CreateOrReplace
             };
             let result = await_ide_backend(backend_runtime.spawn(async move {
-                let task = force_write_conflict(&fs, &buffer.location, &buffer.text, &buffer.format, mode);
+                let task =
+                    force_write_conflict(&fs, &buffer.location, &buffer.text, &buffer.format, mode);
                 let result = if let Some(context) = child_context {
                     context.scope(task).await
                 } else {
                     task.await
                 };
                 audit.finish(
-                    if result.is_ok() { oxideterm_audit::AuditOutcome::Succeeded } else { oxideterm_audit::AuditOutcome::Failed },
+                    if result.is_ok() {
+                        oxideterm_audit::AuditOutcome::Succeeded
+                    } else {
+                        oxideterm_audit::AuditOutcome::Failed
+                    },
                     oxideterm_audit::AuditEvidence::Protocol,
                     None,
                     result.as_ref().ok().and_then(|version| version.size_bytes),
@@ -2325,7 +2548,12 @@ impl IdeSurface {
                 context
             })
         });
-        let audit = oxideterm_audit::AuditOperation::in_context(audit_context.as_ref(), oxideterm_audit::AuditCategory::File, "file_conflict_reload", Some(&buffer.location.stable_key()));
+        let audit = oxideterm_audit::AuditOperation::in_context(
+            audit_context.as_ref(),
+            oxideterm_audit::AuditCategory::File,
+            "file_conflict_reload",
+            Some(&buffer.location.stable_key()),
+        );
         let child_context = audit_context.map(|mut context| {
             context.parent_id = audit.id().map(str::to_owned);
             context
@@ -2341,10 +2569,17 @@ impl IdeSurface {
                     task.await
                 };
                 audit.finish(
-                    if result.is_ok() { oxideterm_audit::AuditOutcome::Succeeded } else { oxideterm_audit::AuditOutcome::Failed },
+                    if result.is_ok() {
+                        oxideterm_audit::AuditOutcome::Succeeded
+                    } else {
+                        oxideterm_audit::AuditOutcome::Failed
+                    },
                     oxideterm_audit::AuditEvidence::Protocol,
                     None,
-                    result.as_ref().ok().and_then(|file| file.version.size_bytes),
+                    result
+                        .as_ref()
+                        .ok()
+                        .and_then(|file| file.version.size_bytes),
                 );
                 result
             }))
@@ -2594,7 +2829,9 @@ fn tree_name_initial_selection(name: &str, is_directory: bool) -> Range<usize> {
     let selection_end = if is_directory {
         name.len()
     } else {
-        name.rfind('.').filter(|index| *index > 0).unwrap_or(name.len())
+        name.rfind('.')
+            .filter(|index| *index > 0)
+            .unwrap_or(name.len())
     };
     0..name[..selection_end].encode_utf16().count()
 }
@@ -2605,11 +2842,7 @@ fn replace_tree_name_selection(input: &mut TreeNameInputState, replacement: &str
     replace_tree_name_range(input, selection, replacement);
 }
 
-fn replace_tree_name_range(
-    input: &mut TreeNameInputState,
-    range: Range<usize>,
-    replacement: &str,
-) {
+fn replace_tree_name_range(input: &mut TreeNameInputState, range: Range<usize>, replacement: &str) {
     let start = utf16_offset_to_byte(&input.value, range.start);
     let end = utf16_offset_to_byte(&input.value, range.end);
     input.value.replace_range(start..end, replacement);
@@ -2801,9 +3034,7 @@ mod text_input_tests {
 mod conflict_overwrite_tests {
     use std::sync::Mutex;
 
-    use oxideterm_ide_core::{
-        FileStat, FileSystemCapabilities, IdeFileData, IdeFsFuture,
-    };
+    use oxideterm_ide_core::{FileStat, FileSystemCapabilities, IdeFileData, IdeFsFuture};
 
     use super::*;
 

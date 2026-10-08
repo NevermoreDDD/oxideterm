@@ -59,7 +59,6 @@ pub enum TerminalSettingsPage {
 pub enum AiSettingsPage {
     General,
     Providers,
-    Agents,
     Context,
     Tools,
 }
@@ -82,6 +81,7 @@ pub enum SettingsKeybindingScopeFilter {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsSelect {
+    PluginMarketplaceSort,
     Language,
     UpdateChannel,
     UpdateProxyMode,
@@ -285,6 +285,10 @@ pub enum SettingsInput {
     NativePluginInstallChecksum,
     NativePluginRegistryUrl,
     NativePluginMarketplaceSearch,
+    NativePluginInstalledPageSize,
+    NativePluginMarketplacePageSize,
+    NativePluginInstalledPageJump,
+    NativePluginMarketplacePageJump,
     ManagedKeyFilePath,
     ManagedKeyFileName,
     ManagedKeyFilePassphrase,
@@ -337,20 +341,13 @@ impl TerminalSettingsPage {
 
 impl AiSettingsPage {
     pub fn all() -> &'static [Self] {
-        &[
-            Self::General,
-            Self::Providers,
-            Self::Agents,
-            Self::Context,
-            Self::Tools,
-        ]
+        &[Self::General, Self::Providers, Self::Context, Self::Tools]
     }
 
     pub fn label_key(self) -> &'static str {
         match self {
             Self::General => "settings_view.ai.page_general",
             Self::Providers => "settings_view.ai.page_providers",
-            Self::Agents => "settings_view.ai.page_agents",
             Self::Context => "settings_view.ai.page_context",
             Self::Tools => "settings_view.ai.page_tools",
         }
@@ -691,6 +688,10 @@ impl SettingsInput {
             Self::NativePluginInstallChecksum => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 1,
             Self::NativePluginRegistryUrl => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 2,
             Self::NativePluginMarketplaceSearch => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 3,
+            Self::NativePluginInstalledPageSize => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 4,
+            Self::NativePluginMarketplacePageSize => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 5,
+            Self::NativePluginInstalledPageJump => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 6,
+            Self::NativePluginMarketplacePageJump => PLUGIN_MANAGER_INPUT_ANCHOR_BASE + 7,
             Self::ManagedKeyFilePath => 30_000,
             Self::ManagedKeyFileName => 30_001,
             Self::ManagedKeyFilePassphrase => 30_002,

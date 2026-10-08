@@ -28,6 +28,7 @@ pub enum PreviewSource {
 pub struct PreviewLoadOptions {
     pub max_text_size: u64,
     pub max_preview_size: u64,
+    pub max_pdf_preview_size: u64,
     pub max_media_preview_size: u64,
     pub hex_chunk_size: u64,
     pub hex_offset: u64,
@@ -40,7 +41,9 @@ impl Default for PreviewLoadOptions {
         Self {
             max_text_size: 1024 * 1024,
             max_preview_size: 10 * 1024 * 1024,
-            max_media_preview_size: 50 * 1024 * 1024,
+            max_pdf_preview_size: 100 * 1024 * 1024,
+            // Local players read from the file; remote downloads enforce their own limits.
+            max_media_preview_size: u64::MAX,
             hex_chunk_size: 16 * 1024,
             hex_offset: 0,
             mmap_threshold: 1024 * 1024,
@@ -211,31 +214,60 @@ async fn load_local_path(
     }
 
     let size = metadata.len();
-    let mime_type = mime_type.unwrap_or_else(|| {
+    let mut mime_type = mime_type.unwrap_or_else(|| {
         mime_guess::from_path(&path)
             .first_or_octet_stream()
             .essence_str()
             .to_string()
     });
-    if path
+    let extension = path
         .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-        || mime_type == "application/pdf"
-    {
-        return Ok(LoadedPreview {
-            content: PreviewContent::Unsupported {
-                mime_type,
-                reason: "PDF preview is disabled.".to_string(),
-            },
-            asset: None,
-        });
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut header = zeroize::Zeroizing::new([0; 64]);
+    let mut source = tokio::fs::File::open(&path).await?;
+    let header_len = tokio::io::AsyncReadExt::read(&mut source, &mut header[..]).await?;
+    if let Some(mime) = crate::inspection_mime_type(&extension, &header[..header_len]) {
+        return load_local_asset(
+            path,
+            mime.into(),
+            PreviewAssetKind::Document,
+            size,
+            options.max_preview_size,
+        );
     }
-    let kind = classify_preview_path(&path);
+    let sqlite_candidate = matches!(extension.as_str(), "sqlite" | "sqlite3" | "db" | "db3");
+    let sqlite_header = if matches!(extension.as_str(), "db" | "db3") {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0; 16];
+        let mut file = tokio::fs::File::open(&path).await?;
+        file.read_exact(&mut header).await.is_ok() && &header == b"SQLite format 3\0"
+    } else {
+        sqlite_candidate
+    };
+    if sqlite_header {
+        mime_type = "application/vnd.sqlite3".into();
+    }
+    let kind = if sqlite_candidate && !sqlite_header {
+        PreviewKind::Hex
+    } else if matches!(
+        mime_type.as_str(),
+        "application/pdf" | "application/vnd.sqlite3" | "application/x-sqlite3"
+    ) {
+        PreviewKind::Document
+    } else {
+        classify_preview_path(&path)
+    };
     match kind {
-        PreviewKind::Image | PreviewKind::Office | PreviewKind::Font => {
+        PreviewKind::Image | PreviewKind::Office | PreviewKind::Font | PreviewKind::Document => {
             let asset_kind = preview_asset_kind(kind);
-            load_local_asset(path, mime_type, asset_kind, size, options.max_preview_size)
+            let max_size = if kind == PreviewKind::Document && mime_type == "application/pdf" {
+                options.max_pdf_preview_size
+            } else {
+                options.max_preview_size
+            };
+            load_local_asset(path, mime_type, asset_kind, size, max_size)
         }
         PreviewKind::Audio | PreviewKind::Video => load_local_asset(
             path,
@@ -404,6 +436,7 @@ fn preview_asset_kind(kind: PreviewKind) -> PreviewAssetKind {
         PreviewKind::Video => PreviewAssetKind::Video,
         PreviewKind::Office => PreviewAssetKind::Office,
         PreviewKind::Font => PreviewAssetKind::Font,
+        PreviewKind::Document => PreviewAssetKind::Document,
         _ => PreviewAssetKind::Office,
     }
 }
@@ -435,6 +468,95 @@ mod tests {
     }
 
     #[test]
+    fn local_asset_limits_distinguish_pdf_media_and_other_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (name, size, mime, kind, rejected) in [
+            (
+                "manual.pdf",
+                100 * 1024 * 1024,
+                "application/pdf",
+                PreviewAssetKind::Document,
+                false,
+            ),
+            (
+                "manual.pdf",
+                100 * 1024 * 1024 + 1,
+                "application/pdf",
+                PreviewAssetKind::Document,
+                true,
+            ),
+            (
+                "recording.mp4",
+                1024 * 1024 * 1024,
+                "video/mp4",
+                PreviewAssetKind::Video,
+                false,
+            ),
+            (
+                "recording.mp3",
+                1024 * 1024 * 1024,
+                "audio/mpeg",
+                PreviewAssetKind::Audio,
+                false,
+            ),
+            (
+                "database.sqlite",
+                10 * 1024 * 1024 + 1,
+                "application/vnd.sqlite3",
+                PreviewAssetKind::Document,
+                true,
+            ),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+            let session = runtime.block_on(PreviewSession::load(PreviewSource::LocalPath {
+                path: path.clone(),
+                mime_type: None,
+                encoding_hint: None,
+            }));
+            match session.state() {
+                PreviewSessionState::Ready {
+                    content:
+                        PreviewContent::AssetFile {
+                            path: source,
+                            mime_type,
+                            kind: asset_kind,
+                        },
+                    asset: Some(owner),
+                } if !rejected => {
+                    assert_eq!(Path::new(source), path);
+                    assert_eq!(mime_type, mime);
+                    assert_eq!(*asset_kind, kind);
+                    assert_eq!(owner.path(), path);
+                }
+                PreviewSessionState::Ready {
+                    content:
+                        PreviewContent::TooLarge {
+                            size: actual,
+                            max_size,
+                            ..
+                        },
+                    asset: None,
+                } if rejected => {
+                    assert_eq!(*actual, size);
+                    assert_eq!(
+                        *max_size,
+                        if name == "manual.pdf" {
+                            100 * 1024 * 1024
+                        } else {
+                            10 * 1024 * 1024
+                        }
+                    );
+                }
+                other => panic!("Unexpected local preview for {name} ({size} bytes): {other:?}"),
+            }
+            drop(session);
+            assert_eq!(std::fs::metadata(path).unwrap().len(), size);
+        }
+    }
+
+    #[test]
     fn load_local_text_honors_encoding_hint() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("note.txt");
@@ -463,7 +585,7 @@ mod tests {
     #[test]
     fn load_local_hex_uses_chunked_mmap_path() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("payload.bin");
+        let path = dir.path().join("payload.dat");
         let bytes: Vec<u8> = (0..=255).cycle().take(4096).collect();
         std::fs::write(&path, bytes).unwrap();
 
@@ -495,6 +617,55 @@ mod tests {
                 assert!(*has_more);
             }
             other => panic!("expected hex preview, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspection_sources_route_before_text_and_keep_local_file_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for (name, bytes, mime) in [
+            (
+                "bundle.pem",
+                b"-----BEGIN PRIVATE KEY-----\nfixture".as_slice(),
+                "application/pkix-cert",
+            ),
+            (
+                "certificate.cer",
+                b"DER fixture".as_slice(),
+                "application/pkix-cert",
+            ),
+            (
+                "executable",
+                b"\x7fELF\x02\x01".as_slice(),
+                "application/x-oxideterm-binary",
+            ),
+        ] {
+            let path = directory.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let session = runtime.block_on(PreviewSession::load(PreviewSource::LocalPath {
+                path: path.clone(),
+                mime_type: Some("text/plain".into()),
+                encoding_hint: None,
+            }));
+            match session.state() {
+                PreviewSessionState::Ready {
+                    content:
+                        PreviewContent::AssetFile {
+                            path: source,
+                            mime_type,
+                            kind,
+                        },
+                    ..
+                } => {
+                    assert_eq!(Path::new(source), path);
+                    assert_eq!(mime_type, mime);
+                    assert_eq!(*kind, PreviewAssetKind::Document);
+                }
+                _ => panic!("Inspection source must stay out of text preview"),
+            }
+            drop(session);
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
     }
 }

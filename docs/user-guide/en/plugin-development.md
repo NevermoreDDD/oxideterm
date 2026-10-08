@@ -632,7 +632,7 @@ The plugin never receives raw GPUI elements, DOM nodes, React instances, SSH tra
 
 | Area | Tauri/Web Plugin | Native Plugin |
 |---|---|---|
-| Runtime | ESM `main.js` loaded through dynamic import | `runtime.kind` is `process`, `wasm`, or `manifest-only` |
+| Runtime | ESM `main.js` loaded through dynamic import | `runtime.kind` is `process`, `wasm`, `manifest-only`, or `language` |
 | UI | React components and CSS | Declarative native UI schema rendered by GPUI |
 | Shared modules | `window.__OXIDE__` | Not available |
 | Styling | CSS and theme variables | Host-owned native controls only |
@@ -692,6 +692,32 @@ Manifest-only plugins are useful for static metadata, declared settings, AI tool
 ```
 
 Supported setting types are `string`, `number`, `boolean`, and `select`. A `select` setting must provide `options`, and option values must be strings or numbers.
+
+## Editor Language Plugins
+
+The host keeps 15 grammar entries built in: Bash, Zsh, Fish, PowerShell, JSON,
+YAML, TOML, Markdown, Dockerfile, Make, CMake, Diff, Python, Lua, and SQL.
+Another 24 grammar entries use language plugins: C, C++, C#, CSS, Common Lisp, Elixir, Go,
+HTML, Java, JavaScript, Objective-C, Perl, PHP, R, Ruby, Rust, Scala, Swift,
+TypeScript, TSX, Zig, Nginx, Terraform/HCL, and Protobuf. TypeScript and TSX are separate plugin packages.
+Nginx uses dedicated filenames such as `nginx.conf` or `.nginx` extensions, not
+generic `.conf` files. HCL handles `.tf`, `.tfvars`, and `.hcl`; JSON variants
+remain JSON. Protobuf uses `.proto`.
+File type
+recognition stays in the host. When support is missing or disabled, the editor keeps
+the document editable and offers a link to Plugin Manager. Installing or enabling
+support loads the parser on demand; updates and disabling refresh open documents
+without discarding their text or undo history. Header files ending in `.h`
+continue to select C++ support.
+
+A language package declares `runtime.kind: "language"` and `contributes.language`.
+It contains a Tree-sitter WebAssembly parser, highlight queries, their SHA-256
+checksums, a host version range, and the upstream licenses. It does not receive the
+general-purpose WASI plugin host API. The marketplace repository maintains the
+[pinned build recipes and release workflow](https://github.com/AnalyseDeCircuit/oxideterm-plugins/blob/main/docs/language-plugins.en.md).
+Each language has its own directory under `plugins/`, version, and release asset.
+Language plugin files use Apache-2.0, with upstream licenses retained separately.
+Packages require a host strictly newer than 2.2.0 with the language loader.
 
 ## Process Runtime Plugin
 
@@ -886,6 +912,8 @@ Supported control kinds:
 | Kind | Notes |
 |---|---|
 | `stack`, `row`, `card`, `toolbar` | Layout components; render nested `children` using bounded host layouts |
+| `columns` | Equal-width columns that wrap in narrow containers |
+| `actionRow` | Flexible first child with trailing actions aligned to the right; a leading button fills its slot |
 | `text`, `password`, `number`, `checkbox`, `select` | Shared field controls; require stable `id` values |
 | `radioGroup`, `radio-group`, `segmentedControl`, `segmented-control`, `slider` | Shared choice/range controls; require stable `id` values |
 | `button`, `iconButton`, `icon-button` | Shared actions; actionable only with `id` and while enabled/not loading; icon buttons also require `icon` and `label` |
@@ -932,6 +960,95 @@ versions, variants, tones, sizes, gaps, or child placements are rejected during
 registration. The complete encoded schema is limited to 2 MiB.
 
 ## Host API Calls
+
+### Native text workbench
+
+WASM plugins may register a `textWorkbench` control with a stable `id`. Its `options`
+are tools: `{ label, value: { command, group?, description?, parameterLabel?, parameterDefault? } }`. Tools sharing a `group` appear under one sidebar entry; their operations appear above the editors. The optional parameter
+uses another native input. Selecting an unrelated parameter applies its declared default; switching operations with the same parameter label retains the current value. The control's `value` supplies translated labels for
+`input`, `output`, `execute`, `working`, `copy`, `useInput`, `clear`, `limit`, `failed`,
+`line`, `column` and its supported error codes. A schema can bundle
+`translations: { "en": { key: text }, "zh-CN": { key: text }, ... }`; strings prefixed
+with `@` resolve against that catalog, including the page header and tool options.
+Ship all 11 host locales with matching keys. This capability requires a host newer than 2.2.0.
+
+The host owns input and read-only result editors, selection, clipboard writes and
+draft lifetime. Run snapshots the input and starts a fresh WASM instance, invoking
+the selected command with `{ input, parameter }`. The response value is either
+`{ output: string }` or `{ error: { code, line?, column? } }`. Error codes resolve
+through the control's labels; unknown codes use the generic `failed` label.
+Input is limited to 256 KiB, parameter to 4 KiB, output to
+2 MiB, and execution to five seconds. Failed executions keep both drafts. Input is
+not sent in UI registration/events, saved in settings, or dispatched to a terminal.
+Closing the tab drops editors and cancels result delivery; an executing WASM call
+is bounded by its timeout. This isolated instance has no host-call resolver,
+preopened directories or network permissions.
+
+A runtime `contextMenu` contribution with `target: "terminal"` may declare an item
+with `{ label, tabId, controlId }`. The host captures the selected text when clicked
+and opens that plugin's declared text workbench. Later pane focus or output changes
+cannot change the captured input. `@` menu labels use the target tab's translations.
+
+### File preview providers
+
+Process plugins can provide paginated document previews through the existing
+file-browser preview window. They do not need a tab or sidebar contribution:
+
+```json
+{
+  "contributes": {
+    "filePreviews": [{"mimeTypes": ["application/pdf"], "command": "preview.render"}]
+  }
+}
+```
+
+The host selects an enabled, compatible and approved provider by exact MIME type.
+Local files and SFTP PDF, SQLite, certificate and binary downloads use the document asset path; the initial size
+limit is 10 MiB. Other built-in preview types retain their existing renderers.
+Each render uses a dedicated process instance and the ordinary `activate` and
+`dispatchCommand` protocol. The command receives `{ path, page, width }`, where
+`page` is zero-based and `width` is a requested bitmap width from 256 to 2048 pixels.
+PDF providers return `{ pageCount, page, png }` with a base64 PNG. The host bounds the decoded
+image to 8 million pixels and displays it through GPUI. Do not emit UI registrations
+or host calls from a preview renderer; this instance only returns a rendered page.
+
+SQLite providers register `application/vnd.sqlite3` (and optionally `application/x-sqlite3`).
+Requests also include `table: string | null` and `snapshot: boolean`. The latter is
+true only for host-owned temporary downloads; SQLite opens these immutable copies
+without creating WAL/SHM sidecars. Local files use ordinary read-only SQLite access.
+Responses use `{ kind: "table", tables: string[], selectedTable: string | null,
+columns: string[], rows: (string | null)[][], rowCount, page, pageCount }`.
+Pages contain 50 rows except the last; empty tables/databases have one empty page.
+The host validates table selection, row shape and bounds before rendering its
+native table. Limits are 256 table names, 64 columns and 4 MiB of cell text per page.
+Remote SQLite files with nonempty WAL/rollback journals or detected changes during
+download are rejected; use a complete backup made after writes stopped.
+
+Certificate providers register `application/pkix-cert`; binary inspectors register
+`application/x-oxideterm-binary`. Extensions and file headers select these routes
+before text preview. Inspection responses contain `{ kind, index, objects, fields }`,
+where `index` echoes the requested `page`, `objects` lists up to 64 certificates or
+architecture slices, and `fields` contains `{ key, value }` pairs using the host's
+localized field keys. Certificate responses use `kind: "certificate"`, add `details`,
+and require Unix-second `notBefore` and `notAfter`. Return only public certificate
+fields; mixed PEM private-key blocks must never appear in the response. The host
+labels validity dates separately from trust, chain, signature and revocation checks.
+
+Binary responses use `kind: "binary"`, add whole-file `size` and up to 1024 `sections`
+with `{ name, address, offset, size }`. File offsets are relative to the whole source,
+including universal Mach-O files; `null` denotes sections without file-backed bytes.
+The host rejects out-of-file ranges and uses its existing hex formatter and read-only
+editor for 512-byte pages and offset jumps. Plugins only interpret the file and do
+not edit it, disassemble it or register additional views.
+
+The preview owns cancellation and the source-file lease. Closing it aborts the
+render process and pending SFTP preview download; dropping the final lease removes
+remote temporary files. It does not disconnect the shared SSH node. Process trust
+is still required: this is crash isolation, not a filesystem sandbox. Disable or
+uninstall removes the provider from selection and cancels its open preview.
+
+This capability is new after 2.2.0. Release manifests must exclude older hosts;
+local development variants must not weaken the published compatibility range.
 
 Runtime plugins call host APIs by namespace, method, and JSON args:
 
@@ -1093,8 +1210,20 @@ Package rules:
 - Archive entries must not escape the plugin directory.
 - Keep packages below the host package size and entry-count limits.
 - Prefer one plugin id per package.
-- Use semver-like versions so update checks can compare releases.
+- Use semantic versions so update checks can compare releases.
+- Declare the supported host range in `engines.oxideterm`, for example `>=2.3.0, <3.0.0`, based on actual compatibility testing.
 - Keep runtime binaries platform-specific unless the entry is portable.
+
+The marketplace retains each release's host range and platform packages, and selects the
+highest compatible version. Newer incompatible releases display their requirements without
+replacing the installed plugin. Installation and startup both check the manifest range,
+including after app upgrades and downgrades. Incompatible plugins keep their files and settings
+but do not load. The official catalog is refreshed before startup activation and cached for
+offline use. Recorded compatibility corrections take precedence without changing package files.
+Unlisted older packages without a declared range remain permitted; older app builds
+do not gain these checks retroactively. See the
+[publishing guide](https://github.com/AnalyseDeCircuit/oxideterm-plugins/blob/main/docs/PUBLISHING.en.md)
+for the catalog format and release workflow.
 
 During development:
 
@@ -1141,11 +1270,17 @@ interface NativePluginPermissions {
 }
 
 interface NativePluginRuntime {
-  kind: 'wasm' | 'process' | 'manifest-only';
+  kind: 'wasm' | 'process' | 'manifest-only' | 'language';
   entry: string;
 }
 
 interface NativePluginContributes {
+  language?: {
+    id: 'elixir' | 'commonlisp' | 'swift' | 'r' | 'scala' | 'objc';
+    highlights: string;
+    parserSha256: string;
+    highlightsSha256: string;
+  };
   tabs?: NativePluginTabDef[];
   sidebarPanels?: NativePluginSidebarDef[];
   activityBarItems?: NativePluginActivityBarItemDef[];
@@ -1331,6 +1466,7 @@ interface PluginRegistration {
 
 ```ts
 interface NativePluginDeclarativeUiSchema {
+  translations?: Record<string, Record<string, string>>;
   componentVersion?: 1;
   kind?: 'form';
   title?: string;
@@ -1349,6 +1485,7 @@ interface NativePluginDeclarativeUiSection {
 interface NativePluginDeclarativeUiControl {
   kind:
     | 'text'
+    | 'textWorkbench'
     | 'password'
     | 'number'
     | 'checkbox'
@@ -1363,6 +1500,8 @@ interface NativePluginDeclarativeUiControl {
     | 'icon-button'
     | 'stack'
     | 'row'
+    | 'columns'
+    | 'actionRow'
     | 'card'
     | 'toolbar'
     | 'alert'
@@ -1486,12 +1625,14 @@ Calls must be allowed by `allowedHostApis`. Exact names and namespace wildcards 
 | `app.getLocale` | `{}` | Locale string |
 | `app.getApiCatalog` | `{}` | Implemented direct APIs with access tier, capability, and introduction version |
 | `app.getPoolStats` | `{}` | `{ activeConnections, totalSessions }`-style stats |
+| `app.getWorkspaceSummary` | `{}` | Requires `sessions.read`; open tab IDs/titles/kinds/recording states, node IDs/titles/states/active-forward counts, and plugin issue IDs/names. No terminal content, paths or diagnostic text. Introduced after 2.2.0. |
 | `app.refreshAfterExternalSync` | `{}` | One-way workspace refresh effect |
 | `ui.getLayout` | `{}` | Layout snapshot |
 | `ui.registerTabView` | `{ tabId: string, schema: NativePluginDeclarativeUiSchema }` | Declarative tab registration result |
 | `ui.registerSidebarPanel` | `{ panelId: string, schema: NativePluginDeclarativeUiSchema }` | Declarative sidebar registration result |
 | `ui.registerActivityBarItem` | `{ itemId: string }` | Standalone activity-bar action registration result |
 | `ui.openTab` | `{ tabId: string }` | Opens/focuses declared plugin tab |
+| `ui.openWorkspace` | Tagged destination below | Requires `ui.write`; validates the destination and returns `{ queued: true }`. Introduced after 2.2.0. |
 | `ui.showToast` | `{ title?: string, description?: string, variant?: string }` | One-way toast effect |
 | `ui.showNotification` | `{ title?: string, body?: string, severity?: string }` | One-way notification effect |
 | `ui.showConfirm` | `{ title: string, description: string }` | `boolean` |
@@ -1506,6 +1647,15 @@ Calls must be allowed by `allowedHostApis`. Exact names and namespace wildcards 
 
 ### Connections And Sessions
 
+Workspace destinations are `{ kind: "tab", id }`, `{ kind: "sftp", nodeId }`,
+`{ kind: "forwards", nodeId }`, or `{ kind: "page", page }`. Page names are
+`sessions`, `files`, `plugins`, `cloudSync`, `notifications`, and
+`localTerminal`. Existing tabs retain their main/detached-window ownership.
+Closed tab/node targets and unknown pages are rejected. Navigation does not expose
+arbitrary command execution; saved connections use `connections.connect` and its
+separate capability. The workspace summary is current state, not persisted project
+or workspace history.
+
 | Host API | Args | Result |
 |---|---|---|
 | `connections.getSummaries` | `{}` | Redacted connection summaries; baseline |
@@ -1516,6 +1666,7 @@ Calls must be allowed by `allowedHostApis`. Exact names and namespace wildcards 
 | `connections.getState` | `{ connectionId: string }` | Connection state or `null` |
 | `connections.getByNode` | `{ nodeId: string }` | Connection snapshot or `null` |
 | `connections.connect` | `{ connectionId: string }` | `{ queued: true }`; uses the existing saved-connection and prompt flow |
+| `connections.openForm` | `{ name: string, host: string, port: number, username?: string, group?: string }` | `{ queued: true }`; opens the native SSH form for review, without saving or connecting; requires `connections.control` |
 | `connections.reconnect` | `{ nodeId: string }` | `{ queued: true }`; reuses the existing node runtime |
 | `connections.disconnect` | `{ nodeId: string }` | `{ queued: true }`; opens the normal cascade confirmation before disconnecting the NodeRouter-owned subtree |
 | `sessions.getTree` | `{}` | Node tree snapshot |
@@ -1525,6 +1676,13 @@ Calls must be allowed by `allowedHostApis`. Exact names and namespace wildcards 
 | `eventLog.getEntries` | `{ severity?: string, category?: string, limit?: number }` | Event-log entries |
 
 ### Product Data And Controls
+
+`connections.openForm` requires a host newer than 2.2.0. Host-source plugins should
+also check `app.getApiCatalog` before activation. Only plain connection metadata is
+accepted: credentials, key paths, commands, and other fields are rejected. The user
+sets authentication and any jump hosts in the existing form. A queued request will
+not replace a form already being edited; its failure appears in the plugin manager.
+Discovery owns no SSH transport and makes no persistent connection-store changes.
 
 Workspace mutations return `{ queued: true }` after schema and permission preflight. They execute on the product owner and appear in subsequent snapshots/events. Host Tools calls are synchronous because they return typed remote results.
 

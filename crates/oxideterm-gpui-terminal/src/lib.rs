@@ -15,8 +15,8 @@ pub use app::{
     SharedTerminalSession, TerminalBroadcastInputKind, TerminalContextAction, TerminalCursorAnchor,
     TerminalCwdShellIntegrationStatus, TerminalInputBroadcaster, TerminalInputInterceptor,
     TerminalInputInterceptorResult, TerminalKeybindings, TerminalPane, TerminalPaneEvent,
-    TerminalSearchStatus, TerminalSerialAction, TerminalSerialStatus, TerminalShortcut,
-    TerminalTelnetAction, TerminalWorkingDirectorySource,
+    TerminalPluginTextAction, TerminalSearchStatus, TerminalSerialAction, TerminalSerialStatus,
+    TerminalShortcut, TerminalTelnetAction, TerminalWorkingDirectorySource,
 };
 pub use background_cache::{
     BackgroundImageRenderCache, BackgroundImageTargetSize, background_display_target,

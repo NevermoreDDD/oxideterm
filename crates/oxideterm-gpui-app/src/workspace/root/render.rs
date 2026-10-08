@@ -794,6 +794,11 @@ impl WorkspaceApp {
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 let _ = this.create_local_terminal_tab(window, cx);
             }))
+            .on_action(cx.listener(
+                |this, action: &oxideterm_gpui_editor::ManageLanguagePlugin, window, cx| {
+                    this.open_language_plugin(&action.plugin_id, window, cx);
+                },
+            ))
             .on_action(cx.listener(|this, _: &ShellLauncher, _window, cx| {
                 this.open_local_shell_launcher(cx);
             }))
@@ -1266,6 +1271,10 @@ impl WorkspaceApp {
             // Tab-owned dialogs are portaled here so their backdrops cover all window chrome.
             .children(active_tab_window_modals)
             .when_some(settings_select_overlay, |root, overlay| root.child(overlay))
+            .when_some(
+                self.render_native_plugin_select_overlay(window, cx),
+                |root, overlay| root.child(overlay),
+            )
             .when_some(
                 self.render_ai_sidebar_floating_overlay(window, cx),
                 |root, overlay| root.child(overlay),

@@ -499,6 +499,13 @@ impl WorkspaceApp {
             ai_runtime_context::AiRuntimeContextEntity::new()
         });
         let plugin_task_runtime = forwarding_runtime.clone();
+        oxideterm_gpui_editor::EditorLanguagePlugins::set_labels(
+            i18n.t("plugin.language_missing"),
+            i18n.t("plugin.load_failed_default"),
+            i18n.t("plugin.language_manage"),
+            i18n.t("plugin.language_dismiss"),
+            cx,
+        );
         let plugin_entity = cx.new(move |cx| {
             plugin_entity::PluginWorkspaceEntity::new(plugin_task_runtime, plugin_registry, cx)
         });
@@ -508,6 +515,7 @@ impl WorkspaceApp {
                 workspace.enqueue_plugin_window_effect(event, cx);
             },
         );
+        plugin_entity.update(cx, |plugins, _cx| plugins.start_compatibility_refresh());
         let tab_host = cx.new(|_| tabs::WorkspaceTabHostEntity::new());
         let tab_host_subscription = cx.subscribe(
             &tab_host,
@@ -655,6 +663,7 @@ impl WorkspaceApp {
             ),
             ai_entity,
             acp_entity,
+            mosh_plugin_sessions: Arc::new(oxideterm_mosh::MoshPluginSessions::default()),
             skill_registry,
             skill_workspace_root,
             loaded_conversation_skills: HashMap::new(),
@@ -891,6 +900,7 @@ impl WorkspaceApp {
         workspace.refresh_terminal_trigger_runtime(cx);
         workspace.schedule_automatic_native_update_check(cx);
         cx.on_release(|workspace, cx| {
+            workspace.mosh_plugin_sessions.set_available(false);
             workspace.flush_main_window_state(cx);
             workspace.shutdown_terminal_trigger_runtime();
             // Shutdown ordering is security-sensitive: late broker callbacks

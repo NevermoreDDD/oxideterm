@@ -11,7 +11,6 @@ members = [
   "crates/oxideterm-app-lock",
   "crates/oxideterm-gpui-markdown",
   "crates/oxideterm-cli",
-  "crates/oxideterm-rdp-helper",
   "crates/oxideterm-pcm-audio",
   "crates/oxideterm-gpui-cloud-sync",
   "crates/oxideterm-gpui-remote-desktop",
@@ -28,7 +27,6 @@ members = [
   "crates/oxideterm-ai",
   "crates/oxideterm-ai-tasks",
   "crates/oxideterm-skills",
-  "crates/oxideterm-acp-adapter",
   "crates/oxideterm-acp-host-tools",
   "crates/oxideterm-public-mcp",
   "crates/oxideterm-editor-core",
@@ -59,7 +57,6 @@ members = [
   "crates/oxideterm-gpui-app",
   "crates/oxideterm-render-policy",
   "crates/oxideterm-remote-desktop",
-  "crates/oxideterm-vnc-helper",
   "crates/oxideterm-settings",
   "crates/oxideterm-settings-model",
   "crates/oxideterm-session-adapter",
@@ -67,6 +64,7 @@ members = [
   "crates/oxideterm-ftp",
   "crates/oxideterm-ssh-launch",
   "crates/oxideterm-ssh",
+  "crates/oxideterm-security-key",
   "crates/oxideterm-terminal",
   "crates/oxideterm-terminal-recording",
   "crates/oxideterm-terminal-triggers",
@@ -102,7 +100,7 @@ gpui-pre-windows = { path = "crates/gpui-ce/gpui_windows" }
 gpui-pre-linux = { path = "crates/gpui-ce/gpui_linux" }
 gpui-pre-wgpu = { path = "crates/gpui-ce/gpui_wgpu" }
 # Keep the SSH protocol fork independent from application lint and test targets.
-russh = { git = "https://github.com/AnalyseDeCircuit/russh", rev = "58542ed1045f033abeca4a91164109ab18d9304a" }
+russh = { git = "https://github.com/AnalyseDeCircuit/russh", rev = "df41ee42819999db363e67309bbde0955a43e693" }
 russh-sftp = { path = "crates/russh-sftp" }
 vte = { path = "crates/vte" }
 
@@ -110,7 +108,7 @@ vte = { path = "crates/vte" }
 edition = "2024"
 license = "GPL-3.0-only"
 publish = false
-version = "2.2.0"
+version = "2.2.2"
 
 [workspace.dependencies]
 accesskit = { version = "0.24.0", features = ["enumn"] }
@@ -240,42 +238,22 @@ tower-service = "0.3"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tree-sitter = "0.25.10"
+tree-sitter = { version = "0.27.0", features = ["wasm"] }
 tree-sitter-bash = "0.23.3"
-tree-sitter-c = "0.24.2"
-tree-sitter-c-sharp = "0.23.5"
 tree-sitter-cmake = "0.7.1"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-css = "0.23.2"
 tree-sitter-diff = "0.1.0"
 tree-sitter-containerfile = "0.8.0"
-tree-sitter-elixir = "0.3.5"
 tree-sitter-fish = "3.6.0"
-tree-sitter-go = "0.23.4"
-tree-sitter-html = "0.23.2"
-tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.23.1"
 tree-sitter-json = "0.24.8"
-tree-sitter-commonlisp = "0.4.1"
 tree-sitter-lua = "0.5.0"
 tree-sitter-make = "1.1.1"
 tree-sitter-md = "0.5.3"
-tree-sitter-objc = "3.0.2"
-tree-sitter-php = "0.24.2"
 tree-sitter-powershell = "0.26.4"
 tree-sitter-python = "0.23.6"
-tree-sitter-r = "1.2.0"
-tree-sitter-ruby = "0.23.1"
-tree-sitter-rust = "0.24.2"
-tree-sitter-scala = "0.23.4"
 tree-sitter-sequel = "0.3.11"
-tree-sitter-swift = "0.7.2"
 tree-sitter-toml-ng = "0.7.0"
-tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-zsh = "0.63.4"
-tree-sitter-zig = "1.1.2"
-ts-parser-perl = "1.0.2"
 unicode-bidi = "0.3"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
@@ -287,8 +265,8 @@ uuid = { version = "1.23", features = ["v4", "v5", "v7", "serde"] }
 wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-wasmtime = { version = "46.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
-wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p1"] }
+wasmtime = { version = "48.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "48.0.1", default-features = false, features = ["p1"] }
 windows = { version = "0.61", features = [
   "Data_Xml_Dom",
   "Foundation_Numerics",

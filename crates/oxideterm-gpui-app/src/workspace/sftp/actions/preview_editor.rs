@@ -15,6 +15,18 @@ impl WorkspaceApp {
             };
             self.set_sftp_path(pane, join_sftp_path(&base, &file.name), cx);
         } else if pane == SftpPane::Remote {
+            // The backend may recognize an executable by its header even without an extension.
+            let plugin_preview = {
+                let plugins = self.plugin_entity.clone();
+                let runtime = self.forwarding_runtime.clone();
+                let tokens = self.tokens;
+                let i18n = self.i18n.clone();
+                Some(cx.new(|cx| {
+                    super::super::super::plugin_preview::PluginFilePreview::new(
+                        plugins, runtime, tokens, i18n, cx,
+                    )
+                }))
+            };
             let generation = self.sftp_view().update(cx, |sftp, cx| {
                 sftp.active_pane = pane;
                 sftp.clear_context_menu_immediately();
@@ -25,6 +37,7 @@ impl WorkspaceApp {
                 sftp.preview_path = Some(file.path.clone());
                 sftp.preview_content = None;
                 sftp.preview_asset_owner = None;
+                sftp.preview_plugin = plugin_preview;
                 sftp.preview_markdown_scroll = MarkdownVirtualListScrollHandle::new();
                 sftp.preview_document_scroll = ScrollHandle::new();
                 sftp.font_preview_scroll = ScrollHandle::new();
@@ -117,6 +130,7 @@ impl WorkspaceApp {
         let editor_language = sftp_editor_language(language.as_deref(), name);
         let syntax_language =
             sftp_editor_language_id(language.as_deref(), preview_path.as_deref(), name, &data);
+        let syntax_path = preview_path.as_deref().unwrap_or(name).to_string();
         let tokens = self.tokens;
         let runtime_settings = self.ide_runtime_settings();
         let context_menu_labels = EditorContextMenuLabels {
@@ -145,7 +159,7 @@ impl WorkspaceApp {
                     runtime_settings.background_active,
                     cx,
                 );
-                editor.set_language(syntax_language, cx);
+                editor.set_language_from_path(syntax_path, syntax_language, cx);
                 editor.set_on_save(Box::new(move |text, _window, cx| {
                     let _ = sftp_entity.update(cx, |sftp, cx| {
                         sftp.save_preview_editor_content(text, cx);
@@ -433,7 +447,7 @@ impl WorkspaceApp {
         }
     }
 
-    fn spawn_remote_sftp_preview(&self, path: String, generation: u64, cx: &App) {
+    fn spawn_remote_sftp_preview(&self, path: String, generation: u64, cx: &mut Context<Self>) {
         let Some(remote_id) = self.visible_sftp_remote_id(cx) else {
             return;
         };
@@ -448,7 +462,7 @@ impl WorkspaceApp {
                 context
             })
         });
-        runtime.spawn(async move {
+        let task = runtime.spawn(async move {
             let task = load_remote_sftp_preview(backend, &path);
             let result = if let Some(context) = audit_request {
                 context.scope(task).await
@@ -456,10 +470,17 @@ impl WorkspaceApp {
                 task.await
             };
             let _ = tx.send(SftpWorkerResult::PreviewLoaded {
+                asset_owner: result
+                    .as_ref()
+                    .ok()
+                    .and_then(PreviewAssetOwner::from_asset_content_owned_temp),
                 generation,
                 path,
                 result,
             });
+        });
+        self.sftp_view().update(cx, |sftp, _| {
+            sftp.preview_load_task = Some(task.abort_handle())
         });
     }
 

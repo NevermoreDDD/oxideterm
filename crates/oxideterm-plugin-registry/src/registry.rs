@@ -7,10 +7,11 @@ use super::*;
 
 /// Official catalog endpoint shipped with OxideTerm builds.
 pub const OFFICIAL_NATIVE_PLUGIN_REGISTRY_URL: &str = "https://raw.githubusercontent.com/AnalyseDeCircuit/oxideterm-plugins/main/registry/v1/index.json";
+pub const OFFICIAL_NATIVE_PLUGIN_REGISTRY_V2_URL: &str = "https://raw.githubusercontent.com/AnalyseDeCircuit/oxideterm-plugins/main/registry/v2/index.json";
 const NATIVE_PLUGIN_REGISTRY_VERSION: u32 = 1;
 // The catalog is metadata, not a package transport. Keep malformed endpoints
 // from allocating package-sized responses on the application runtime.
-const NATIVE_PLUGIN_REGISTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const NATIVE_PLUGIN_REGISTRY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const PORTABLE_PLUGIN_PACKAGE_TARGET: &str = "any";
 
 #[derive(Clone, Debug, Default)]
@@ -20,6 +21,8 @@ pub struct NativePluginRegistry {
     contributions: NativePluginContributionStore,
     config: NativePluginGlobalConfig,
     config_path: PathBuf,
+    catalog_tags: HashMap<String, Vec<String>>,
+    catalog_languages: Vec<(String, NativePluginLanguageDefinition)>,
 }
 
 impl NativePluginRegistry {
@@ -36,7 +39,7 @@ impl NativePluginRegistry {
         // Discovery owns the plugin root contract. Creating it here keeps
         // portable profiles, custom data directories, and older packages
         // consistent before users install or manually copy their first plugin.
-        let (plugins, diagnostics) = match fs::create_dir_all(&plugins_dir) {
+        let (mut plugins, mut diagnostics) = match fs::create_dir_all(&plugins_dir) {
             Ok(()) => discover_native_plugins_in_dir(&plugins_dir, &config),
             Err(error) => (
                 Vec::new(),
@@ -47,6 +50,54 @@ impl NativePluginRegistry {
                 }],
             ),
         };
+        let mut catalog_tags = HashMap::new();
+        let mut catalog_languages = Vec::new();
+        let installed_ids = plugins
+            .iter()
+            .map(|plugin| plugin.manifest.id.as_str())
+            .collect::<Vec<_>>();
+        match load_catalog_cache(settings_path, &installed_ids) {
+            Ok(Some(catalog)) => {
+                catalog_languages = catalog
+                    .plugins
+                    .iter()
+                    .filter(|entry| Self::registry_entry_supports_current_version(entry))
+                    .filter_map(|entry| {
+                        entry
+                            .language
+                            .clone()
+                            .map(|language| (entry.id.clone(), language))
+                    })
+                    .collect();
+                catalog_tags = catalog
+                    .plugins
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.tags.clone().unwrap_or_default()))
+                    .collect();
+                for plugin in &mut plugins {
+                    apply_catalog_compatibility(&mut plugin.manifest, &catalog);
+                    plugin.config = config
+                        .plugins
+                        .get(&plugin.manifest.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    plugin.state = native_plugin_state_for_manifest(
+                        &plugin.manifest,
+                        &plugin.runtime_plan,
+                        &plugin.config,
+                    );
+                    if let Err(error) = validate_native_plugin_host(&plugin.manifest) {
+                        plugin.config.last_error = Some(error);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => diagnostics.push(NativePluginDiagnostic {
+                plugin_dir: catalog_cache_path(settings_path),
+                plugin_id: None,
+                message: error,
+            }),
+        }
         let contributions = NativePluginContributionStore::from_plugins(&plugins);
         Self {
             plugins,
@@ -54,11 +105,58 @@ impl NativePluginRegistry {
             contributions,
             config,
             config_path,
+            catalog_tags,
+            catalog_languages,
         }
     }
 
     pub fn plugins(&self) -> &[NativePluginInfo] {
         &self.plugins
+    }
+
+    pub fn catalog_languages(&self) -> &[(String, NativePluginLanguageDefinition)] {
+        &self.catalog_languages
+    }
+
+    pub fn preserve_unchanged_runtimes(&mut self, previous: &Self) {
+        for plugin in &mut self.plugins {
+            if !matches!(
+                plugin.state,
+                NativePluginState::ReadyWasm
+                    | NativePluginState::ReadyProcess
+                    | NativePluginState::Loading
+                    | NativePluginState::Active
+            ) {
+                continue;
+            }
+            let Some(old) = previous.plugins.iter().find(|old| {
+                old.manifest == plugin.manifest
+                    && old.install_dir == plugin.install_dir
+                    && old.runtime_plan == plugin.runtime_plan
+                    && matches!(
+                        old.state,
+                        NativePluginState::Loading | NativePluginState::Active
+                    )
+            }) else {
+                continue;
+            };
+            plugin.state = old.state;
+            self.contributions
+                .copy_runtime_plugin_from(&previous.contributions, &plugin.manifest.id);
+        }
+    }
+
+    pub fn catalog_tags(&self, plugin_id: &str) -> &[String] {
+        self.catalog_tags
+            .get(plugin_id)
+            .map(Vec::as_slice)
+            .or_else(|| {
+                self.plugins
+                    .iter()
+                    .find(|plugin| plugin.manifest.id == plugin_id)
+                    .and_then(|plugin| plugin.manifest.tags.as_deref())
+            })
+            .unwrap_or_default()
     }
 
     pub fn diagnostics(&self) -> &[NativePluginDiagnostic] {
@@ -94,6 +192,156 @@ impl NativePluginRegistry {
                     manifest: plugin.manifest.clone(),
                     install_dir: plugin.install_dir.clone(),
                     entry: entry.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// ACP processes are launched lazily by the ACP owner, never by the plugin supervisor.
+    pub fn acp_agents(&self) -> Vec<NativePluginAcpAgent> {
+        self.plugins
+            .iter()
+            .filter_map(|plugin| {
+                if !native_plugin_state_is_active_like(plugin.state)
+                    || native_plugin_requires_permission_review(
+                        &plugin.manifest,
+                        &plugin.runtime_plan,
+                        &plugin.config,
+                    )
+                {
+                    return None;
+                }
+                let entry = plugin.runtime_plan.helper_entry("acp", "acp", 1)?;
+                let root = plugin.install_dir.canonicalize().ok()?;
+                let command = root.join(entry).canonicalize().ok()?;
+                if !command.starts_with(&root) || !command.is_file() {
+                    return None;
+                }
+                Some(NativePluginAcpAgent {
+                    plugin_id: plugin.manifest.id.clone(),
+                    name: plugin.manifest.name.clone(),
+                    version: plugin.manifest.version.clone(),
+                    command,
+                })
+            })
+            .collect()
+    }
+
+    /// The terminal session owns this process and its private pipe.
+    pub fn mosh_executable(&self) -> Option<PathBuf> {
+        self.plugins.iter().find_map(|plugin| {
+            if plugin.manifest.id != "com.oxideterm.terminal.mosh"
+                || !native_plugin_state_is_active_like(plugin.state)
+                || native_plugin_requires_permission_review(
+                    &plugin.manifest,
+                    &plugin.runtime_plan,
+                    &plugin.config,
+                )
+            {
+                return None;
+            }
+            let entry =
+                plugin
+                    .runtime_plan
+                    .helper_entry("terminal-transport", "oxideterm-mosh", 1)?;
+            let root = plugin.install_dir.canonicalize().ok()?;
+            let command = root.join(entry).canonicalize().ok()?;
+            (command.starts_with(&root) && command.is_file()).then_some(command)
+        })
+    }
+
+    /// Only the approved FIDO provider may receive private SSH key handles.
+    pub fn security_key_executable(&self) -> Option<PathBuf> {
+        self.plugins.iter().find_map(|plugin| {
+            if plugin.manifest.id != "com.oxideterm.auth.fido2"
+                || !native_plugin_state_is_active_like(plugin.state)
+                || native_plugin_requires_permission_review(
+                    &plugin.manifest,
+                    &plugin.runtime_plan,
+                    &plugin.config,
+                )
+            {
+                return None;
+            }
+            let entry = plugin.runtime_plan.helper_entry(
+                "ssh-authentication",
+                "oxideterm-security-key",
+                1,
+            )?;
+            let root = plugin.install_dir.canonicalize().ok()?;
+            let command = root.join(entry).canonicalize().ok()?;
+            (command.starts_with(&root) && command.is_file()).then_some(command)
+        })
+    }
+
+    pub fn file_preview_provider(&self, mime_type: &str) -> Option<(NativePluginInfo, String)> {
+        self.plugins.iter().find_map(|plugin| {
+            if !native_plugin_state_is_active_like(plugin.state)
+                || native_plugin_requires_permission_review(
+                    &plugin.manifest,
+                    &plugin.runtime_plan,
+                    &plugin.config,
+                )
+            {
+                return None;
+            }
+            let preview = plugin
+                .manifest
+                .contributes
+                .as_ref()?
+                .file_previews
+                .as_ref()?
+                .iter()
+                .find(|preview| preview.mime_types.iter().any(|value| value == mime_type))?;
+            Some((plugin.clone(), preview.command.clone()))
+        })
+    }
+
+    /// Protocol helpers use the session-owned binary transport, not plugin messages.
+    pub fn remote_desktop_providers(
+        &self,
+    ) -> Vec<oxideterm_remote_desktop::RemoteDesktopProviderManifest> {
+        self.plugins
+            .iter()
+            .filter_map(|plugin| {
+                if !native_plugin_state_is_active_like(plugin.state)
+                    || native_plugin_requires_permission_review(
+                        &plugin.manifest,
+                        &plugin.runtime_plan,
+                        &plugin.config,
+                    )
+                {
+                    return None;
+                }
+                let entry = plugin.runtime_plan.helper_entry(
+                    "remote-desktop",
+                    "oxideterm-remote-desktop",
+                    oxideterm_remote_desktop::REMOTE_DESKTOP_PLUGIN_PROTOCOL_VERSION,
+                )?;
+                let definition = plugin
+                    .manifest
+                    .contributes
+                    .as_ref()?
+                    .remote_desktop
+                    .as_ref()?;
+                let root = plugin.install_dir.canonicalize().ok()?;
+                let command = root.join(entry).canonicalize().ok()?;
+                if !command.starts_with(&root) || !command.is_file() {
+                    return None;
+                }
+                Some(oxideterm_remote_desktop::RemoteDesktopProviderManifest {
+                    id: plugin.manifest.id.clone(),
+                    name: plugin.manifest.name.clone(),
+                    description: plugin.manifest.description.clone().unwrap_or_default(),
+                    version: plugin.manifest.version.clone(),
+                    protocol: definition.protocol,
+                    entry: oxideterm_remote_desktop::RemoteDesktopProviderEntry {
+                        command: command.to_string_lossy().into_owned(),
+                        args: vec!["--stdio".into()],
+                        working_dir: Some(root.to_string_lossy().into_owned()),
+                    },
+                    capabilities: definition.capabilities.clone(),
+                    ui: None,
                 })
             })
             .collect()
@@ -166,45 +414,34 @@ impl NativePluginRegistry {
 
     #[allow(dead_code)]
     pub async fn fetch_plugin_registry(url: &str) -> Result<NativePluginRegistryIndex, String> {
-        validate_native_plugin_package_url(url)?;
-        let client = oxideterm_network_proxy::application_http_client()
-            .map_err(|error| format!("Failed to create HTTP client: {error}"))?;
-        let response = client
-            .get(url)
-            .send()
+        let body = catalog::download_metadata(url, NATIVE_PLUGIN_REGISTRY_MAX_BYTES)
             .await
-            .map_err(|error| format!("Failed to fetch registry: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Registry returned HTTP {}",
-                response.status().as_u16()
-            ));
-        }
-        if let Some(content_length) = response.content_length()
-            && content_length > NATIVE_PLUGIN_REGISTRY_MAX_BYTES
-        {
-            return Err(format!(
-                "Plugin registry too large: {content_length} bytes (max {NATIVE_PLUGIN_REGISTRY_MAX_BYTES} bytes)"
-            ));
-        }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| format!("Failed to read registry response: {error}"))?;
-        if body.len() as u64 > NATIVE_PLUGIN_REGISTRY_MAX_BYTES {
-            return Err(format!(
-                "Plugin registry too large: {} bytes (max {NATIVE_PLUGIN_REGISTRY_MAX_BYTES} bytes)",
-                body.len()
-            ));
-        }
-        let registry = serde_json::from_slice(&body)
-            .map_err(|error| format!("Failed to parse registry index: {error}"))?;
+            .map_err(|error| error.to_string())?;
+        let registry: NativePluginRegistryIndex =
+            serde_json::from_slice(&body).map_err(|_| "Invalid plugin catalog JSON".to_string())?;
         validate_native_plugin_registry(&registry)?;
+        catalog::validate_history_origins(url, &registry)?;
         Ok(registry)
     }
 
     pub async fn fetch_official_plugin_registry() -> Result<NativePluginRegistryIndex, String> {
-        Self::fetch_plugin_registry(OFFICIAL_NATIVE_PLUGIN_REGISTRY_URL).await
+        // Frozen v1 cannot replace newer compatibility corrections when v2 is
+        // unavailable. The workspace keeps its last valid cache on fetch failure.
+        Self::fetch_plugin_registry(OFFICIAL_NATIVE_PLUGIN_REGISTRY_V2_URL).await
+    }
+
+    pub fn cache_official_catalog(
+        settings_path: &Path,
+        catalog: &NativePluginRegistryIndex,
+    ) -> Result<(), String> {
+        validate_native_plugin_registry(catalog)?;
+        let summary = catalog::summaries(catalog);
+        let bytes = serde_json::to_vec(&summary).map_err(|error| error.to_string())?;
+        if bytes.len() as u64 > NATIVE_PLUGIN_REGISTRY_MAX_BYTES {
+            return Err("Plugin catalog cache exceeds size limit".into());
+        }
+        oxideterm_atomic_file::durable_write(&catalog_cache_path(settings_path), &bytes)
+            .map_err(|error| format!("Cannot save plugin catalog cache: {error}"))
     }
 
     /// Resolves one immutable package without exposing platform selection to the UI.
@@ -218,34 +455,31 @@ impl NativePluginRegistry {
                 std::env::consts::ARCH
             )
         })?;
-        if let Some(package) = entry
-            .packages
-            .iter()
-            .find(|package| package.target == host_target)
-            .or_else(|| {
-                entry
-                    .packages
-                    .iter()
-                    .find(|package| package.target == PORTABLE_PLUGIN_PACKAGE_TARGET)
-            })
-        {
-            return Ok(package.clone());
-        }
+        resolve_registry_package_for_target(entry, host_target)
+    }
 
-        // Version 1 clients still accept the original single-package shape for
-        // custom registries created before platform packages were introduced.
-        if !entry.download_url.trim().is_empty() {
-            return Ok(NativePluginRegistryPackage {
-                target: PORTABLE_PLUGIN_PACKAGE_TARGET.to_string(),
-                download_url: entry.download_url.clone(),
-                checksum: entry.checksum.clone().unwrap_or_default(),
-                size: entry.size,
-            });
-        }
-        Err(format!(
-            "Plugin \"{}\" has no package for {host_target}",
-            entry.id
-        ))
+    /// Returns the highest release usable by both this app and this platform.
+    pub fn select_registry_release(
+        entry: &NativePluginRegistryEntry,
+    ) -> Option<NativePluginRegistryEntry> {
+        select_registry_release_for(
+            entry,
+            env!("CARGO_PKG_VERSION"),
+            native_plugin_host_target()?,
+            true,
+        )
+    }
+
+    /// Allows the UI to explain why a newer platform release cannot be installed.
+    pub fn latest_registry_release(
+        entry: &NativePluginRegistryEntry,
+    ) -> Option<NativePluginRegistryEntry> {
+        select_registry_release_for(
+            entry,
+            env!("CARGO_PKG_VERSION"),
+            native_plugin_host_target()?,
+            false,
+        )
     }
 
     pub fn registry_entry_supports_current_host(entry: &NativePluginRegistryEntry) -> bool {
@@ -253,13 +487,8 @@ impl NativePluginRegistry {
     }
 
     pub fn registry_entry_supports_current_version(entry: &NativePluginRegistryEntry) -> bool {
-        let Some(required) = entry.min_oxideterm_version.as_deref() else {
-            return true;
-        };
-        let Ok(required) = semver::Version::parse(required) else {
-            return false;
-        };
-        semver::Version::parse(env!("CARGO_PKG_VERSION")).is_ok_and(|current| current >= required)
+        semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .is_ok_and(|host| registry_entry_supports_version(entry, &host))
     }
 
     pub fn registry_entry_is_update(
@@ -313,13 +542,12 @@ impl NativePluginRegistry {
             .collect::<HashMap<_, _>>();
         registry
             .plugins
-            .into_iter()
+            .iter()
+            .filter_map(Self::select_registry_release)
             .filter(|entry| {
-                Self::registry_entry_supports_current_host(entry)
-                    && Self::registry_entry_supports_current_version(entry)
-                    && installed_versions
-                        .get(entry.id.as_str())
-                        .is_some_and(|version| Self::registry_entry_is_update(entry, version))
+                installed_versions
+                    .get(entry.id.as_str())
+                    .is_some_and(|version| Self::registry_entry_is_update(entry, version))
             })
             .collect()
     }
@@ -350,7 +578,9 @@ impl NativePluginRegistry {
         }
         save_native_plugin_config(&self.config_path, &self.config)?;
         let settings_path = settings_path_from_native_plugin_config_path(&self.config_path);
-        *self = NativePluginRegistry::discover(&settings_path);
+        let mut refreshed = NativePluginRegistry::discover(&settings_path);
+        refreshed.preserve_unchanged_runtimes(self);
+        *self = refreshed;
         Ok(())
     }
 
@@ -380,6 +610,12 @@ impl NativePluginRegistry {
             .iter_mut()
             .find(|plugin| plugin.manifest.id == plugin_id)
             .ok_or_else(|| format!("Plugin \"{plugin_id}\" is not discovered"))?;
+        if matches!(
+            state,
+            NativePluginState::Active | NativePluginState::Loading
+        ) {
+            validate_native_plugin_host(&plugin.manifest)?;
+        }
         // Tauri stores transient plugin lifecycle separately from persisted
         // plugin-config. Native keeps active/loading in memory while persisting
         // runtime errors so Plugin Manager still explains failed activation
@@ -535,6 +771,10 @@ impl NativePluginRegistry {
             .cloned()
             .ok_or_else(|| format!("Plugin \"{plugin_id}\" is not discovered"))?;
 
+        if enabled {
+            validate_native_plugin_host(&plugin_snapshot.manifest)?;
+        }
+
         if matches!(
             plugin_snapshot.runtime_plan,
             NativePluginRuntimePlan::UnsupportedLegacyJs { .. }
@@ -576,7 +816,18 @@ impl NativePluginRegistry {
 
         save_native_plugin_config(&self.config_path, &self.config)?;
         self.refresh_plugin_state(plugin_id);
-        self.contributions = NativePluginContributionStore::from_plugins(&self.plugins);
+        let mut contributions = NativePluginContributionStore::from_plugins(&self.plugins);
+        for plugin in &self.plugins {
+            if plugin.manifest.id != plugin_id
+                && matches!(
+                    plugin.state,
+                    NativePluginState::Loading | NativePluginState::Active
+                )
+            {
+                contributions.copy_runtime_plugin_from(&self.contributions, &plugin.manifest.id);
+            }
+        }
+        self.contributions = contributions;
         Ok(())
     }
 
@@ -704,6 +955,9 @@ impl NativePluginRegistry {
                     &config_entry,
                 );
                 plugin.config = config_entry;
+                if let Err(error) = validate_native_plugin_host(&plugin.manifest) {
+                    plugin.config.last_error = Some(error);
+                }
                 break;
             }
         }
@@ -743,8 +997,112 @@ async fn download_native_plugin_package(download_url: &str) -> Result<Vec<u8>, S
         .map_err(|error| format!("Failed to read download body: {error}"))
 }
 
-fn validate_native_plugin_registry(registry: &NativePluginRegistryIndex) -> Result<(), String> {
-    if registry.version != NATIVE_PLUGIN_REGISTRY_VERSION {
+fn resolve_registry_package_for_target(
+    entry: &NativePluginRegistryEntry,
+    target: &str,
+) -> Result<NativePluginRegistryPackage, String> {
+    if let Some(package) = entry
+        .packages
+        .iter()
+        .find(|package| package.target == target)
+        .or_else(|| {
+            entry
+                .packages
+                .iter()
+                .find(|package| package.target == PORTABLE_PLUGIN_PACKAGE_TARGET)
+        })
+    {
+        return Ok(package.clone());
+    }
+    if !entry.download_url.trim().is_empty() {
+        return Ok(NativePluginRegistryPackage {
+            target: PORTABLE_PLUGIN_PACKAGE_TARGET.into(),
+            download_url: entry.download_url.clone(),
+            checksum: entry.checksum.clone().unwrap_or_default(),
+            size: entry.size,
+        });
+    }
+    Err(format!(
+        "Plugin \"{}\" has no package for {target}",
+        entry.id
+    ))
+}
+
+fn registry_entry_supports_version(
+    entry: &NativePluginRegistryEntry,
+    host: &semver::Version,
+) -> bool {
+    entry
+        .min_oxideterm_version
+        .as_deref()
+        .is_none_or(|minimum| semver::Version::parse(minimum).is_ok_and(|minimum| host >= &minimum))
+        && host_version_matches(
+            entry
+                .engines
+                .as_ref()
+                .and_then(|engines| engines.oxideterm.as_deref()),
+            host,
+        )
+}
+
+fn entry_at_release(
+    entry: &NativePluginRegistryEntry,
+    release: &NativePluginRegistryRelease,
+) -> NativePluginRegistryEntry {
+    let mut selected = entry.clone();
+    selected.version = release.version.clone();
+    selected.engines = Some(release.effective_engines().clone());
+    selected.min_oxideterm_version = None;
+    selected.packages = release.packages.clone();
+    selected.download_url.clear();
+    selected.checksum = None;
+    selected.size = None;
+    selected.releases.clear();
+    selected
+}
+
+fn select_registry_release_for(
+    entry: &NativePluginRegistryEntry,
+    host: &str,
+    target: &str,
+    require_compatible: bool,
+) -> Option<NativePluginRegistryEntry> {
+    let host = semver::Version::parse(host).ok()?;
+    if entry.releases.is_empty() {
+        return (resolve_registry_package_for_target(entry, target).is_ok()
+            && (!require_compatible || registry_entry_supports_version(entry, &host)))
+        .then(|| entry.clone());
+    }
+    let release = entry
+        .releases
+        .iter()
+        .filter(|release| {
+            release.packages.iter().any(|package| {
+                package.target == target || package.target == PORTABLE_PLUGIN_PACKAGE_TARGET
+            })
+        })
+        .filter(|release| {
+            !require_compatible
+                || release
+                    .effective_engines()
+                    .oxideterm
+                    .as_deref()
+                    .is_some_and(|requirement| host_version_matches(Some(requirement), &host))
+        })
+        .filter_map(|release| {
+            semver::Version::parse(&release.version)
+                .ok()
+                .map(|version| (version, release))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp_precedence(right))?
+        .1;
+    Some(entry_at_release(entry, release))
+}
+
+pub(crate) fn validate_native_plugin_registry(
+    registry: &NativePluginRegistryIndex,
+) -> Result<(), String> {
+    if registry.version != NATIVE_PLUGIN_REGISTRY_VERSION && registry.version != 2 {
         return Err(format!(
             "Unsupported plugin registry version {}",
             registry.version
@@ -752,6 +1110,27 @@ fn validate_native_plugin_registry(registry: &NativePluginRegistryIndex) -> Resu
     }
     let mut plugin_ids = std::collections::HashSet::new();
     for entry in &registry.plugins {
+        if let Some(language) = &entry.language {
+            language.validate()?;
+        }
+        if registry.version == 2 && entry.history.is_none() {
+            return Err("Catalog v2 entries require history references".into());
+        }
+        if entry.history_pending()
+            && entry
+                .engines
+                .as_ref()
+                .and_then(|engines| engines.oxideterm.as_deref())
+                .is_none()
+        {
+            return Err("Catalog summaries must declare engines.oxideterm".into());
+        }
+        if let Some(history) = &entry.history {
+            if registry.version != 2 {
+                return Err("History references require catalog v2".into());
+            }
+            catalog::validate_history_reference(history)?;
+        }
         validate_native_plugin_id(&entry.id)
             .map_err(|error| format!("Invalid registry plugin id: {error}"))?;
         if !plugin_ids.insert(entry.id.as_str()) {
@@ -777,45 +1156,125 @@ fn validate_native_plugin_registry(registry: &NativePluginRegistryIndex) -> Resu
                 )
             })?;
         }
-        let mut package_targets = std::collections::HashSet::new();
-        for package in &entry.packages {
-            if !package_targets.insert(package.target.as_str()) {
+        if let Some(required) = entry
+            .engines
+            .as_ref()
+            .and_then(|engines| engines.oxideterm.as_deref())
+        {
+            semver::VersionReq::parse(required)
+                .map_err(|error| format!("Invalid host range for {}: {error}", entry.id))?;
+        }
+        let mut versions = std::collections::HashSet::new();
+        for release in &entry.releases {
+            let mut version = semver::Version::parse(&release.version)
+                .map_err(|error| format!("Invalid release version for {}: {error}", entry.id))?;
+            version.build = semver::BuildMetadata::EMPTY;
+            if !versions.insert(version) {
                 return Err(format!(
-                    "Plugin registry entry \"{}\" has duplicate target \"{}\"",
-                    entry.id, package.target
+                    "Duplicate release version for {}: {}",
+                    entry.id, release.version
                 ));
             }
-            let package_url = reqwest::Url::parse(&package.download_url).map_err(|error| {
-                format!(
-                    "Plugin registry entry \"{}\" has invalid package URL: {error}",
-                    entry.id
-                )
-            })?;
-            if package_url.scheme() != "https" {
+            let required = release
+                .engines
+                .oxideterm
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "Release {}@{} must declare engines.oxideterm",
+                        entry.id, release.version
+                    )
+                })?;
+            semver::VersionReq::parse(required)
+                .map_err(|error| format!("Invalid host range for {}: {error}", entry.id))?;
+            if release.packages.is_empty() {
                 return Err(format!(
-                    "Plugin registry entry \"{}\" package URL must use HTTPS",
-                    entry.id
+                    "Release {}@{} has no packages",
+                    entry.id, release.version
                 ));
             }
-            let checksum = package
-                .checksum
-                .strip_prefix("sha256:")
-                .unwrap_or(&package.checksum);
-            if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(format!(
-                    "Plugin registry entry \"{}\" has invalid SHA-256",
-                    entry.id
-                ));
+            validate_registry_packages(&entry.id, &release.packages)?;
+            for correction in &release.compatibility_corrections {
+                let requirement = correction
+                    .engines
+                    .oxideterm
+                    .as_deref()
+                    .filter(|range| !range.trim().is_empty())
+                    .ok_or_else(|| format!("Missing corrected host range for {}", entry.id))?;
+                semver::VersionReq::parse(requirement).map_err(|error| error.to_string())?;
+                if correction.reason.trim().is_empty() || correction.recorded_at.trim().is_empty() {
+                    return Err(format!(
+                        "Compatibility correction for {} needs a reason and timestamp",
+                        entry.id
+                    ));
+                }
             }
-            if package
-                .size
-                .is_some_and(|size| size > PLUGIN_PACKAGE_MAX_BYTES)
-            {
-                return Err(format!(
-                    "Plugin registry entry \"{}\" package exceeds the size limit",
-                    entry.id
-                ));
-            }
+        }
+        if !entry.releases.is_empty()
+            && !entry.releases.iter().any(|release| {
+                release.version == entry.version
+                    && release.packages.len() == entry.packages.len()
+                    && entry
+                        .packages
+                        .iter()
+                        .all(|package| release.packages.contains(package))
+            })
+        {
+            return Err(format!(
+                "Release history must retain the legacy package record for {}",
+                entry.id
+            ));
+        }
+        if !entry.history_pending() {
+            validate_registry_packages(&entry.id, &entry.packages)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_registry_packages(
+    id: &str,
+    packages: &[NativePluginRegistryPackage],
+) -> Result<(), String> {
+    let mut package_targets = std::collections::HashSet::new();
+    for package in packages {
+        if !package_targets.insert(package.target.as_str()) {
+            return Err(format!(
+                "Plugin registry entry \"{}\" has duplicate target \"{}\"",
+                id, package.target
+            ));
+        }
+        let package_url = reqwest::Url::parse(&package.download_url).map_err(|error| {
+            format!(
+                "Plugin registry entry \"{}\" has invalid package URL: {error}",
+                id
+            )
+        })?;
+        if package_url.scheme() != "https" {
+            return Err(format!(
+                "Plugin registry entry \"{}\" package URL must use HTTPS",
+                id
+            ));
+        }
+        let checksum = package
+            .checksum
+            .strip_prefix("sha256:")
+            .unwrap_or(&package.checksum);
+        if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Plugin registry entry \"{}\" has invalid SHA-256",
+                id
+            ));
+        }
+        if package
+            .size
+            .is_some_and(|size| size > PLUGIN_PACKAGE_MAX_BYTES)
+        {
+            return Err(format!(
+                "Plugin registry entry \"{}\" package exceeds the size limit",
+                id
+            ));
         }
     }
     Ok(())
@@ -830,5 +1289,159 @@ fn native_plugin_host_target() -> Option<&'static str> {
         ("windows", "aarch64") => Some("aarch64-pc-windows-msvc"),
         ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn catalog() -> NativePluginRegistryIndex {
+        let package = |target: &str, version: &str| {
+            json!({
+                "target": target,
+                "downloadUrl": format!("https://example.com/{target}/{version}.zip"),
+                "checksum": "a".repeat(64),
+                "size": 100
+            })
+        };
+        let release = |version: &str, requirement: &str, targets: &[&str]| {
+            json!({
+                "version": version,
+                "engines": {"oxideterm": requirement},
+                "packages": targets.iter().map(|target| package(target, version)).collect::<Vec<_>>()
+            })
+        };
+        serde_json::from_value(json!({
+            "version": 1,
+            "plugins": [{
+                "id": "com.example.history",
+                "name": "History",
+                "version": "1.0.0",
+                "minOxideTermVersion": "1.0.0",
+                "packages": [package("any", "1.0.0")],
+                "releases": [
+                    release("3.0.0", ">=4.0.0", &["any"]),
+                    release("1.0.0", ">=1.0.0, <3.0.0", &["any"]),
+                    release("1.11.0", ">=2.0.0, <3.0.0", &["x86_64-pc-windows-msvc"]),
+                    release("1.10.0", ">=2.0.0, <3.0.0", &["any", "aarch64-apple-darwin"]),
+                    release("2.0.0", ">=3.0.0, <4.0.0", &["any"])
+                ]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn chooses_highest_compatible_release_and_keeps_legacy_snapshot() {
+        let catalog = catalog();
+        validate_native_plugin_registry(&catalog).unwrap();
+        let entry = &catalog.plugins[0];
+        for (host, target, expected) in [
+            ("2.2.0", "aarch64-apple-darwin", Some("1.10.0")),
+            ("2.2.0", "x86_64-pc-windows-msvc", Some("1.11.0")),
+            ("1.9.0", "aarch64-apple-darwin", Some("1.0.0")),
+            ("3.2.0", "aarch64-apple-darwin", Some("2.0.0")),
+            ("4.0.0", "aarch64-apple-darwin", Some("3.0.0")),
+            ("0.9.0", "aarch64-apple-darwin", None),
+        ] {
+            let selected = select_registry_release_for(entry, host, target, true);
+            assert_eq!(
+                selected.as_ref().map(|entry| entry.version.as_str()),
+                expected,
+                "{host}/{target}"
+            );
+        }
+        let selected =
+            select_registry_release_for(entry, "2.2.0", "aarch64-apple-darwin", true).unwrap();
+        assert_eq!(
+            resolve_registry_package_for_target(&selected, "aarch64-apple-darwin")
+                .unwrap()
+                .download_url,
+            "https://example.com/aarch64-apple-darwin/1.10.0.zip"
+        );
+        assert!(!NativePluginRegistry::registry_entry_is_update(
+            &selected, "2.0.0"
+        ));
+        let mut rebuilt = selected;
+        rebuilt.version = "1.10.0+new-build".into();
+        assert!(!NativePluginRegistry::registry_entry_is_update(
+            &rebuilt, "1.10.0"
+        ));
+        let mut update_catalog = catalog.clone();
+        for release in &mut update_catalog.plugins[0].releases {
+            release.engines.oxideterm = Some(format!("={}", env!("CARGO_PKG_VERSION")));
+        }
+        let updates = NativePluginRegistry::check_plugin_updates(
+            update_catalog,
+            &[NativePluginInstalledInfo {
+                id: "com.example.history".into(),
+                version: "1.0.0".into(),
+            }],
+        );
+        assert_eq!(
+            updates
+                .iter()
+                .map(|entry| (entry.id.as_str(), entry.version.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("com.example.history", "3.0.0")]
+        );
+        assert_eq!(
+            updates[0].packages[0].download_url,
+            "https://example.com/any/3.0.0.zip"
+        );
+        assert_eq!(
+            select_registry_release_for(entry, "2.2.0", "aarch64-apple-darwin", false)
+                .unwrap()
+                .version,
+            "3.0.0"
+        );
+        assert_eq!(entry.version, "1.0.0");
+        assert_eq!(
+            entry.packages[0].download_url,
+            "https://example.com/any/1.0.0.zip"
+        );
+        let mut legacy = entry.clone();
+        legacy.releases.clear();
+        assert_eq!(
+            select_registry_release_for(&legacy, "2.2.0", "aarch64-apple-darwin", true).unwrap(),
+            legacy
+        );
+        assert!(
+            select_registry_release_for(&legacy, "0.9.0", "aarch64-apple-darwin", true).is_none()
+        );
+    }
+
+    #[test]
+    fn history_rejects_ambiguous_or_unusable_records() {
+        for scenario in [
+            "duplicate",
+            "range",
+            "missing-range",
+            "checksum",
+            "missing-legacy",
+        ] {
+            let mut catalog = catalog();
+            let entry = &mut catalog.plugins[0];
+            match scenario {
+                "duplicate" => {
+                    let mut duplicate = entry.releases[0].clone();
+                    duplicate.version.push_str("+another-build");
+                    entry.releases.push(duplicate);
+                }
+                "range" => entry.releases[0].engines.oxideterm = Some("invalid".into()),
+                "missing-range" => entry.releases[0].engines.oxideterm = None,
+                "checksum" => entry.releases[0].packages[0].checksum = "bad".into(),
+                "missing-legacy" => {
+                    entry.releases.remove(1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_native_plugin_registry(&catalog).is_err(),
+                "{scenario}"
+            );
+        }
     }
 }

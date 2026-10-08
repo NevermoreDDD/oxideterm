@@ -30,7 +30,7 @@ pub(crate) fn discover_native_plugins_in_dir(
     let mut diagnostics = Vec::new();
     for entry in entries.flatten() {
         let plugin_dir = entry.path();
-        if !plugin_dir.is_dir() {
+        if entry.file_name().to_string_lossy().starts_with('.') || !plugin_dir.is_dir() {
             continue;
         }
         match load_native_plugin_manifest(&plugin_dir, config) {
@@ -38,7 +38,47 @@ pub(crate) fn discover_native_plugins_in_dir(
             Err(diagnostic) => diagnostics.push(diagnostic),
         }
     }
-    plugins.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
+    // Runtime state and contributions are keyed by ID. The managed installation
+    // must win over manual copies so an update cannot activate both versions.
+    plugins.sort_by(|left, right| {
+        left.manifest.id.cmp(&right.manifest.id).then_with(|| {
+            let left_managed = left.install_dir == plugins_dir.join(&left.manifest.id);
+            let right_managed = right.install_dir == plugins_dir.join(&right.manifest.id);
+            right_managed.cmp(&left_managed).then_with(|| {
+                if native_plugin_version_is_newer(&left.manifest.version, &right.manifest.version) {
+                    std::cmp::Ordering::Less
+                } else if native_plugin_version_is_newer(
+                    &right.manifest.version,
+                    &left.manifest.version,
+                ) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    left.install_dir.cmp(&right.install_dir)
+                }
+            })
+        })
+    });
+    plugins.dedup_by(|duplicate, selected| {
+        if duplicate.manifest.id != selected.manifest.id {
+            return false;
+        }
+        diagnostics.push(native_plugin_diagnostic(
+            &duplicate.install_dir,
+            Some(duplicate.manifest.id.clone()),
+            format!(
+                "Duplicate plugin installation ignored; using {} ({})",
+                selected.install_dir.display(),
+                selected.manifest.version
+            ),
+        ));
+        true
+    });
+    plugins.sort_by(|left, right| {
+        left.manifest
+            .name
+            .cmp(&right.manifest.name)
+            .then_with(|| left.manifest.id.cmp(&right.manifest.id))
+    });
     diagnostics.sort_by(|left, right| left.plugin_dir.cmp(&right.plugin_dir));
     (plugins, diagnostics)
 }
@@ -65,12 +105,15 @@ pub(crate) fn load_native_plugin_manifest(
         .map_err(|error| native_plugin_diagnostic(plugin_dir, Some(manifest.id.clone()), error))?;
     validate_runtime_entry_exists(plugin_dir, &runtime_plan)
         .map_err(|error| native_plugin_diagnostic(plugin_dir, Some(manifest.id.clone()), error))?;
-    let config_entry = config
+    let mut config_entry = config
         .plugins
         .get(&manifest.id)
         .cloned()
         .unwrap_or_else(NativePluginConfigEntry::default);
     let state = native_plugin_state_for_manifest(&manifest, &runtime_plan, &config_entry);
+    if let Err(error) = validate_native_plugin_host(&manifest) {
+        config_entry.last_error = Some(error);
+    }
     Ok(NativePluginInfo {
         manifest,
         install_dir: plugin_dir.to_path_buf(),

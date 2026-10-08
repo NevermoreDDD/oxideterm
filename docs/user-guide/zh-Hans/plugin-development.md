@@ -632,7 +632,7 @@ flowchart TB
 
 | 区域 | Tauri/Web 插件 | Native 插件 |
 |---|---|---|
-| 运行时 | 通过动态导入加载 ESM `main.js` | `runtime.kind` 为 `process`、`wasm` 或 `manifest-only` |
+| 运行时 | 通过动态导入加载 ESM `main.js` | `runtime.kind` 为 `process`、`wasm`、`manifest-only` 或 `language` |
 | 界面 | React 组件和 CSS | GPUI 渲染的声明式 Native UI 结构 |
 | 共享模块 | `window.__OXIDE__` | 不可用 |
 | 样式 | CSS 和主题变量 | 只使用宿主拥有的 Native 控件 |
@@ -692,6 +692,26 @@ flowchart TB
 ```
 
 支持的设置类型是 `string`、`number`、`boolean` 和 `select`。`select` 设置必须提供 `options`，选项值必须是字符串或数字。
+
+## 编辑器语言插件
+
+主程序保留 15 个内置语法条目：Bash、Zsh、Fish、PowerShell、JSON、YAML、TOML、Markdown、
+Dockerfile、Make、CMake、Diff、Python、Lua 和 SQL。
+另有 24 个语法条目通过语言插件提供：C、C++、C#、CSS、Common Lisp、Elixir、Go、HTML、Java、
+JavaScript、Objective-C、Perl、PHP、R、Ruby、Rust、Scala、Swift、TypeScript、TSX、Zig、Nginx、Terraform/HCL 和 Protobuf。
+Nginx 根据 `nginx.conf` 等专用文件名或 `.nginx` 扩展名识别，不覆盖通用 `.conf`。
+HCL 识别 `.tf`、`.tfvars` 和 `.hcl`，JSON 变体仍按 JSON 处理；Protobuf 识别 `.proto`。
+TypeScript 与 TSX 分别打包为独立插件。
+文件类型识别保留在主程序中。未安装或已禁用时，文档仍可编辑，并提供插件管理器入口。
+安装或启用后按需加载解析器；更新与禁用会刷新已打开文档的语法状态，保留文本和撤销历史。
+`.h` 头文件继续识别为 C++。
+
+语言包声明 `runtime.kind: "language"` 和 `contributes.language`，包含 Tree-sitter
+WebAssembly 解析器、高亮查询、各自的 SHA-256 校验值、宿主版本范围及上游许可证。
+它不使用通用 WASI 插件的宿主接口。市场仓库维护
+[固定版本的构建配方与发布流程](https://github.com/AnalyseDeCircuit/oxideterm-plugins/blob/main/docs/language-plugins.md)。
+每种语言在 `plugins/` 下有独立目录、版本和发布资产。
+语言插件自身采用 Apache-2.0，上游许可证单独保留；安装需要严格高于 2.2.0 且包含语言加载能力的主程序。
 
 ## 进程运行时插件
 
@@ -885,6 +905,8 @@ Native 插件通过带版本的结构选择 OxideTerm 组件。插件提供数�
 | 类型 | 说明 |
 |---|---|
 | `stack`, `row`, `card`, `toolbar` | 布局组件，以有界的宿主布局渲染嵌套 `children` |
+| `columns` | 等宽分栏，容器变窄时自动换行 |
+| `actionRow` | 首个子项占用剩余宽度，其余操作靠右对齐；首项为按钮时填满该区域 |
 | `text`, `password`, `number`, `checkbox`, `select` | 共享字段组件，需要稳定的 `id` |
 | `radioGroup`, `radio-group`, `segmentedControl`, `segmented-control`, `slider` | 共享选择/范围组件，需要稳定的 `id` |
 | `button`, `iconButton`, `icon-button` | 共享动作组件；有 `id`、未禁用且未加载时可操作；图标按钮还需要 `icon` 和 `label` |
@@ -928,6 +950,79 @@ Native 插件通过带版本的结构选择 OxideTerm 组件。插件提供数�
 的上限是 2 MiB。
 
 ## 宿主 API 调用
+
+### 原生文本处理区
+
+WASM 插件可以注册带稳定 `id` 的 `textWorkbench` 控件。`options` 中每个工具采用
+`{ label, value: { command, group?, description?, parameterLabel?, parameterDefault? } }`。
+相同 `group` 的工具共用左侧分组入口，具体操作显示在编辑器上方。可选参数使用原生输入框；
+切换到不同参数时采用声明的默认值，相同参数名称的操作之间保留当前值。
+控件的 `value` 提供 `input`、`output`、`execute`、`working`、`copy`、`useInput`、
+`clear`、`limit`、`failed`、`line`、`column` 及插件错误码对应的翻译文案。
+界面结构可携带 `translations: { "en": { key: text }, "zh-CN": { key: text }, ... }`，
+以 `@` 开头的字符串会从该词典翻译，覆盖页面头部和工具选项。插件应包含全部 11 种语言，
+且键集合一致。此能力要求 2.2.0 之后的宿主。
+
+宿主持有输入和只读结果编辑器，处理选择、复制和草稿生命周期。点击执行时截取当前输入，
+在新的 WASM 实例中调用选中命令，参数为 `{ input, parameter }`；返回值为
+`{ output: string }` 或 `{ error: { code, line?, column? } }`。错误码对应控件提供的翻译，
+未知错误统一显示 `failed`。输入限制为 256 KiB，参数 4 KiB，输出 2 MiB，执行时限五秒。
+失败时保留输入和上次结果。输入不进入界面注册、设置或终端命令；关闭标签页释放编辑器并
+取消结果回传，已开始执行的 WASM 调用受时限约束。计算实例不提供宿主调用、文件目录或网络权限。
+
+运行时菜单注册 `contextMenu` 的 `target` 为 `terminal`，菜单项提供
+`{ label, tabId, controlId }`。宿主在点击时捕获选区，随后打开该插件声明的文本处理区。
+之后切换窗格或终端输出变化都不会改变已捕获的输入；`@` 菜单文案使用目标标签页的翻译。
+
+### 文件预览插件
+
+独立进程插件可以在现有文件预览窗口中提供分页文档预览，不需要注册标签页或侧边栏：
+
+```json
+{
+  "contributes": {
+    "filePreviews": [{"mimeTypes": ["application/pdf"], "command": "preview.render"}]
+  }
+}
+```
+
+宿主按精确的 MIME 类型选择已启用、版本兼容且已获信任的插件。本地及 SFTP
+下载的 PDF、SQLite、证书和二进制文件通过文档资源进入预览，第一版大小限制为 10 MiB。其他内置预览类型沿用原有实现。
+每次渲染启动独立进程实例，使用现有 `activate` 和 `dispatchCommand` 协议。
+命令接收 `{ path, page, width }`：`page` 从零开始，`width` 为 256 至 2048 像素的期望图片宽度。
+返回 `{ pageCount, page, png }`，其中 `png` 是 Base64 编码的 PNG 图片。
+宿主限制解码后的图片不超过 800 万像素，并通过 GPUI 显示。预览实例只返回页面结果，
+不要从中注册界面或调用宿主 API。
+
+SQLite 插件注册 `application/vnd.sqlite3`，也可注册 `application/x-sqlite3`。
+请求额外携带 `table: string | null` 和 `snapshot: boolean`。只有宿主管理的临时下载副本
+会设置 `snapshot: true`，插件将其作为不可变文件打开，避免生成 WAL/SHM 辅助文件；
+本地文件使用普通 SQLite 只读访问。返回结构为
+`{ kind: "table", tables: string[], selectedTable: string | null, columns: string[],
+rows: (string | null)[][], rowCount, page, pageCount }`。每页 50 行，末页可不足 50 行；
+空表或空数据库保留一页。宿主检查表名、行结构和大小后使用原生表格显示。
+限制为 256 个表名、64 列及每页 4 MiB 单元格文本。
+远程文件存在非空 WAL/回滚日志或下载期间发生变化时拒绝预览，应使用停止写入后的完整备份。
+
+证书插件注册 `application/pkix-cert`，二进制检查器注册 `application/x-oxideterm-binary`。
+宿主根据扩展名及文件头选择这些入口，优先于文本预览。检查器返回
+`{ kind, index, objects, fields }`，其中 `index` 对应请求的 `page`，`objects` 最多列出
+64 个证书或架构，`fields` 使用宿主已翻译的字段键，元素格式为 `{ key, value }`。
+证书返回 `kind: "certificate"`、详细字段 `details`，以及以秒计的时间戳 `notBefore`、
+`notAfter`。只返回证书的公开字段，混合 PEM 中的私钥块不得进入结果。界面单独判断有效期，
+不将其等同于系统信任、证书链、签名或吊销检查。
+
+二进制返回 `kind: "binary"`、完整文件大小 `size`，以及最多 1024 个节区 `sections`。
+节区格式为 `{ name, address, offset, size }`；文件偏移相对于整个源文件，包括通用 Mach-O
+文件。没有文件数据的节区使用 `offset: null`。宿主检查节区范围，并复用已有十六进制格式化
+和只读编辑器，每次显示 512 字节，支持偏移跳转。插件仅解释文件，不编辑、反汇编或注册额外界面。
+
+预览窗口持有取消句柄和源文件的生命周期。关闭窗口会取消渲染进程及待完成的 SFTP
+预览下载，最后一个文件使用者释放后删除远程临时副本，不会断开共享 SSH 节点。
+独立进程仍需用户确认信任；进程隔离用于防止解析器崩溃影响应用，不是文件系统沙箱。
+禁用或卸载插件后，宿主不再选择它，并取消其正在打开的预览。
+
+此能力在 2.2.0 之后新增。正式插件包必须排除旧宿主，本地试用版不得放宽正式发布包的兼容范围。
 
 运行时插件通过命名空间、方法和 JSON 参数调用宿主 API：
 
@@ -1089,8 +1184,16 @@ com.example.native-dashboard/
 - 归档条目不能逃逸插件目录。
 - 包大小和条目数量应低于宿主限制。
 - 一个包优先只包含一个插件 id。
-- 使用类似 semver 的版本，便于更新检查比较。
+- 使用语义化版本，便于更新检查比较。
+- 根据实际兼容性测试，在 `engines.oxideterm` 中声明宿主范围，例如 `>=2.3.0, <3.0.0`。
 - 除非入口本身可移植，否则运行时二进制应按平台分发。
+
+插件市场保留每个发布版本的宿主范围和各平台安装包，选择当前可用的最高版本。
+更高版本不兼容时单独说明要求，保留当前插件。安装和启动都会检查清单中的兼容范围，
+应用升级和降级后同样生效。不兼容插件保留文件与设置，但停止加载。
+启动激活前会刷新官方目录并缓存，离线时读取缓存；有记录的兼容性纠错优先于包内声明，
+但不会改写安装包。未收录且未声明范围的旧安装包仍允许使用；旧版主应用不会因此自动获得兼容检查。
+目录格式和发布流程见[发布指南](https://github.com/AnalyseDeCircuit/oxideterm-plugins/blob/main/docs/PUBLISHING.md)。
 
 开发时：
 
@@ -1137,11 +1240,17 @@ interface NativePluginPermissions {
 }
 
 interface NativePluginRuntime {
-  kind: 'wasm' | 'process' | 'manifest-only';
+  kind: 'wasm' | 'process' | 'manifest-only' | 'language';
   entry: string;
 }
 
 interface NativePluginContributes {
+  language?: {
+    id: 'elixir' | 'commonlisp' | 'swift' | 'r' | 'scala' | 'objc';
+    highlights: string;
+    parserSha256: string;
+    highlightsSha256: string;
+  };
   tabs?: NativePluginTabDef[];
   sidebarPanels?: NativePluginSidebarDef[];
   activityBarItems?: NativePluginActivityBarItemDef[];
@@ -1327,6 +1436,7 @@ interface PluginRegistration {
 
 ```ts
 interface NativePluginDeclarativeUiSchema {
+  translations?: Record<string, Record<string, string>>;
   componentVersion?: 1;
   kind?: 'form';
   title?: string;
@@ -1345,6 +1455,7 @@ interface NativePluginDeclarativeUiSection {
 interface NativePluginDeclarativeUiControl {
   kind:
     | 'text'
+    | 'textWorkbench'
     | 'password'
     | 'number'
     | 'checkbox'
@@ -1359,6 +1470,8 @@ interface NativePluginDeclarativeUiControl {
     | 'icon-button'
     | 'stack'
     | 'row'
+    | 'columns'
+    | 'actionRow'
     | 'card'
     | 'toolbar'
     | 'alert'
@@ -1501,6 +1614,18 @@ interface HostCall {
 
 ### 连接与会话
 
+2.2.0 之后的宿主新增工作概览接口：
+
+- `app.getWorkspaceSummary({})` 需要 `sessions.read`，返回打开标签的标识、标题、类型和录制状态，节点的标识、标题、状态和活动转发数量，以及存在问题的插件标识和名称；不返回终端内容、路径或诊断原文。
+- `ui.openWorkspace(destination)` 需要 `ui.write`，校验目标后返回 `{ queued: true }`，复用宿主原有的页面打开和独立窗口聚焦流程。
+
+目标格式为 `{ kind: "tab", id }`、`{ kind: "sftp", nodeId }`、
+`{ kind: "forwards", nodeId }` 或 `{ kind: "page", page }`。
+页面名称支持 `sessions`、`files`、`plugins`、`cloudSync`、
+`notifications` 和 `localTerminal`。已关闭的标签、已删除的节点及未知页面会被拒绝。
+该接口不执行任意命令；打开保存连接仍使用 `connections.connect` 及其独立权限。
+工作概览返回当前状态，不提供持久化的项目历史或工作区历史。
+
 | 宿主 API | 参数 | 返回 |
 |---|---|---|
 | `connections.getSummaries` | `{}` | 脱敏连接摘要；默认可用 |
@@ -1511,6 +1636,7 @@ interface HostCall {
 | `connections.getState` | `{ connectionId: string }` | 连接状态或 `null` |
 | `connections.getByNode` | `{ nodeId: string }` | 连接快照或 `null` |
 | `connections.connect` | `{ connectionId: string }` | `{ queued: true }`；使用现有保存连接和提示流程 |
+| `connections.openForm` | `{ name: string, host: string, port: number, username?: string, group?: string }` | `{ queued: true }`；打开原生 SSH 表单供用户检查，不保存或连接；需要 `connections.control` |
 | `connections.reconnect` | `{ nodeId: string }` | `{ queued: true }`；复用现有节点运行时 |
 | `connections.disconnect` | `{ nodeId: string }` | `{ queued: true }`；先打开常规级联确认，再断开 NodeRouter 拥有的子树 |
 | `sessions.getTree` | `{}` | 节点树快照 |
@@ -1520,6 +1646,11 @@ interface HostCall {
 | `eventLog.getEntries` | `{ severity?: string, category?: string, limit?: number }` | 事件日志条目 |
 
 ### 产品数据与控制
+
+`connections.openForm` 需要高于 2.2.0 的宿主版本。主机来源插件还应在启用时通过
+`app.getApiCatalog` 检查接口是否存在。接口只接受连接基本信息，拒绝凭据、密钥路径、
+命令及其他字段；认证和跳板机由用户在现有表单中设置。排队中的请求不会覆盖正在编辑的
+表单，执行失败会显示在插件管理器中。主机发现不拥有 SSH 连接，也不自动修改已保存连接。
 
 工作区修改操作在完成参数和权限预检后返回 `{ queued: true }`，随后由对应产品所有者执行，并反映到后续快照或事件中。Host Tools 因为需要返回类型化远端结果，所以采用同步返回。
 

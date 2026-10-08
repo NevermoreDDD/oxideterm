@@ -56,6 +56,71 @@ class ArtifactNameTests(unittest.TestCase):
                 )
 
 
+class WindowsInstallerTests(unittest.TestCase):
+    def test_installer_checks_runtime_in_normal_and_update_payloads(self) -> None:
+        digest = hashlib.sha256(b"runtime fixture").hexdigest()
+        files = ("conpty.dll", "arm64/OpenConsole.exe")
+        x11_provenance = (
+            Path(__file__).resolve().parents[2]
+            / "crates/oxideterm-gpui-app/resources/x11/vcxsrv-runtime.json"
+        ).read_bytes()
+        cases = [("valid", None, None)]
+        for root in ("", "install"):
+            for name in files:
+                relative = str(Path(root) / "resources/conpty" / name)
+                cases.extend([
+                    (f"missing {relative}", relative, None),
+                    (f"corrupt {relative}", None, relative),
+                ])
+        for label, missing, corrupt in cases:
+            with self.subTest(case=label):
+                def extract(args):
+                    if args[1] == "l":
+                        return "\n".join(verify_native_package.REQUIRED_DOCUMENTS | verify_native_package.WINDOWS_X11_RUNTIME_SUFFIXES | {
+                            "VERSION", "oxideterm-native.exe", "oxideterm-update-helper.exe",
+                        })
+                    directory = Path(next(arg[2:] for arg in args if arg.startswith("-o")))
+                    # 7-Zip exposes both NSIS File /r destinations, not just the install branch.
+                    for root in ("", "install"):
+                        (directory / root).mkdir(parents=True, exist_ok=True)
+                        (directory / root / "VERSION").write_text("2.2.1\n")
+                        for suffix in verify_native_package.WINDOWS_X11_RUNTIME_SUFFIXES:
+                            file = directory / root / suffix
+                            file.parent.mkdir(parents=True, exist_ok=True)
+                            file.write_bytes(
+                                x11_provenance if suffix.endswith("VCXSRV-RUNTIME.json")
+                                else b"X11 runtime fixture"
+                            )
+                        for name in files:
+                            relative = str(Path(root) / "resources/conpty" / name)
+                            if relative == missing:
+                                continue
+                            file = directory / relative
+                            file.parent.mkdir(parents=True, exist_ok=True)
+                            file.write_bytes(b"corrupt" if relative == corrupt else b"runtime fixture")
+                    return ""
+
+                with (
+                    patch.object(verify_native_package.shutil, "which", return_value="7z"),
+                    patch.object(verify_native_package, "run_checked", side_effect=extract),
+                    patch.object(conpty_runtime, "RUNTIMES", {
+                        "aarch64-pc-windows-msvc": ("arm64", digest, digest),
+                    }),
+                ):
+                    if missing or corrupt:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "must contain" if missing else "SHA-256 mismatch",
+                        ) as error:
+                            verify_native_package.verify_windows_installer(
+                                Path("setup.exe"), "2.2.1", "aarch64-pc-windows-msvc",
+                            )
+                        self.assertIn(Path(missing or corrupt).as_posix(), str(error.exception))
+                    else:
+                        verify_native_package.verify_windows_installer(
+                            Path("setup.exe"), "2.2.1", "aarch64-pc-windows-msvc",
+                        )
+
+
 class PortableArchiveTests(unittest.TestCase):
     def setUp(self) -> None:
         digest = hashlib.sha256(b"data").hexdigest()

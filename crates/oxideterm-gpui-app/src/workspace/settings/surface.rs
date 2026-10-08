@@ -258,13 +258,6 @@ impl WorkspaceApp {
                     settings.ai.enabled,
                 )
             }
-            (AiSettingsPage::Agents, 0) => {
-                let settings = self.settings_store.settings();
-                self.ai_disabled_settings_card(
-                    self.ai_acp_agents_section(settings, cx),
-                    settings.ai.enabled,
-                )
-            }
             (AiSettingsPage::Context, 0) => {
                 let settings = self.settings_store.settings();
                 self.ai_disabled_settings_card(
@@ -606,9 +599,6 @@ impl WorkspaceApp {
                         self.ai_entity
                             .read(cx)
                             .hash_settings_provider_layout(&mut hasher);
-                    }
-                    (AiSettingsPage::Agents, 2) => {
-                        settings.ai.acp_agents.len().hash(&mut hasher);
                     }
                     (AiSettingsPage::Context, 5) => {
                         settings.ai.providers.len().hash(&mut hasher);
@@ -1259,7 +1249,15 @@ impl WorkspaceApp {
         self.i18n
             .set_locale(locale_from_settings(settings.general.language));
         if previous_settings.general.language != settings.general.language {
+            self.refresh_native_plugin_terminal_hooks(cx);
             cx.set_menus(crate::platform::app_menus(settings));
+            oxideterm_gpui_editor::EditorLanguagePlugins::set_labels(
+                self.i18n.t("plugin.language_missing"),
+                self.i18n.t("plugin.load_failed_default"),
+                self.i18n.t("plugin.language_manage"),
+                self.i18n.t("plugin.language_dismiss"),
+                cx,
+            );
         }
         oxideterm_desktop_presence::set_keep_running_on_close(
             settings.general.minimize_to_tray_on_close,
