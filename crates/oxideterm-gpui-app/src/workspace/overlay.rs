@@ -843,8 +843,9 @@ impl WorkspaceOverlayEntity {
         };
         let generation = self.deadline_generation;
         let delay = deadline.saturating_duration_since(Instant::now());
+        let timer = cx.background_executor().timer(delay);
         self.deadline_task = Some(cx.spawn(async move |overlay, cx| {
-            Timer::after(delay).await;
+            timer.await;
             let _ = overlay.update(cx, |overlay, cx| {
                 overlay.handle_deadline_generation(generation, Instant::now(), cx);
             });
