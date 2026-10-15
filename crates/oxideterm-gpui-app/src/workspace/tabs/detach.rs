@@ -521,6 +521,23 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.detach_tab_to_window_at_bounds(
+            tab_id,
+            entry_handoff_origin,
+            window.bounds(),
+            window,
+            cx,
+        );
+    }
+
+    pub(in crate::workspace) fn detach_tab_to_window_at_bounds(
+        &mut self,
+        tab_id: TabId,
+        entry_handoff_origin: Option<TabWindowHandoffOrigin>,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab_index) = self.tab_index_by_id(tab_id, cx) else {
             return;
         };
@@ -550,7 +567,6 @@ impl WorkspaceApp {
         }
 
         let session = cx.entity();
-        let bounds = window.bounds();
         let entry_handoff_duration = oxideterm_gpui_ui::motion::duration(
             &self.tokens,
             oxideterm_gpui_ui::motion::MotionDuration::Overlay,

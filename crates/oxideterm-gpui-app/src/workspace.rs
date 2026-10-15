@@ -32,6 +32,7 @@ mod onboarding;
 mod overlay;
 mod pane_tree;
 mod path_completion;
+mod persistence;
 mod plugin_entity;
 mod plugin_lifecycle;
 mod plugin_manager;
@@ -753,6 +754,7 @@ pub(super) struct SelectableTextFragmentState {
 }
 
 pub(crate) struct WorkspaceApp {
+    workspace_persistence: persistence::WorkspacePersistence,
     focus_handle: FocusHandle,
     main_window_tabs: WorkspaceWindowTabState,
     tab_rename_dialog: Option<TabRenameDialog>,

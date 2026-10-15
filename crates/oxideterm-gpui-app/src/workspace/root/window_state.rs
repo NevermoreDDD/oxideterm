@@ -86,7 +86,7 @@ impl WorkspaceApp {
     }
 }
 
-fn geometry_from_window(window: &Window) -> Option<WindowGeometry> {
+pub(in crate::workspace) fn geometry_from_window(window: &Window) -> Option<WindowGeometry> {
     let bounds = window.window_bounds().get_bounds();
     let x = f32::from(bounds.origin.x);
     let y = f32::from(bounds.origin.y);

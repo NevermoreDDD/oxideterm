@@ -361,7 +361,7 @@ impl WorkspaceApp {
         }
     }
 
-    pub(super) fn register_existing_ssh_terminal_session(
+    pub(in crate::workspace) fn register_existing_ssh_terminal_session(
         &mut self,
         node_id: &NodeId,
         session_id: TerminalSessionId,

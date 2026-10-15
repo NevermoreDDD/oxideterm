@@ -12,6 +12,7 @@ pub(super) struct DetachedTabWindow {
     _session_observation: Subscription,
     _background_observation: Subscription,
     _close_subscription: Subscription,
+    _bounds_subscription: Subscription,
 }
 
 impl DetachedTabWindow {
@@ -73,6 +74,10 @@ impl DetachedTabWindow {
                 });
             });
 
+        let session_on_bounds = session.clone();
+        let bounds_subscription = cx.observe_window_bounds(window, move |_, _, cx| {
+            session_on_bounds.update(cx, |_, cx| cx.notify());
+        });
         Self {
             session,
             tab_id,
@@ -85,6 +90,7 @@ impl DetachedTabWindow {
             _session_observation: session_observation,
             _background_observation: background_observation,
             _close_subscription: close_subscription,
+            _bounds_subscription: bounds_subscription,
         }
     }
 }

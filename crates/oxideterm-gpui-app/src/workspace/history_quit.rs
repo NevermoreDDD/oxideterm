@@ -36,7 +36,10 @@ fn start_app_quit(cx: &mut App) {
     };
     let i18n = first.read(cx).i18n.clone();
     for session in &sessions {
-        session.update(cx, |workspace, cx| workspace.stop_ai_for_quit(cx));
+        session.update(cx, |workspace, cx| {
+            workspace.prepare_workspace_quit(cx);
+            workspace.stop_ai_for_quit(cx);
+        });
     }
     let task = cx.spawn(async move |cx| {
         loop {
@@ -121,6 +124,7 @@ fn start_app_quit(cx: &mut App) {
         cx.update(|cx| {
             for session in &sessions {
                 session.update(cx, |workspace, cx| {
+                    workspace.cancel_workspace_quit(cx);
                     workspace.ai_entity.update(cx, |ai, cx| {
                         ai.history.quitting = false;
                         cx.notify();

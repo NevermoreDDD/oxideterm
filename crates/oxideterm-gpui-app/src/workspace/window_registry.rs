@@ -354,6 +354,7 @@ impl PluginWindowEffect {
 
 /// A typed root adapter effect retained until a native window can apply it.
 pub(in crate::workspace) enum WorkspaceWindowEffect {
+    RestoreWorkspace,
     WindowIntent(window_intent::WindowIntentAction),
     Runtime(runtime_entity::WorkspaceRuntimeEvent),
     ConnectionFlow,
@@ -369,6 +370,7 @@ pub(in crate::workspace) enum WorkspaceWindowEffect {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::workspace) enum WorkspaceWindowEffectKey {
+    RestoreWorkspace,
     Runtime,
     ConnectionFlow,
     CloudSyncDeliveries,
@@ -399,6 +401,7 @@ pub(in crate::workspace) enum AiWindowEffectKey {
 impl WorkspaceWindowEffect {
     fn coalescing_key(&self) -> Option<WorkspaceWindowEffectKey> {
         match self {
+            Self::RestoreWorkspace => Some(WorkspaceWindowEffectKey::RestoreWorkspace),
             Self::WindowIntent(_) => None,
             Self::Runtime(_) => Some(WorkspaceWindowEffectKey::Runtime),
             Self::ConnectionFlow => Some(WorkspaceWindowEffectKey::ConnectionFlow),
@@ -476,6 +479,10 @@ pub(in crate::workspace) type WorkspaceWindowRegistry =
     WindowRegistry<AnyWindowHandle, WorkspaceWindowEffect, WorkspaceWindowEffectKey>;
 
 impl WorkspaceApp {
+    pub(in crate::workspace) fn enqueue_workspace_restore(&mut self, cx: &mut Context<Self>) {
+        self.enqueue_window_effect(WorkspaceWindowEffect::RestoreWorkspace, cx);
+    }
+
     pub(in crate::workspace) fn reserve_workspace_window(
         &mut self,
         role: WindowRole,
@@ -733,6 +740,9 @@ impl WorkspaceApp {
             }
             WorkspaceWindowEffect::Graphics => {
                 self.apply_graphics_worker_results(window, cx);
+            }
+            WorkspaceWindowEffect::RestoreWorkspace => {
+                self.complete_workspace_standalone_restore(window, cx);
             }
         }
     }

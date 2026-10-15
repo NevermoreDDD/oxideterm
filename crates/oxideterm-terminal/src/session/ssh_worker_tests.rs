@@ -102,6 +102,40 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
+fn restored_ssh_terminal_reconnects_through_its_node_transport() {
+    let mut fixture = Fixture::with_backend(
+        |config| {
+            let disconnected =
+                SshSessionConfig::disconnected(config.host(), config.port(), config.username())
+                    .with_runtime(config.runtime.as_ref().unwrap().clone());
+            let mut terminal = SshPtySession::new(
+                disconnected,
+                80,
+                24,
+                Default::default(),
+                TerminalEncoding::Utf8,
+                1000,
+            );
+            assert_eq!(terminal.lifecycle(), TerminalLifecycle::Exited(None));
+            assert!(!terminal.is_interactive());
+            terminal.reconnect_ssh(config).unwrap();
+            terminal
+        },
+        |terminal| wait_until(|| terminal.shared.finished.load(Ordering::Acquire)),
+    );
+    fixture.send(b"restored shell output");
+    wait_until(|| {
+        fixture
+            .terminal
+            .buffer_text()
+            .contains("restored shell output")
+    });
+    fixture.terminal.write_text("restored input").unwrap();
+    let (input, _) = fixture.input.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(input, b"restored input");
+}
+
+#[test]
 fn closed_shell_reconnect_preserves_output_and_shared_transport_after_failure() {
     let mut fixture = Fixture::new();
     let connection = fixture.terminal.ssh_connection_handle().unwrap();

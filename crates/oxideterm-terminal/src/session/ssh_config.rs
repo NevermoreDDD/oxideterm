@@ -58,6 +58,14 @@ impl SshSessionConfig {
         Self::from(SshConfig::password(host, port, username, ""))
     }
 
+    /// Creates a reconnectable terminal without acquiring a transport or retaining credentials.
+    pub fn disconnected(host: impl Into<String>, port: u16, username: impl Into<String>) -> Self {
+        Self {
+            connection: None,
+            ..Self::for_existing_connection(String::new(), host, port, username)
+        }
+    }
+
     pub fn for_existing_connection(
         connection_id: impl Into<String>,
         host: impl Into<String>,

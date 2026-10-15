@@ -141,8 +141,12 @@ impl SshPtyCore {
             output_queue: VecDeque::new(),
             output_queue_bytes: 0,
         };
-        if start_connection {
+        if start_connection && core.config.connection.is_some() {
             core.start_connection();
+        } else if start_connection {
+            // Restored panes keep their parser owner alive while NodeRouter authenticates.
+            core.lifecycle = TerminalLifecycle::Exited(None);
+            core.parser_state.transport_running = false;
         }
         core
     }

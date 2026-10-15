@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod restoration;
+
 const MAX_TAB_HISTORY: usize = 50;
 const RECORDING_ELAPSED_TICK_INTERVAL: Duration = Duration::from_millis(530);
 

@@ -8168,6 +8168,9 @@ dependencies = [
 [[package]]
 name = "oxideterm-workspace"
 version = "2.2.3"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "oxideterm-wsl-graphics"

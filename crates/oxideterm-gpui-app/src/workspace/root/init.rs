@@ -858,6 +858,7 @@ impl WorkspaceApp {
             vibrancy_support: VibrancySupport::Supported,
             app_lock,
             settings_store,
+            workspace_persistence: persistence::WorkspacePersistence::default(),
             pending_window_ui_state: None,
             window_state_save_task: None,
             connection_store,
@@ -906,6 +907,8 @@ impl WorkspaceApp {
                 default_session_tree_path().with_file_name("standalone_sessions.json"),
                 &workspace.connection_store,
             );
+        workspace.restore_workspace(window, cx);
+        workspace.start_workspace_autosave(cx);
         workspace.sync_terminal_command_sender_appearance(cx);
         workspace.sync_active_terminal_metadata_context(cx);
         workspace.sync_active_terminal_recording_elapsed_tick(cx);
@@ -913,6 +916,7 @@ impl WorkspaceApp {
         workspace.refresh_terminal_trigger_runtime(cx);
         workspace.schedule_automatic_native_update_check(cx);
         cx.on_release(|workspace, cx| {
+            workspace.flush_workspace_snapshot(cx);
             workspace.mosh_plugin_sessions.set_available(false);
             workspace.flush_main_window_state(cx);
             workspace.shutdown_terminal_trigger_runtime();

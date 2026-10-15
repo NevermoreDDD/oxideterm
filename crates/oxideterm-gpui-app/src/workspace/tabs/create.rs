@@ -1850,7 +1850,7 @@ impl WorkspaceApp {
             .is_ok_and(|snapshot| snapshot.state.readiness == NodeReadiness::Ready)
     }
 
-    fn register_terminal_endpoint_session(
+    pub(in crate::workspace) fn register_terminal_endpoint_session(
         &mut self,
         node_id: &NodeId,
         session_id: TerminalSessionId,

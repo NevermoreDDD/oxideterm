@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 mod command_palette;
@@ -9,22 +10,22 @@ pub use command_palette::{
 pub const MAX_PANES_PER_TAB: usize = 4;
 pub const MIN_PANE_FRACTION: f32 = 10.0;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TerminalSessionId(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TabId(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct PaneId(pub u64);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SplitDirection {
     Horizontal,
     Vertical,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TabKind {
     Workspace,
     LocalTerminal,
@@ -118,7 +119,7 @@ pub struct Tab {
 ///
 /// Keeping these values together makes it impossible for tree edits to leave
 /// parallel child and size vectors with different lengths.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneSplitChild {
     pub node: PaneNode,
     pub size: f32,
@@ -130,7 +131,7 @@ impl PaneSplitChild {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PaneNode {
     Page {
         pane_id: PaneId,
