@@ -196,6 +196,7 @@ pub(in crate::workspace) const APPEARANCE_UI_FONT_SIZE_MAX: f32 = 20.0;
 
 mod ai_page;
 mod appearance;
+mod background;
 mod cards;
 mod cli_companion;
 mod connections_page;
@@ -252,7 +253,7 @@ use pages::settings_keybinding_scope_matches;
 pub(in crate::workspace) use remote_shell_integration::{
     RemoteShellIntegrationAction, RemoteShellIntegrationCardSnapshot,
     RemoteShellIntegrationConfirmSnapshot, RemoteShellIntegrationConfirmSource,
-    RemoteShellIntegrationGateOutcome, RemoteShellIntegrationNotice,
+    RemoteShellIntegrationFailure, RemoteShellIntegrationGateOutcome, RemoteShellIntegrationNotice,
     RemoteShellIntegrationRuntimeState,
 };
 pub(in crate::workspace) use update::{

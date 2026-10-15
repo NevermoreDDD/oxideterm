@@ -196,11 +196,20 @@ pub fn settings_appearance_theme_preview(
     description: String,
     i18n: &I18n,
     page: ThemePreviewPage,
+    background: Option<AnyElement>,
+    background_scope: oxideterm_settings::BackgroundScope,
     on_select: impl Fn(ThemePreviewPage, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
 ) -> AnyElement {
     // The caller resolves the candidate application and terminal palettes independently.
     // Sharing one frame makes their contrast visible without changing the live workspace.
     let ui = tokens.ui;
+    let window_background =
+        background.is_some() && background_scope == oxideterm_settings::BackgroundScope::Window;
+    let (window_layer, content_layer) = if window_background {
+        (background, None)
+    } else {
+        (None, background)
+    };
     let sidebar_item = |id: &'static str, key: &str, target: ThemePreviewPage| {
         let on_select = on_select.clone();
         oxideterm_gpui_ui::select::select_inline_option_row(tokens, page == target, false)
@@ -215,6 +224,13 @@ pub fn settings_appearance_theme_preview(
     let tab = |id: &'static str, label: String, target: ThemePreviewPage| {
         let on_select = on_select.clone();
         oxideterm_gpui_ui::tabs::tabs_trigger(tokens, label, page == target)
+            .when(window_background, |tab| {
+                tab.bg(if page == target {
+                    rgba((ui.bg << 8) | SETTINGS_BG_ACTIVE_SURFACE_ALPHA)
+                } else {
+                    rgba(0x00000000)
+                })
+            })
             .id(id)
             .debug_selector(move || id.into())
             .min_w_0()
@@ -226,10 +242,15 @@ pub fn settings_appearance_theme_preview(
             })
     };
     let content = match page {
-        ThemePreviewPage::Terminal => settings_terminal_theme_sample(tokens, settings, i18n),
-        _ => settings_application_theme_sample(tokens, page, i18n),
+        ThemePreviewPage::Terminal => {
+            settings_terminal_theme_sample(tokens, settings, i18n, content_layer, window_background)
+        }
+        _ => {
+            settings_application_theme_sample(tokens, page, i18n, content_layer, window_background)
+        }
     };
     div()
+        .relative()
         .w_full()
         .min_w_0()
         .flex_none()
@@ -237,16 +258,20 @@ pub fn settings_appearance_theme_preview(
         .rounded(px(tokens.radii.md))
         .border_1()
         .border_color(rgb(ui.border))
-        // GPUI overflow masks are rectangular. Only the outer shell paints the
-        // panel background; the contrasting content owns its bottom-right radius.
+        // Background media and effects share one rounded clip with the preview chrome.
+        .clip_rounded()
         .bg(rgb(ui.bg_panel))
         .text_size(px(tokens.metrics.ui_text_xs))
         .text_color(rgb(ui.text))
         .overflow_hidden()
         .flex()
         .flex_col()
+        .when_some(window_layer, |preview, background| {
+            preview.child(background)
+        })
         .child(
             div()
+                .relative()
                 .px(px(tokens.metrics.settings_theme_preview_padding))
                 .py(px(tokens.spacing.two))
                 .border_b_1()
@@ -259,6 +284,7 @@ pub fn settings_appearance_theme_preview(
         )
         .child(
             div()
+                .relative()
                 .flex()
                 .child(
                     div()
@@ -299,6 +325,9 @@ pub fn settings_appearance_theme_preview(
                                         ..Default::default()
                                     },
                                     show_label: false,
+                                    background: Some(rgb(tokens.ui.accent)),
+                                    text_color: Some(rgb(tokens.ui.accent_text)),
+                                    hover_background: Some(rgb(tokens.ui.accent_hover)),
                                     ..Default::default()
                                 },
                             )
@@ -333,6 +362,7 @@ pub fn settings_appearance_theme_preview(
                             |body| {
                                 body.child(
                                     oxideterm_gpui_ui::tabs::tabs_list(tokens)
+                                        .when(window_background, |tabs| tabs.bg(rgba(0x00000000)))
                                         .rounded_none()
                                         .border_b_1()
                                         .border_color(rgb(ui.border))
@@ -359,6 +389,8 @@ fn settings_application_theme_sample(
     tokens: &ThemeTokens,
     page: ThemePreviewPage,
     i18n: &I18n,
+    background: Option<AnyElement>,
+    window_background: bool,
 ) -> AnyElement {
     let (title, header, rows) = match page {
         ThemePreviewPage::Connections => (
@@ -383,6 +415,7 @@ fn settings_application_theme_sample(
         ThemePreviewPage::Terminal => unreachable!(),
     };
     div()
+        .relative()
         .id("theme-preview-application-sample")
         .debug_selector(move || match page {
             ThemePreviewPage::Connections => "theme-preview-connections-sample".into(),
@@ -396,18 +429,26 @@ fn settings_application_theme_sample(
         .rounded_br(px(oxideterm_gpui_ui::modal::rounded_shell_child_radius(
             tokens.radii.md,
         )))
-        .bg(rgb(tokens.ui.bg))
+        .bg(if window_background {
+            // The composed window layer already supplies the preview's readability tint.
+            rgba(0x00000000)
+        } else {
+            rgb(tokens.ui.bg)
+        })
         .flex()
         .flex_col()
         .gap(px(tokens.spacing.two))
+        .when_some(background, |sample, background| sample.child(background))
         .child(
             div()
+                .relative()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .child(i18n.t(title)),
         )
         .when_some(header, |sample, (left, right)| {
             sample.child(
                 div()
+                    .relative()
                     .flex()
                     .justify_between()
                     .gap(px(tokens.spacing.two))
@@ -421,6 +462,7 @@ fn settings_application_theme_sample(
         })
         .children(rows.into_iter().map(|(key, value)| {
             div()
+                .relative()
                 .flex()
                 .justify_between()
                 .gap(px(tokens.spacing.two))
@@ -475,11 +517,14 @@ fn settings_terminal_theme_sample(
     tokens: &ThemeTokens,
     settings: &PersistedSettings,
     i18n: &I18n,
+    background: Option<AnyElement>,
+    window_background: bool,
 ) -> AnyElement {
     // This is a static terminal sample, so it can live outside WorkspaceApp
     // without knowing anything about panes, sessions, or live terminal state.
     let terminal = tokens.terminal;
     div()
+        .relative()
         .id("theme-preview-terminal-sample")
         .debug_selector(|| "theme-preview-terminal-sample".into())
         .flex_1()
@@ -487,12 +532,19 @@ fn settings_terminal_theme_sample(
         .rounded_br(px(oxideterm_gpui_ui::modal::rounded_shell_child_radius(
             tokens.radii.md,
         )))
-        .bg(rgb(terminal.background))
+        .bg(if window_background {
+            // Live terminal panes let the window background provide its own readability tint.
+            rgba(0x00000000)
+        } else {
+            rgb(terminal.background)
+        })
         .p(px(tokens.metrics.settings_theme_preview_padding))
         .flex()
         .flex_col()
+        .when_some(background, |sample, background| sample.child(background))
         .child(
             div()
+                .relative()
                 .font_family(
                     settings
                         .terminal
@@ -585,25 +637,37 @@ pub fn settings_theme_editor_preview(
     terminal: TerminalTheme,
     ui: AppUiColors,
     mono_font_family: SharedString,
+    background: Option<AnyElement>,
+    background_scope: oxideterm_settings::BackgroundScope,
 ) -> AnyElement {
     // The editor preview renders candidate colors directly from the draft
     // palette; save/delete/cancel behavior remains in the app modal wrapper.
+    let window_background =
+        background.is_some() && background_scope == oxideterm_settings::BackgroundScope::Window;
     div()
+        .relative()
         // The scroll body may contain a much taller UI palette. Keep the
         // preview at its intrinsic height instead of letting flexbox collapse it.
         .flex_none()
         .rounded(px(tokens.radii.sm))
+        .clip_rounded()
         .border_1()
         .border_color(rgb(tokens.ui.border))
         .bg(rgb(terminal.background))
         .overflow_hidden()
         .flex()
         .flex_col()
+        .when_some(background, |preview, background| preview.child(background))
         .child(
             div()
+                .relative()
                 .px(px(12.0))
                 .py(px(6.0))
-                .bg(rgb(ui.bg_panel))
+                .bg(if window_background {
+                    rgba(0x00000000)
+                } else {
+                    rgb(ui.bg_panel)
+                })
                 .flex()
                 .flex_row()
                 .items_center()
@@ -630,6 +694,7 @@ pub fn settings_theme_editor_preview(
         )
         .child(
             div()
+                .relative()
                 .p(px(12.0))
                 .font_family(mono_font_family)
                 .text_size(px(tokens.metrics.ui_text_xs))
@@ -682,11 +747,16 @@ pub fn settings_theme_editor_preview(
         )
         .child(
             div()
+                .relative()
                 .px(px(12.0))
                 .py(px(6.0))
                 .border_t_1()
                 .border_color(rgb(ui.border))
-                .bg(rgb(ui.bg))
+                .bg(if window_background {
+                    rgba(0x00000000)
+                } else {
+                    rgb(ui.bg)
+                })
                 .flex()
                 .items_center()
                 .gap(px(8.0))
@@ -972,13 +1042,14 @@ pub fn settings_background_empty_hint(tokens: &ThemeTokens, label: String) -> An
 pub fn settings_background_thumbnail_frame(
     tokens: &ThemeTokens,
     image_path: &str,
+    image_source: gpui::ImageSource,
     active: bool,
     active_label: String,
+    format_label: String,
     image_fallback_icon: impl Fn() -> AnyElement + 'static,
 ) -> Div {
     // The frame owns crop, fallback, active border, and badge. Select/remove
     // mouse handlers are intentionally attached by the app after construction.
-    let image_source = std::path::PathBuf::from(image_path);
     let fallback_label = std::path::Path::new(image_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -989,6 +1060,10 @@ pub fn settings_background_thumbnail_frame(
     let fallback_bg = tokens.ui.bg_sunken;
     let thumbnail_radius = tokens.radii.md;
     let image = img(image_source)
+        // An absolute image uses the resolved aspect-ratio frame height instead
+        // of contributing its intrinsic height and losing its lower corners to overflow.
+        .absolute()
+        .inset_0()
         .w_full()
         .h_full()
         .object_fit(ObjectFit::Cover)
@@ -1034,13 +1109,29 @@ pub fn settings_background_thumbnail_frame(
         .cursor_pointer()
         // Keep the crop owned by the wrapper so the rounded border and image
         // match the browser BackgroundImageSection thumbnail.
-        .child(image);
+        .child(image)
+        .child(
+            oxideterm_gpui_ui::badge::status_pill(
+                tokens,
+                format_label,
+                oxideterm_gpui_ui::badge::StatusPillOptions::new(
+                    oxideterm_gpui_ui::badge::StatusTone::Neutral,
+                )
+                .compact(),
+            )
+            .absolute()
+            .top(px(6.0))
+            .left(px(6.0))
+            .rounded(px(tokens.radii.sm))
+            .bg(rgba((tokens.ui.bg_elevated << 8) | 0xe6))
+            .text_color(rgb(tokens.ui.text)),
+        );
     thumbnail.style().aspect_ratio = Some(BACKGROUND_THUMBNAIL_ASPECT_RATIO);
     thumbnail.when(active, |thumb| {
         thumb.child(
             div()
                 .absolute()
-                .top(px(8.0))
+                .bottom(px(8.0))
                 .left(px(8.0))
                 .rounded(px(tokens.radii.sm))
                 .bg(rgb(tokens.ui.accent))

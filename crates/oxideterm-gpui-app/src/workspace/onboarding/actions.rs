@@ -3,8 +3,113 @@ use oxideterm_connections::{
     list_ssh_config_hosts, resolve_ssh_config_alias, saved_connection_from_ssh_host,
 };
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::window_shell::WorkspaceWindowShell;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn onboarding_completion_waits_for_durable_settings_and_survives_restart(
+        cx: &mut TestAppContext,
+    ) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_ONBOARDING_SAVE_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // Workspace storage is process-wide; keep the real workspace in a portable child.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            std::fs::hard_link(&executable, &child).unwrap();
+            std::fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(PathBuf::from(fixture_dir)));
+        let mut store = SettingsStore::load_from_path(&settings_path).unwrap();
+        store.settings_mut().ssh_config.auto_load_hosts = false;
+        store.save().unwrap();
+        // A partial first launch can leave data before migration detection runs.
+        crate::migration_snapshot::ensure_pre_2_0_migration_snapshot(&settings_path).unwrap();
+        assert!(
+            crate::migration_snapshot::pre_2_0_migration_notice_pending(&settings_path).unwrap()
+        );
+        assert!(
+            VersionMigrationState::from_settings_path(&settings_path, true)
+                .unwrap()
+                .open
+        );
+        cx.executor().allow_parking();
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+            WorkspaceWindowShell::new(workspace, window, cx)
+        });
+        let workspace = shell.read_with(cx, |shell, _| shell.session_entity());
+        cx.run_until_parked();
+        workspace.read_with(cx, |this, _| {
+            assert!(this.onboarding.open);
+            assert!(!this.version_migration.open);
+        });
+        let unreadable = b"unreadable settings fixture";
+        std::fs::write(&settings_path, unreadable).unwrap();
+        let recovered = SettingsStore::load_from_path(&settings_path).unwrap();
+        let previous_settings = recovered.settings().clone();
+        workspace.update(cx, |this, cx| {
+            this.settings_store = recovered;
+            this.onboarding.disclaimer_accepted = true;
+            this.onboarding.step = ONBOARDING_TOTAL_STEPS - 1;
+            this.onboarding.ai_opt_in = true;
+            this.onboarding.tool_use_opt_in = true;
+            this.complete_onboarding(cx);
+            assert!(
+                this.onboarding.open,
+                "a failed save must keep onboarding open"
+            );
+            assert!(this.onboarding.save_failed);
+            assert_eq!(this.onboarding.step, ONBOARDING_TOTAL_STEPS - 1);
+            assert_eq!(this.settings_store.settings(), &previous_settings);
+        });
+        assert_eq!(std::fs::read(&settings_path).unwrap(), unreadable);
+        // Recover the isolated fixture and retry the same user choices.
+        std::fs::remove_file(&settings_path).unwrap();
+        let restored = SettingsStore::load_from_path(&settings_path).unwrap();
+        workspace.update(cx, |this, cx| {
+            this.settings_store = restored;
+            this.complete_onboarding(cx);
+            assert!(!this.onboarding.open);
+            assert!(!this.onboarding.save_failed);
+        });
+        let restarted = SettingsStore::load_from_path(&settings_path).unwrap();
+        assert!(restarted.settings().onboarding_completed);
+        assert!(restarted.settings().onboarding_disclaimer_accepted);
+        assert!(restarted.settings().ai.enabled);
+        assert!(restarted.settings().ai.enabled_confirmed);
+        assert!(restarted.settings().ai.tool_use.enabled);
+        assert!(!OnboardingState::from_settings(restarted.settings()).open);
+        assert!(
+            !crate::migration_snapshot::pre_2_0_migration_notice_pending(&settings_path).unwrap()
+        );
+    }
+}
+
 impl WorkspaceApp {
     pub(in crate::workspace) fn open_onboarding_from_palette(&mut self, cx: &mut Context<Self>) {
+        self.close_settings_select();
+        self.blur_text_inputs(cx);
+        self.finish_settings_slider_drag(cx);
         let disclaimer_accepted = self.onboarding.disclaimer_accepted
             || self
                 .settings_store
@@ -25,23 +130,40 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn complete_onboarding(&mut self, cx: &mut Context<Self>) {
-        let ai_opt_in = self.onboarding.ai_opt_in;
-        let tool_use_opt_in = self.onboarding.tool_use_opt_in;
-        self.edit_settings(
-            move |settings| {
-                settings.onboarding_completed = true;
-                settings.onboarding_disclaimer_accepted = true;
-                if ai_opt_in {
-                    settings.ai.enabled = true;
-                    settings.ai.enabled_confirmed = true;
-                }
-                if ai_opt_in && tool_use_opt_in {
-                    settings.ai.tool_use.enabled = true;
-                }
-            },
-            cx,
-        );
-        self.onboarding.open = false;
+        if !self.onboarding.disclaimer_accepted {
+            return;
+        }
+        let previous_settings = self.settings_store.settings().clone();
+        let mut next_settings = previous_settings.clone();
+        next_settings.onboarding_completed = true;
+        next_settings.onboarding_disclaimer_accepted = true;
+        if self.onboarding.ai_opt_in {
+            next_settings.ai.enabled = true;
+            next_settings.ai.enabled_confirmed = true;
+            if self.onboarding.tool_use_opt_in {
+                next_settings.ai.tool_use.enabled = true;
+            }
+        }
+        // Publish completion and runtime opt-ins only after the durable file swap succeeds.
+        match self.settings_store.replace_and_save(next_settings) {
+            Ok(saved) => {
+                self.apply_loaded_settings_to_runtime(&previous_settings, &saved.settings, cx);
+                self.settings_workspace.update(cx, |settings, _cx| {
+                    settings.acknowledge_external_store_state()
+                });
+                self.emit_native_plugin_settings_events(&previous_settings, &saved.settings, cx);
+                self.sync_tab_titles(cx);
+                self.onboarding.save_failed = false;
+                self.onboarding.open = false;
+                self.close_settings_select();
+                self.blur_text_inputs(cx);
+                self.finish_settings_slider_drag(cx);
+            }
+            Err(_) => {
+                // Settings errors may contain file content; expose only a localized save failure.
+                self.onboarding.save_failed = true;
+            }
+        }
         cx.notify();
     }
 
@@ -62,12 +184,24 @@ impl WorkspaceApp {
         step: usize,
         cx: &mut Context<Self>,
     ) {
-        if step >= ONBOARDING_TOTAL_STEPS || (!self.onboarding.disclaimer_accepted && step > 1) {
+        if step >= ONBOARDING_TOTAL_STEPS || (!self.onboarding.disclaimer_accepted && step > 0) {
             return;
         }
+        if step == self.onboarding.step {
+            return;
+        }
+        self.begin_user_segmented_control_transition_from(
+            ONBOARDING_STEPS_MOTION_ID,
+            self.onboarding.step,
+            step,
+            cx,
+        );
         self.onboarding.step = step;
+        self.close_settings_select();
+        self.blur_text_inputs(cx);
+        self.finish_settings_slider_drag(cx);
         self.onboarding.scroll_handle = ScrollHandle::new();
-        if OnboardingStep::from_index(step) == OnboardingStep::CliCompanion
+        if OnboardingStep::from_index(step) == OnboardingStep::Tools
             && self
                 .settings_workspace
                 .read(cx)
@@ -84,7 +218,7 @@ impl WorkspaceApp {
     }
 
     pub(in crate::workspace) fn onboarding_next(&mut self, cx: &mut Context<Self>) {
-        if self.onboarding.step == 1 && !self.onboarding.disclaimer_accepted {
+        if !self.onboarding.disclaimer_accepted {
             return;
         }
         if self.onboarding.step + 1 < ONBOARDING_TOTAL_STEPS {
@@ -120,11 +254,30 @@ impl WorkspaceApp {
         if !self.onboarding.open {
             return false;
         }
+        if self.open_settings_select.is_some() {
+            if !self.handle_appearance_theme_select_key(event, cx)
+                && event.keystroke.key == "escape"
+            {
+                self.close_settings_select();
+                cx.notify();
+            }
+            return true;
+        }
+        if self.focused_settings_input.is_some()
+            || self
+                .settings_workspace
+                .read(cx)
+                .settings_entity_focused_input()
+                .is_some()
+        {
+            self.handle_settings_input_key(event, cx);
+            return true;
+        }
         match event.keystroke.key.as_str() {
             "escape" => self.close_onboarding_if_allowed(cx),
             "enter" => self.onboarding_next(cx),
-            "arrowleft" => self.onboarding_back(cx),
-            "arrowright" => self.onboarding_next(cx),
+            "left" | "arrowleft" => self.onboarding_back(cx),
+            "right" | "arrowright" => self.onboarding_next(cx),
             _ => return false,
         }
         true

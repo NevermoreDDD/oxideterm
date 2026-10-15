@@ -885,10 +885,12 @@ pub struct FilterBoundary {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     /// The filter chain applied to the isolated group, in scene (device-pixel) space. Identity
-    /// filters are dropped at paint time, so a `FilterBoundary` is only emitted when non-empty.
+    /// filters are dropped at paint time; rounded clipping may still require isolation.
     /// Inline capacity 4 (same struct size as 1 here — see [`BackdropFilter::filters`]).
     pub filters: SmallVec<[ScaledFilter; 4]>,
     pub opacity: f32,
+    /// Clip the isolated group to its rounded bounds when compositing.
+    pub clip_rounded: bool,
     /// `true` for the start marker (opens the group), `false` for the end marker (closes it).
     pub is_start: bool,
 }
@@ -1079,9 +1081,12 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub opacity: f32,
+    pub rotation: u32,
+    pub sample_size: Size<crate::DevicePixels>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     pub texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
     pub texture_size: Size<crate::DevicePixels>,
 }
 
@@ -1327,6 +1332,7 @@ mod tests {
             corner_radii: Corners::default(),
             filters: smallvec::smallvec![ScaledFilter::Blur(sp(8.0))],
             opacity: 1.0,
+            clip_rounded: false,
             is_start,
         }
     }

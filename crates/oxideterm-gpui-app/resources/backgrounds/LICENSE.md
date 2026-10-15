@@ -26,3 +26,7 @@ marks as trademarks or to imply endorsement by the OxideTerm project.
 
 The `OxideTerm` word shown in `oxide-nocturne-v1.webp` identifies the project.
 This file does not incorporate a third-party logo or font file.
+
+Animated backgrounds are distributed separately through the marketplace's
+background material packs. Their artwork and generation tools live in the
+`oxideterm-plugins` repository, under `plugins/backgrounds`.

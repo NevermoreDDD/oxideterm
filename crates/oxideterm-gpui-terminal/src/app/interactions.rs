@@ -20,8 +20,8 @@ use zeroize::Zeroizing;
 use super::{
     FreeTypeDragAction, FreeTypeDragState, HorizontalScrollbarDrag, HorizontalScrollbarGeometry,
     PendingTerminalEditorClipboard, ScrollbarDrag, ScrollbarGeometry, SelectionHighlightCache,
-    SmoothScrollAnimation, TerminalContextMenu, TerminalKeybindings, TerminalPane,
-    TerminalPaneEvent, TerminalShortcut, TmuxSeparatorDirection, TmuxSeparatorDrag,
+    SmoothScrollAnimation, TerminalContextAction, TerminalContextMenu, TerminalKeybindings,
+    TerminalPane, TerminalPaneEvent, TerminalShortcut, TmuxSeparatorDirection, TmuxSeparatorDrag,
     command_mark_ui_available,
 };
 use crate::command_facts::TerminalAutosuggestInputState;
@@ -120,6 +120,16 @@ impl TerminalPane {
 
         if self.paste_editor.is_some() {
             return false;
+        }
+        if key == "enter"
+            && !modifiers.platform
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.shift
+            && self.can_reconnect_ssh()
+        {
+            self.request_context_action(TerminalContextAction::Reconnect, false, cx);
+            return true;
         }
         if self.pending_paste.is_some() && !modifiers.platform && !modifiers.control {
             match key {
@@ -437,6 +447,10 @@ impl TerminalPane {
     }
 
     pub fn handle_unfocused_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.paste_editor.is_some() {
+            // Unhandled editor characters must reach its platform input handler, not the PTY.
+            return false;
+        }
         if self.focused {
             // Focused printable input is committed by the platform input
             // handler after keydown; forwarding it here would duplicate text.

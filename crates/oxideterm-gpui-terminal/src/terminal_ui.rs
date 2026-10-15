@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use gpui::{
     Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Pixels, SharedString, TextRun,
@@ -115,6 +115,9 @@ pub struct TerminalUiPreferences {
     pub background: Option<TerminalBackgroundPreferences>,
     pub transparent_background: bool,
     pub processing_failed_message: String,
+    pub reconnect_label: String,
+    pub reconnect_hint: String,
+    pub reconnecting_label: String,
     pub paste_labels: TerminalPasteLabels,
     pub kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels,
     pub autosuggest_labels: TerminalAutosuggestLabels,
@@ -244,6 +247,9 @@ impl Default for TerminalUiPreferences {
             transparent_background: false,
             processing_failed_message:
                 "Terminal processing stopped. Reconnect this session to continue.".into(),
+            reconnect_label: String::new(),
+            reconnect_hint: String::new(),
+            reconnecting_label: String::new(),
             paste_labels: TerminalPasteLabels::default(),
             kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels::default(),
             autosuggest_labels: TerminalAutosuggestLabels::default(),
@@ -811,21 +817,9 @@ pub struct TerminalHighlightRuleSetOverride {
     pub rules: Arc<[TerminalHighlightRule]>,
 }
 
-#[derive(Clone, Debug)]
-pub struct TerminalBackgroundPreferences {
-    pub path: PathBuf,
-    pub opacity: f32,
-    pub blur: f32,
-    pub fit: TerminalBackgroundFit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum TerminalBackgroundFit {
-    Cover,
-    Contain,
-    Fill,
-    Tile,
-}
+pub use oxideterm_gpui_background::{
+    BackgroundFit as TerminalBackgroundFit, BackgroundPreferences as TerminalBackgroundPreferences,
+};
 
 #[derive(Clone)]
 pub(crate) struct TerminalUiSettings {

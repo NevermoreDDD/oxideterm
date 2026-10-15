@@ -8,6 +8,119 @@ use gpui::{
 mod ssh_peer;
 
 #[gpui::test]
+fn exited_ssh_pane_requests_reconnect_only_for_enter_and_resumes_in_place(cx: &mut TestAppContext) {
+    let mut peer = ssh_peer::SshPeer::new();
+    let config = SshSessionConfig::from(peer.config.take().unwrap())
+        .with_runtime(peer.runtime.clone())
+        .with_registry(
+            peer.registry.clone(),
+            oxideterm_ssh::ConnectionConsumer::Terminal("ui-reconnect".into()),
+        );
+    let (pane, cx) = cx.add_window_view(move |window, cx| {
+        TerminalPane::new_ssh_with_preferences(config, TerminalUiPreferences::default(), window, cx)
+            .unwrap()
+    });
+    let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    peer.runtime
+        .block_on(sender.data(channel, b"original output\r\n".to_vec()))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pane.read_with(cx, |pane, _| {
+        pane.terminal
+            .lock()
+            .buffer_text()
+            .contains("original output")
+    }) {
+        assert!(Instant::now() < deadline, "initial output missing");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let connection_id = pane.read_with(cx, |pane, _| {
+        pane.terminal
+            .lock()
+            .ssh_connection_handle()
+            .unwrap()
+            .connection_id()
+            .to_string()
+    });
+    peer.runtime.block_on(sender.close(channel)).unwrap();
+    while pane.read_with(cx, |pane, _| pane.lifecycle().is_running()) {
+        assert!(Instant::now() < deadline, "shell did not exit");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    pane.update(cx, |pane, cx| {
+        pane.tick(cx);
+        assert!(pane.can_reconnect_ssh());
+        pane.set_current_working_directory_from_terminal_action("/old-session".into(), cx);
+        for (key, expected) in [
+            ("shift-enter", None),
+            ("enter", Some(TerminalContextAction::Reconnect)),
+        ] {
+            pane.handle_key(
+                &gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                cx,
+            );
+            assert_eq!(pane.take_context_action_request(), expected, "{key}");
+        }
+        pane.set_ssh_reconnect_pending(true, cx);
+        pane.handle_key(
+            &gpui::KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("enter").unwrap(),
+                is_held: false,
+                prefer_character_input: false,
+            },
+            cx,
+        );
+        assert_eq!(pane.take_context_action_request(), None);
+        pane.reconnect_ssh(
+            SshSessionConfig::for_existing_connection(connection_id, "fixture", 22, "parser-test")
+                .with_runtime(peer.runtime.clone())
+                .with_registry(
+                    peer.registry.clone(),
+                    oxideterm_ssh::ConnectionConsumer::Terminal("ui-reconnect".into()),
+                ),
+            cx,
+        )
+        .unwrap();
+    });
+    let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    peer.runtime
+        .block_on(sender.data(channel, b"restored output\r\n".to_vec()))
+        .unwrap();
+    while !pane.read_with(cx, |pane, _| {
+        pane.terminal
+            .lock()
+            .buffer_text()
+            .contains("restored output")
+    }) {
+        assert!(Instant::now() < deadline, "restored output missing");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    pane.update(cx, |pane, cx| {
+        pane.tick(cx);
+        assert!(!pane.can_reconnect_ssh());
+        assert!(!pane.ssh_reconnect_pending());
+        assert_eq!(pane.current_working_directory(), None);
+        assert!(
+            pane.terminal
+                .lock()
+                .buffer_text()
+                .contains("original output")
+        );
+        assert!(pane.send_text("continued input", cx));
+    });
+    assert_eq!(
+        peer.input.recv_timeout(Duration::from_secs(5)).unwrap().0,
+        b"continued input"
+    );
+    pane.update(cx, |pane, _| pane.shutdown());
+    peer.stop();
+}
+
+#[gpui::test]
 fn confirmed_clipboard_paste_sends_one_bracketed_text_block(cx: &mut TestAppContext) {
     let mut peer = ssh_peer::SshPeer::new();
     let config =
@@ -282,8 +395,15 @@ fn ssh_worker_output_reaches_a_painted_pane_without_followup_output(cx: &mut Tes
     });
     let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(10)).unwrap();
     let started = Instant::now();
+    let (continue_output_tx, continue_output_rx) = tokio::sync::oneshot::channel();
     let producer = peer.runtime.spawn(async move {
-        for _ in 0..512 {
+        sender
+            .data(channel, "SSH output 中文 🦀\r\n".as_bytes().repeat(128))
+            .await
+            .unwrap();
+        // Hold the final output until the pane has accepted input on the real channel.
+        continue_output_rx.await.unwrap();
+        for _ in 1..512 {
             sender
                 .data(channel, "SSH output 中文 🦀\r\n".as_bytes().repeat(128))
                 .await
@@ -296,7 +416,7 @@ fn ssh_worker_output_reaches_a_painted_pane_without_followup_output(cx: &mut Tes
         Instant::now()
     });
     let activity = pane.read_with(cx, |pane, _| pane.terminal.lock().activity_receiver());
-    let mut sent_input = false;
+    let mut continue_output = Some(continue_output_tx);
     loop {
         // GPUI's deterministic test harness disables external wakes to its
         // local executor. Bridge the real backend signal into the normal tick.
@@ -309,12 +429,6 @@ fn ssh_worker_output_reaches_a_painted_pane_without_followup_output(cx: &mut Tes
             pane.update(cx, |pane, cx| pane.tick(cx));
         }
         cx.run_until_parked();
-        if !sent_input && started.elapsed() >= Duration::from_millis(10) {
-            pane.update(cx, |pane, cx| {
-                pane.send_command_sender_text_chunk("paint-input", cx);
-            });
-            sent_input = true;
-        }
         cx.draw(
             point(px(0.0), px(0.0)),
             size(
@@ -323,6 +437,19 @@ fn ssh_worker_output_reaches_a_painted_pane_without_followup_output(cx: &mut Tes
             ),
             |_, _| pane.clone().into_element(),
         );
+        if continue_output.is_some()
+            && pane.read_with(cx, |pane, _| {
+                pane.snapshot
+                    .lines
+                    .iter()
+                    .any(|row| row.text().starts_with("SSH output "))
+            })
+        {
+            pane.update(cx, |pane, cx| {
+                assert!(pane.send_command_sender_text_chunk("paint-input", cx));
+            });
+            continue_output.take().unwrap().send(()).unwrap();
+        }
         let visible = pane.read_with(cx, |pane, _| {
             pane.snapshot
                 .lines

@@ -36,6 +36,21 @@ pub enum ObjectFit {
 }
 
 impl ObjectFit {
+    /// Position the fitted image using fractions of the remaining space.
+    pub fn get_aligned_bounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        image_size: Size<DevicePixels>,
+        position: (f32, f32),
+    ) -> Bounds<Pixels> {
+        let mut image = self.get_bounds(bounds, image_size);
+        image.origin.x =
+            bounds.origin.x + (bounds.size.width - image.size.width) * position.0.clamp(0.0, 1.0);
+        image.origin.y =
+            bounds.origin.y + (bounds.size.height - image.size.height) * position.1.clamp(0.0, 1.0);
+        image
+    }
+
     /// Get the bounds of the image within the given bounds.
     pub fn get_bounds(
         &self,
@@ -289,6 +304,9 @@ pub struct Style {
 
     /// Filters applied to this element's own content and children (CSS `filter`).
     pub filter: Vec<Filter>,
+
+    /// Clip this element's painted subtree to its rounded border box.
+    pub clip_rounded: bool,
 
     /// Filters applied to the content rendered behind this element (CSS `backdrop-filter`).
     pub backdrop_filter: Vec<Filter>,
@@ -798,7 +816,7 @@ impl Style {
                         | BackgroundTag::PatternSlash
                         | BackgroundTag::Checkerboard => color.solid.into(),
 
-                        BackgroundTag::LinearGradient => color
+                        BackgroundTag::LinearGradient | BackgroundTag::ProceduralNoise => color
                             .colors
                             .first()
                             .map(|stop| stop.color.into())
@@ -836,12 +854,18 @@ impl Style {
             }
         };
 
-        if self.filter.is_empty() {
+        if self.filter.is_empty() && !self.clip_rounded {
             paint_box(window, cx);
         } else {
-            window.with_filter_layer(bounds, corner_radii, &self.filter, |window| {
-                paint_box(window, cx);
-            });
+            window.with_filtered_clip_layer(
+                bounds,
+                corner_radii,
+                &self.filter,
+                self.clip_rounded,
+                |window| {
+                    paint_box(window, cx);
+                },
+            );
         }
 
         #[cfg(debug_assertions)]
@@ -895,6 +919,7 @@ impl Default for Style {
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
             filter: Default::default(),
+            clip_rounded: false,
             backdrop_filter: Default::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,

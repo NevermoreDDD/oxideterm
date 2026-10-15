@@ -470,6 +470,21 @@ impl PluginWorkspaceEntity {
         }
     }
 
+    pub(in crate::workspace) fn remote_desktop_plugin_enabled(
+        &self,
+        protocol: oxideterm_remote_desktop::RemoteDesktopProtocol,
+    ) -> bool {
+        !self.compatibility_refresh_pending
+            && !self.release_shutdown_started
+            && self
+                .registry
+                .enabled_remote_desktop_plugin_ids(protocol)
+                .any(|id| {
+                    !self.remote_desktop_install_pending.contains(id)
+                        && !self.remote_desktop_removals.contains(id)
+                })
+    }
+
     pub(in crate::workspace) fn replace_registry(
         &mut self,
         mut registry: plugin_host::NativePluginRegistry,
@@ -1419,13 +1434,21 @@ impl PluginWorkspaceEntity {
         &mut self,
         settings_path: &std::path::Path,
         i18n: &I18n,
-        cx: &mut gpui::App,
-    ) -> bool {
+        cx: &mut App,
+    ) -> (bool, Vec<PathBuf>) {
         let mut bootstrap_runtime = false;
+        let mut imported_backgrounds = Vec::new();
         while let Some(delivery) = self.manager_deliveries.pop_front() {
+            if let plugin_manager::NativePluginManagerDelivery::Install {
+                outcome: plugin_manager::NativePluginInstallOutcome::Installed(result),
+                ..
+            } = &delivery
+            {
+                imported_backgrounds.extend_from_slice(&result.imported_backgrounds);
+            }
             bootstrap_runtime |= self.apply_manager_delivery(delivery, settings_path, i18n, cx);
         }
-        bootstrap_runtime
+        (bootstrap_runtime, imported_backgrounds)
     }
 
     fn apply_manager_delivery(
@@ -1433,7 +1456,7 @@ impl PluginWorkspaceEntity {
         delivery: plugin_manager::NativePluginManagerDelivery,
         settings_path: &std::path::Path,
         i18n: &I18n,
-        cx: &mut gpui::App,
+        cx: &mut App,
     ) -> bool {
         match delivery {
             plugin_manager::NativePluginManagerDelivery::CatalogHistories { expected, results } => {
@@ -2519,6 +2542,7 @@ mod tests {
 
     #[gpui::test]
     fn remote_desktop_updates_and_removal_gate_only_the_target_provider(cx: &mut TestAppContext) {
+        use oxideterm_remote_desktop::RemoteDesktopProtocol::{Rdp, Vnc};
         use sha2::Digest;
         let directory = tempfile::tempdir().unwrap();
         let settings = directory.path().join("settings.json");
@@ -2571,9 +2595,14 @@ mod tests {
             ["com.example.rdp"]
         );
         assert!(runtime.block_on(receiver).unwrap().is_err());
+        cx.read(|cx| {
+            assert!(entity.read(cx).remote_desktop_plugin_enabled(Rdp));
+            assert!(!entity.read(cx).remote_desktop_plugin_enabled(Vnc));
+        });
         entity.update(cx, |entity, cx| {
             entity.finish_managed_package_install(&settings, false, cx)
         });
+        cx.read(|cx| assert!(entity.read(cx).remote_desktop_plugin_enabled(Vnc)));
         assert_eq!(
             cx.read(|cx| entity
                 .read(cx)
@@ -2591,6 +2620,8 @@ mod tests {
             entity
                 .set_plugin_enabled("com.example.vnc", true, cx)
                 .unwrap();
+            assert!(entity.remote_desktop_plugin_enabled(Rdp));
+            assert!(!entity.remote_desktop_plugin_enabled(Vnc));
             assert_eq!(
                 entity
                     .remote_desktop_providers()
@@ -2767,7 +2798,11 @@ mod tests {
         entity.update(cx, |entity, _cx| {
             assert!(!entity.manager_operation_in_flight());
             let i18n = I18n::new(Locale::En);
-            assert!(!entity.apply_manager_deliveries(std::path::Path::new(""), &i18n, _cx));
+            assert!(
+                !entity
+                    .apply_manager_deliveries(std::path::Path::new(""), &i18n, _cx)
+                    .0
+            );
             assert!(entity.manager_deliveries.is_empty());
             assert!(matches!(
                 entity.manager_state().operation_status,
@@ -2784,11 +2819,11 @@ mod tests {
         cx.run_until_parked();
         entity.update(cx, |entity, _cx| {
             // Offline completion must release startup so cached compatible plugins can activate.
-            assert!(entity.apply_manager_deliveries(
-                std::path::Path::new(""),
-                &I18n::new(Locale::En),
-                _cx
-            ));
+            assert!(
+                entity
+                    .apply_manager_deliveries(std::path::Path::new(""), &I18n::new(Locale::En), _cx)
+                    .0
+            );
             assert!(!entity.compatibility_refresh_pending);
             assert!(!entity.manager_operation_in_flight());
             assert!(matches!(

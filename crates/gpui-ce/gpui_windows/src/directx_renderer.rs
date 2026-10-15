@@ -24,6 +24,9 @@ use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, Sh
 use crate::*;
 use gpui::*;
 
+#[cfg(test)]
+mod tests;
+
 /// The largest blur radius in a scene-space filter chain, in device pixels — used to size the
 /// blur kernel and the dilated region the blur passes are scissored to.
 ///
@@ -70,6 +73,7 @@ pub(crate) struct DirectXRenderer {
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
+    gpu_specs: OnceLock<GpuSpecs>,
 
     width: u32,
     height: u32,
@@ -177,6 +181,7 @@ impl BlurResources {
 }
 
 struct DirectXRenderPipelines {
+    surfaces: PipelineState<SurfaceParams>,
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
     path_rasterization_pipeline: PipelineState<PathRasterizationSprite>,
@@ -197,6 +202,16 @@ struct DirectXRenderPipelines {
     blur_params_buffer: ID3D11Buffer,
     blur_blend_replace: ID3D11BlendState,
     blur_blend_composite: ID3D11BlendState,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct SurfaceParams {
+    bounds: Bounds<ScaledPixels>,
+    content_mask: ContentMask<ScaledPixels>,
+    opacity: f32,
+    rotation: u32,
+    sample_size: [f32; 2],
 }
 
 struct DirectXGlobalElements {
@@ -296,6 +311,7 @@ impl DirectXRenderer {
             pipelines,
             direct_composition,
             font_info: Self::get_font_info(),
+            gpu_specs: OnceLock::new(),
             width: 1,
             height: 1,
             skip_draws: false,
@@ -390,6 +406,7 @@ impl DirectXRenderer {
 
             self.direct_composition.take();
             self.devices.take();
+            self.gpu_specs.take();
         }
 
         let devices = DirectXRendererDevices::new(directx_devices, disable_direct_composition)
@@ -444,6 +461,7 @@ impl DirectXRenderer {
             return Ok(());
         }
         self.render(scene, background_appearance)?;
+        self.atlas.finish_gpu_submissions();
         self.present()
     }
 
@@ -596,7 +614,7 @@ impl DirectXRenderer {
                                 corner_radii_array(boundary.corner_radii),
                                 max_blur_radius(&boundary.filters),
                                 boundary.opacity,
-                                false,
+                                boundary.clip_rounded,
                             )
                         } else {
                             Ok(())
@@ -1056,7 +1074,45 @@ impl DirectXRenderer {
         if surfaces.is_empty() {
             return Ok(());
         }
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let params: Vec<_> = surfaces
+            .iter()
+            .map(|surface| SurfaceParams {
+                bounds: surface.bounds,
+                content_mask: surface.content_mask,
+                opacity: surface.opacity,
+                rotation: surface.rotation,
+                sample_size: [
+                    surface.sample_size.width.0 as f32,
+                    surface.sample_size.height.0 as f32,
+                ],
+            })
+            .collect();
+        self.pipelines
+            .surfaces
+            .update_buffer(&devices.device, &devices.device_context, &params)?;
+        for (index, surface) in surfaces.iter().enumerate() {
+            let view = surface
+                .texture
+                .downcast_ref::<ID3D11ShaderResourceView>()
+                .context("invalid native DirectX surface")?;
+            self.pipelines.surfaces.draw_range_with_texture(
+                &devices.device_context,
+                &[Some(view.clone())],
+                self.globals
+                    .batch_params_buffer
+                    .as_ref()
+                    .context("batch params missing")?,
+                slice::from_ref(&self.globals.sampler),
+                index as u32,
+                1,
+            )?;
+        }
         Ok(())
+    }
+
+    pub(crate) fn video_device(&self) -> Option<ID3D11Device> {
+        self.devices.as_ref().map(|devices| devices.device.clone())
     }
 
     /// Run a single blur pass: a full-screen (or composite) draw sampling `source_srv` into
@@ -1126,9 +1182,6 @@ impl DirectXRenderer {
     ) -> Result<()> {
         // Sigma is halved because the blur runs at half resolution.
         let sigma = (blur_radius * 0.5).max(0.0);
-        if sigma <= 0.0 {
-            return Ok(());
-        }
         // Span ±3σ. If that needs more than 32 taps, spread the taps apart (tap_step > 1) rather
         // than truncating the kernel — keeps very large radii from clipping. Matches wgpu.
         let ideal_taps = (3.0 * sigma).ceil();
@@ -1161,71 +1214,75 @@ impl DirectXRenderer {
             )
         };
 
-        // Downsample source -> ping, then separable gaussian ping -> pong -> ping.
-        self.dx_blur_pass(
-            &self.pipelines.blur_downsample_vertex,
-            &self.pipelines.blur_downsample_fragment,
-            &self.pipelines.blur_blend_replace,
-            &ping_rtv,
-            source_srv,
-            BlurParams {
-                downsample: 1.0,
-                ..Default::default()
-            },
-            &half_vp,
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-            3,
-            true,
-        )?;
-        self.dx_blur_pass(
-            &self.pipelines.blur_vertex,
-            &self.pipelines.blur_fragment,
-            &self.pipelines.blur_blend_replace,
-            &pong_rtv,
-            &ping_srv,
-            BlurParams {
-                direction: [1.0 / half_w as f32, 0.0],
-                sigma,
-                tap_count,
-                tap_step,
-                ..Default::default()
-            },
-            &half_vp,
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-            3,
-            true,
-        )?;
-        self.dx_blur_pass(
-            &self.pipelines.blur_vertex,
-            &self.pipelines.blur_fragment,
-            &self.pipelines.blur_blend_replace,
-            &ping_rtv,
-            &pong_srv,
-            BlurParams {
-                direction: [0.0, 1.0 / half_h as f32],
-                sigma,
-                tap_count,
-                tap_step,
-                ..Default::default()
-            },
-            &half_vp,
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-            3,
-            true,
-        )?;
-        // Composite the blurred result into the target (preserving its contents).
+        // A clip-only layer samples the original texture without downsampling or blur.
+        if sigma > 0.0 {
+            // Downsample source -> ping, then separable gaussian ping -> pong -> ping.
+            self.dx_blur_pass(
+                &self.pipelines.blur_downsample_vertex,
+                &self.pipelines.blur_downsample_fragment,
+                &self.pipelines.blur_blend_replace,
+                &ping_rtv,
+                source_srv,
+                BlurParams {
+                    downsample: 1.0,
+                    ..Default::default()
+                },
+                &half_vp,
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                3,
+                true,
+            )?;
+            self.dx_blur_pass(
+                &self.pipelines.blur_vertex,
+                &self.pipelines.blur_fragment,
+                &self.pipelines.blur_blend_replace,
+                &pong_rtv,
+                &ping_srv,
+                BlurParams {
+                    direction: [1.0 / half_w as f32, 0.0],
+                    sigma,
+                    tap_count,
+                    tap_step,
+                    ..Default::default()
+                },
+                &half_vp,
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                3,
+                true,
+            )?;
+            self.dx_blur_pass(
+                &self.pipelines.blur_vertex,
+                &self.pipelines.blur_fragment,
+                &self.pipelines.blur_blend_replace,
+                &ping_rtv,
+                &pong_srv,
+                BlurParams {
+                    direction: [0.0, 1.0 / half_h as f32],
+                    sigma,
+                    tap_count,
+                    tap_step,
+                    ..Default::default()
+                },
+                &half_vp,
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+                3,
+                true,
+            )?;
+        }
+        // Composite the result into the target (preserving its contents).
         self.dx_blur_pass(
             &self.pipelines.blur_composite_vertex,
             &self.pipelines.blur_composite_fragment,
             &self.pipelines.blur_blend_composite,
             target_rtv,
-            &ping_srv,
+            if sigma > 0.0 { &ping_srv } else { source_srv },
             BlurParams {
                 bounds: composite_bounds,
                 content_mask,
                 corner_radii,
                 opacity,
                 clip_rounded: if clip_rounded { 1.0 } else { 0.0 },
+                downsample: if sigma > 0.0 { 1.0 } else { 0.0 },
                 ..Default::default()
             },
             &full_vp,
@@ -1271,6 +1328,11 @@ impl DirectXRenderer {
     }
 
     pub(crate) fn gpu_specs(&self) -> Result<GpuSpecs> {
+        // Video surfaces inspect hardware support each frame. Vendor driver
+        // discovery can enumerate displays and must only run once per device.
+        if let Some(specs) = self.gpu_specs.get() {
+            return Ok(specs.clone());
+        }
         let devices = self.devices.as_ref().context("devices missing")?;
         let desc = unsafe { devices.adapter.GetDesc1() }?;
         let is_software_emulated = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
@@ -1292,13 +1354,14 @@ impl DirectXRenderer {
         .context("Failed to get gpu driver info")
         .log_err()
         .unwrap_or("Unknown Driver".to_string());
-        Ok(GpuSpecs {
+        let specs = GpuSpecs {
             is_software_emulated,
             is_virtual_gpu: is_known_virtual_gpu_vendor(desc.VendorId),
             device_name,
             driver_name,
             driver_info: driver_version,
-        })
+        };
+        Ok(self.gpu_specs.get_or_init(|| specs).clone())
     }
 
     pub(crate) fn get_font_info() -> &'static FontInfo {
@@ -1451,6 +1514,13 @@ impl DirectXRenderPipelines {
             16,
             create_blend_state(device)?,
         )?;
+        let surfaces = PipelineState::new(
+            device,
+            "native_video_surfaces",
+            ShaderModule::Surface,
+            4,
+            create_blend_state(device)?,
+        )?;
 
         let blur_downsample_vertex = create_vertex_shader(
             device,
@@ -1492,6 +1562,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            surfaces,
             blur_downsample_vertex,
             blur_downsample_fragment,
             blur_vertex,
@@ -2312,7 +2383,7 @@ pub(crate) mod shader_resources {
     #[cfg(debug_assertions)]
     use windows::{
         Win32::Graphics::Direct3D::{
-            Fxc::{D3DCOMPILE_DEBUG, D3DCOMPILE_SKIP_OPTIMIZATION, D3DCompileFromFile},
+            Fxc::{D3DCOMPILE_DEBUG, D3DCOMPILE_OPTIMIZATION_LEVEL3, D3DCompileFromFile},
             ID3DBlob,
         },
         core::{HSTRING, PCSTR},
@@ -2320,6 +2391,7 @@ pub(crate) mod shader_resources {
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderModule {
+        Surface,
         Quad,
         Shadow,
         Underline,
@@ -2373,6 +2445,10 @@ pub(crate) mod shader_resources {
         #[cfg(not(debug_assertions))]
         fn from_bytes(module: ShaderModule, target: ShaderTarget) -> Self {
             let bytes = match module {
+                ShaderModule::Surface => match target {
+                    ShaderTarget::Vertex => SURFACE_VERTEX_BYTES,
+                    ShaderTarget::Fragment => SURFACE_FRAGMENT_BYTES,
+                },
                 ShaderModule::Quad => match target {
                     ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                     ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
@@ -2472,7 +2548,9 @@ pub(crate) mod shader_resources {
                 include_handler,
                 entry_point,
                 target_cstr,
-                D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION,
+                // Keep source debug information without running every UI pixel through
+                // unoptimized rounded-border, shadow, and blur shader arithmetic.
+                D3DCOMPILE_DEBUG | D3DCOMPILE_OPTIMIZATION_LEVEL3,
                 0,
                 &mut compile_blob,
                 Some(&mut error_blob),
@@ -2495,10 +2573,20 @@ pub(crate) mod shader_resources {
     #[cfg(not(debug_assertions))]
     include!(concat!(env!("OUT_DIR"), "/shaders_bytes.rs"));
 
+    #[cfg(all(test, debug_assertions))]
+    #[test]
+    fn native_surface_shaders_compile_for_d3d11() {
+        for target in [ShaderTarget::Vertex, ShaderTarget::Fragment] {
+            build_shader_blob(ShaderModule::Surface, target)
+                .expect("native surface shader must compile for shader model 4.1");
+        }
+    }
+
     #[cfg(debug_assertions)]
     impl ShaderModule {
         pub fn as_str(self) -> &'static str {
             match self {
+                ShaderModule::Surface => "surface",
                 ShaderModule::Quad => "quad",
                 ShaderModule::Shadow => "shadow",
                 ShaderModule::Underline => "underline",
