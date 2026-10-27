@@ -3,6 +3,114 @@
 Stable releases are listed newest first. The release workflow uses each versioned
 section as the detailed changelog attached to the corresponding GitHub Release.
 
+## 2.2.7
+
+### 中文
+
+这是 NevermoreDDD 维护的 OxideTerm 社区 fork 版本，包含官方上游至 2.2.6 及其后续修复，并整理了 fork 自 `v2.0.29` 以来的更新。
+
+#### 🗂️ fork 工作区与便携版
+
+- 自动保存标签、分屏比例、活动页面、独立窗口位置和连接身份，重新打开时恢复布局并通过现有连接配置重连；工作区快照不保存密码或终端输出。
+- Windows 便携包预装选定的语言、主机工具和远程桌面插件，解压后可直接使用。
+- fork 当前提供稳定更新源；以前选择 Beta 的用户会使用 fork 的稳定更新源，不再请求不存在的 Beta 清单。
+
+#### 🪟 官方上游：工作区与终端
+
+- 一个标签可组合最多四个本地或远程终端及工具页面，并整体移动到独立窗口；启动焦点、窗口关闭和隐藏恢复行为得到修复。（PR [#721](https://github.com/AnalyseDeCircuit/oxideterm/pull/721)）
+- 活动 SSH 会话可按主机和用户分组；已保存的本地终端可按配置管理、重新打开和定位。（PR [#727](https://github.com/AnalyseDeCircuit/oxideterm/pull/727)、[#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)、[#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649)）
+- 终端、远程 IDE 和 SFTP 编辑器统一搜索，支持正则、多行和替换；命令面板优先展示名称相关的搜索结果。（PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)、[#722](https://github.com/AnalyseDeCircuit/oxideterm/pull/722)）
+- 远程 IDE 可通过 SFTP、纯 Shell 或按需代理访问文件，也可从当前终端环境打开；新增笔记工作区和来源预览。（PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)、[#585](https://github.com/AnalyseDeCircuit/oxideterm/pull/585)）
+- 新增可选命令输出折叠、终端命令历史、快捷命令分组筛选与颜色、编辑后粘贴及 Shell 集成修复。
+- 修复 Windows PTY 输出与控制台按键、终端字形和输入法、滚动与粘贴，以及终端行时间戳问题。（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)、[#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648)、[#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651)、[#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655)）
+
+#### 🔌 官方上游：连接、安全与同步
+
+- SSH 主机工具兼容仅支持 Shell 或 PTY 的服务器；支持独立 SSH 隧道，改进认证恢复、重连和临时节点清理。（PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701)、[#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647)、[#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682)、[#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685)）
+- 提权凭据支持按主机匹配、可选自动填入及密码与 TOTP 分阶段认证；修复凭据元数据、保存错误和历史清理问题。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)、[#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703)、[#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706)、[#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709)、[#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)）
+- 新增可复用 TOTP 凭据、FIDO 安全密钥认证、操作审计和可选的本地加密终端录制；网络请求使用操作系统证书信任库。（PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）
+- 改进云同步合并与恢复，并修复阿里云 OSS 虚拟主机地址；保存的端口转发规则可在断线时管理。（PR [#725](https://github.com/AnalyseDeCircuit/oxideterm/pull/725)）
+
+#### 🎨 官方上游：插件、外观与平台
+
+- 插件市场支持独立更新、语言插件、远程连接和持续更新的插件工作台；原生进程插件仍需确认本机代码权限。
+- AI 对话支持图片输入和工具图片，新增联网工具配置；应用和终端主题可分别选择，并支持浅色、深色及背景效果。（PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650)）
+- Linux 新增 Nix 包和 NixOS 集成，完善开发环境运行库和构建检查。（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)、[#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)、[#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688)）
+
+#### 👥 贡献者
+
+感谢参与上述上游更新的外部贡献者：
+
+- @sgnay：Nix 打包和维护（PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623)、[#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)）。
+- @dzzzc：本地会话管理和 Windows PTY 输出（PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)）。
+- @stabey：认证、本地配置、主题、终端输入和 Windows 控制台（PR [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647)、[#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648)、[#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649)、[#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650)、[#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651)）。
+- @m00nLi：时间戳、重连、凭据和历史清理修复（PR [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655)、[#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682)、[#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685)、[#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703)、[#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706)、[#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709)、[#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)）。
+- @sincerely-hello-world：Nix 开发环境运行库（PR [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688)）。
+- @BilityLeu：SSH 主机工具、远程 IDE、搜索和工作区焦点（PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701)、[#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)、[#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)、[#721](https://github.com/AnalyseDeCircuit/oxideterm/pull/721)、[#722](https://github.com/AnalyseDeCircuit/oxideterm/pull/722)）。
+- @idxdy：提权认证、系统证书和会话分组（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)、[#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)、[#727](https://github.com/AnalyseDeCircuit/oxideterm/pull/727)）。
+- @livy：阿里云 OSS 同步修复（PR [#725](https://github.com/AnalyseDeCircuit/oxideterm/pull/725)）。
+
+#### 📌 使用与升级说明
+
+- Windows 便携包未使用 Windows 代码签名证书，首次运行可能出现 SmartScreen 提示。
+- 若曾用 2.2.5 安装远程 Shell 集成，升级后请对受影响主机执行集成更新或修复，再打开新终端。
+- 终端转 IDE 前请返回空闲的 Shell 提示符；纯 Shell 文件访问需要 Linux 和 GNU find、stat、grep、coreutils。RDP 显示器布局改进需要 RDP 插件 0.2.0。
+- 审计及终端输出录制需主动开启；导出受保护详情会生成明文文件。Nix 安装请通过 Nix 更新。
+- 完整更新范围：[v2.0.29…v2.2.7](https://github.com/NevermoreDDD/oxideterm/compare/v2.0.29...v2.2.7)。
+
+### English
+
+This is the community fork of OxideTerm maintained by NevermoreDDD. It includes official upstream changes through 2.2.6 and subsequent fixes, together with fork changes since `v2.0.29`.
+
+#### 🗂️ Fork workspace and portable builds
+
+- Automatically saves tabs, split ratios, active pages, detached-window placement, and connection identities. Reopening restores the layout and reconnects using existing connection settings; snapshots do not contain passwords or terminal output.
+- Windows portable archives bundle selected language, host-tool, and remote-desktop plugins for use after extraction.
+- The fork currently provides a stable update feed. Existing Beta selections use the fork's stable feed instead of requesting an unavailable Beta manifest.
+
+#### 🪟 Official upstream: workspace and terminal
+
+- A tab can combine up to four local or remote terminals and tool pages, then move as a unit to a detached window. Startup focus, window closing, and hide/restore behavior were fixed. (PR [#721](https://github.com/AnalyseDeCircuit/oxideterm/pull/721))
+- Active SSH sessions can be grouped by host and user. Saved local terminals can be managed, reopened, and focused by profile. (PR [#727](https://github.com/AnalyseDeCircuit/oxideterm/pull/727), [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631), [#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649))
+- Terminal, remote IDE, and SFTP editor search now share regular-expression, multiline, and replacement controls. The command palette prioritizes relevant name matches. (PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719), [#722](https://github.com/AnalyseDeCircuit/oxideterm/pull/722))
+- The remote IDE can access files through SFTP, a pure shell, or an on-demand agent, and can open in the current terminal environment. A notes workspace and source preview were added. (PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716), [#585](https://github.com/AnalyseDeCircuit/oxideterm/pull/585))
+- Added optional command-output folding, terminal command history, quick-command group filters and colors, paste editing, and shell-integration fixes.
+- Fixed Windows PTY output and console keys, terminal glyph and input-method behavior, scrolling and paste, and terminal row timestamps. (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631), [#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648), [#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651), [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655))
+
+#### 🔌 Official upstream: connections, security, and synchronization
+
+- SSH host tools support shell-only and PTY-only servers. Standalone SSH tunnels were added, and authentication restoration, reconnect, and temporary-node cleanup were improved. (PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701), [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647), [#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682), [#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685))
+- Privilege credentials support host matching, optional automatic filling, and separate password and TOTP stages. Credential metadata, save errors, and history cleanup were fixed. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708), [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703), [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706), [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709), [#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712))
+- Added reusable TOTP credentials, FIDO security-key authentication, operation auditing, and optional locally encrypted terminal recordings. Network requests use the operating system certificate trust store. (PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718))
+- Improved cloud-sync merging and recovery and fixed Alibaba Cloud OSS virtual-host endpoints. Saved forwarding rules can be managed while disconnected. (PR [#725](https://github.com/AnalyseDeCircuit/oxideterm/pull/725))
+
+#### 🎨 Official upstream: plugins, appearance, and platforms
+
+- The plugin marketplace supports independent updates, language plugins, remote connections, and live plugin workbenches. Native-process plugins still require confirmation to run local code.
+- AI conversations support image input and tool images, with new web-tool configuration. Application and terminal themes can be selected independently, with light, dark, and background effects. (PR [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650))
+- Added Linux Nix packages and NixOS integration, with improved development runtime libraries and build checks. (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623), [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632), [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688))
+
+#### 👥 Contributors
+
+Thank you to the external contributors to these upstream changes:
+
+- @sgnay: Nix packaging and maintenance (PR [#623](https://github.com/AnalyseDeCircuit/oxideterm/pull/623), [#632](https://github.com/AnalyseDeCircuit/oxideterm/pull/632)).
+- @dzzzc: local-session management and Windows PTY output (PR [#631](https://github.com/AnalyseDeCircuit/oxideterm/pull/631)).
+- @stabey: authentication, local profiles, themes, terminal input, and Windows console fixes (PR [#647](https://github.com/AnalyseDeCircuit/oxideterm/pull/647), [#648](https://github.com/AnalyseDeCircuit/oxideterm/pull/648), [#649](https://github.com/AnalyseDeCircuit/oxideterm/pull/649), [#650](https://github.com/AnalyseDeCircuit/oxideterm/pull/650), [#651](https://github.com/AnalyseDeCircuit/oxideterm/pull/651)).
+- @m00nLi: timestamp, reconnect, credential, and history-cleanup fixes (PR [#655](https://github.com/AnalyseDeCircuit/oxideterm/pull/655), [#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682), [#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685), [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703), [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706), [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709), [#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)).
+- @sincerely-hello-world: Nix development runtime libraries (PR [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688)).
+- @BilityLeu: SSH host tools, remote IDE, search, and workspace focus (PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701), [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716), [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719), [#721](https://github.com/AnalyseDeCircuit/oxideterm/pull/721), [#722](https://github.com/AnalyseDeCircuit/oxideterm/pull/722)).
+- @idxdy: privilege authentication, system certificates, and session grouping (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708), [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718), [#727](https://github.com/AnalyseDeCircuit/oxideterm/pull/727)).
+- @livy: Alibaba Cloud OSS synchronization fix (PR [#725](https://github.com/AnalyseDeCircuit/oxideterm/pull/725)).
+
+#### 📌 Usage and upgrade notes
+
+- Windows portable archives do not use a Windows code-signing certificate and may trigger SmartScreen on first launch.
+- If remote shell integration was installed with 2.2.5, update or repair it on affected hosts after upgrading, then open a new terminal.
+- Return to an idle shell prompt before converting a terminal to the IDE. Pure-shell file access requires Linux and GNU find, stat, grep, and coreutils. RDP display-layout improvements require RDP plugin 0.2.0.
+- Auditing and terminal-output recording must be enabled explicitly; exporting protected details creates a plaintext file. Update Nix installations through Nix.
+- Full change range: [v2.0.29…v2.2.7](https://github.com/NevermoreDDD/oxideterm/compare/v2.0.29...v2.2.7).
+
 ## 2.2.6
 
 ### 中文
