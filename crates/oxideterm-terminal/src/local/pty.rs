@@ -13,6 +13,7 @@ pub struct LocalPtySession {
     title: Option<String>,
     lifecycle: TerminalLifecycle,
     process: ProcessState,
+    launch_shell: crate::ShellInfo,
     _shell_integration: Option<LocalShellIntegration>,
     shell_integration_launch_state: TerminalCwdIntegrationLaunchState,
     #[cfg(windows)]
@@ -114,7 +115,7 @@ impl LocalPtySession {
         {
             anyhow::bail!("local terminal startup directory is unavailable");
         }
-        if shell.path.is_absolute() && !shell.path.is_file() {
+        if shell.path.is_absolute() && !crate::is_shell_executable(&shell.path) {
             anyhow::bail!("local terminal shell executable is unavailable");
         }
 
@@ -232,6 +233,7 @@ impl LocalPtySession {
             title: None,
             lifecycle: TerminalLifecycle::Running,
             process,
+            launch_shell: shell,
             _shell_integration: launch.integration,
             shell_integration_launch_state: launch.integration_state,
             #[cfg(windows)]
@@ -488,6 +490,10 @@ impl LocalPtySession {
 
     pub fn process_info(&self) -> TerminalProcessInfo {
         self.process.info.clone()
+    }
+
+    pub fn launch_shell(&self) -> &crate::ShellInfo {
+        &self.launch_shell
     }
 
     pub fn shell_integration_launch_state(&self) -> TerminalCwdIntegrationLaunchState {
@@ -1282,16 +1288,15 @@ fn snapshot_row_source<T: EventListener>(
     }
 
     let terminal_row = &term.grid()[Line(grid_line)];
-    let terminal_cells = &terminal_row[..];
     let default_cell = AlacrittyCell::default();
-    let populated_cols = terminal_cells
+    let populated_cols = terminal_row
         .iter()
         .take(size.cols)
         .rposition(|cell| cell != &default_cell)
         .map_or(0, |column| column + 1);
-    let visible_cells = &terminal_cells[..populated_cols];
-    let wrapped = visible_cells
+    let wrapped = terminal_row
         .iter()
+        .take(populated_cols)
         .any(|cell| cell.flags.contains(Flags::WRAPLINE));
 
     Some(SnapshotRowSource {
@@ -1312,14 +1317,13 @@ fn snapshot_row_from_source<T: EventListener>(
 ) -> TerminalRow {
     let grid_line = row as i32 - display_offset as i32;
     let terminal_row = &term.grid()[Line(grid_line)];
-    let terminal_cells = &terminal_row[..];
     let overrides = term.colors();
     let mut cells = Vec::with_capacity(size.cols);
     let mut recent_styles = [None, None];
     let mut next_style_slot = 0;
     let mut previous_extra = None;
     // Default trailing cells have fixed paint data, so skip color and metadata conversion.
-    for cell in &terminal_cells[..source.populated_cols] {
+    for cell in terminal_row.iter().take(source.populated_cols) {
         let spacer = cell
             .flags
             .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
@@ -1537,7 +1541,7 @@ mod incremental_snapshot_tests {
         let mut parser = Processor::<StdSyncHandler>::new();
         parser.advance(&mut term, "\x1b[37;107mab─cd\x1b[2mef\x1b[7mgh\x1b[0mij\x1b[38;2;1;2;3mkl\x1b[38;5;196mmn\x1b[0m\r\n\x1b]8;;https://one.example\x1b\\ABe\u{301}C\x1b]8;;\x1b\\D\x1b]8;;https://two.example\x1b\\EF\x1b]8;;\x1b\\".as_bytes());
         let snapshot = snapshot_from_term(&term, size, &graphics, &TerminalPalette::default());
-        for (source, actual) in term.grid()[Line(0)][..]
+        for (source, actual) in term.grid()[Line(0)]
             .iter()
             .take(16)
             .zip(snapshot.lines[0].cells.iter())
@@ -1803,6 +1807,200 @@ mod incremental_snapshot_tests {
             &next,
             &snapshot_from_term(&term, size, &graphics, &TerminalPalette::default()),
         );
+    }
+
+    #[test]
+    fn search_source_always_matches_hard_breaks_in_literal_and_regex_queries() {
+        let size = TerminalSize {
+            cols: 8,
+            rows: 40,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let (listener, _events) = local_event_channel();
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &size,
+            listener,
+        )));
+        let mut parser = Processor::<StdSyncHandler>::new();
+        {
+            let mut term = term.lock();
+            // Place a wrapped line and a hard break across the search lock chunk boundary.
+            parser.advance(&mut *term, "\r\n".repeat(30).as_bytes());
+            parser.advance(&mut *term, b"123456Foo\r\nbar");
+        }
+        let source = TerminalSearchSource::new(term, size.cols);
+        let options = crate::TerminalSearchOptions {
+            case_sensitive: false,
+            regex: true,
+        };
+        let hits = source.search_matches_with_options(r"foo\nbar", options, &|| false);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit
+                    .ranges
+                    .iter()
+                    .map(|range| (range.line, range.start_col, range.end_col))
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            vec![vec![(30, 6, 8), (31, 0, 1), (32, 0, 3)]]
+        );
+        assert_eq!(source.search_matches("Foo\nbar", &|| false), hits);
+        assert_eq!(
+            source.search_matches_with_options(r"foo\nbar", options, &|| true),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn search_source_preserves_written_spaces_and_unicode_cell_widths() {
+        let size = TerminalSize {
+            cols: 12,
+            rows: 4,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let (listener, _events) = local_event_channel();
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &size,
+            listener,
+        )));
+        Processor::<StdSyncHandler>::new().advance(
+            &mut *term.lock(),
+            "a中文be\u{301}\r\nfoo \r\nbar".as_bytes(),
+        );
+        let source = TerminalSearchSource::new(term, size.cols);
+        for (query, expected) in [
+            ("中", vec![(0, 1, 3)]),
+            ("中文", vec![(0, 1, 5)]),
+            ("文b", vec![(0, 3, 6)]),
+            ("\u{301}", vec![(0, 6, 7)]),
+            ("foo ", vec![(1, 0, 4)]),
+            ("foo \nbar", vec![(1, 0, 4), (2, 0, 3)]),
+        ] {
+            for regex in [false, true] {
+                let hits = source.search_matches_with_options(
+                    query,
+                    crate::TerminalSearchOptions {
+                        regex,
+                        ..Default::default()
+                    },
+                    &|| false,
+                );
+                assert_eq!(
+                    hits.iter()
+                        .flat_map(|hit| hit.ranges.iter())
+                        .map(|range| (range.line, range.start_col, range.end_col))
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "query={query:?}, regex={regex}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_results_follow_surviving_rows_and_reject_overwritten_matches() {
+        let size = TerminalSize {
+            cols: 12,
+            rows: 3,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let (listener, _events) = local_event_channel();
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &size,
+            listener,
+        )));
+        let mut parser = Processor::<StdSyncHandler>::new();
+        parser.advance(&mut *term.lock(), b"hit one\r\nhit two\r\ntail");
+        let source = TerminalSearchSource::new(term.clone(), size.cols);
+        let query = crate::TerminalSearchQuery::new("hit", Default::default()).unwrap();
+        let result = source.search(&query, &|| false);
+        let cross_line =
+            crate::TerminalSearchQuery::new("hit one\nhit two", Default::default()).unwrap();
+        let cross_line_result = source.search(&cross_line, &|| false);
+        let anchored = crate::TerminalSearchQuery::new(
+            r"tail\z",
+            crate::TerminalSearchOptions {
+                regex: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let anchored_result = source.search(&anchored, &|| false);
+        parser.advance(&mut *term.lock(), b"\r\nextra\x1b[1;1Hchanged");
+        assert_eq!(
+            source
+                .resolve_search_result(result)
+                .iter()
+                .map(|hit| (hit.line, hit.start_col, hit.end_col))
+                .collect::<Vec<_>>(),
+            vec![(-1, 0, 3)]
+        );
+        assert_eq!(source.resolve_search_result(cross_line_result), vec![]);
+        assert_eq!(source.resolve_search_result(anchored_result), vec![]);
+        let rewritten = crate::TerminalSearchQuery::new("extra", Default::default()).unwrap();
+        let rewritten_result = source.search(&rewritten, &|| false);
+        parser.advance(
+            &mut *term.lock(),
+            b"\x1b[3;1H\x1b[2Kgone\r\nnext\r\nlast\r\nend",
+        );
+        assert_eq!(source.resolve_search_result(rewritten_result), vec![]);
+    }
+
+    #[test]
+    #[ignore = "manual search performance baseline"]
+    fn search_large_buffer_benchmark() {
+        let size = TerminalSize {
+            cols: 80,
+            rows: 24,
+            cell_width: 0,
+            cell_height: 0,
+        };
+        let (listener, _events) = local_event_channel();
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &size,
+            listener,
+        )));
+        let output = (0..10_000)
+            .map(|line| {
+                format!(
+                    "{}{}",
+                    if line == 500 || line == 9500 {
+                        "ERROR"
+                    } else {
+                        "TRACE"
+                    },
+                    "x".repeat(74)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        Processor::<StdSyncHandler>::new().advance(&mut *term.lock(), output.as_bytes());
+        let source = TerminalSearchSource::new(term, size.cols);
+        let started = std::time::Instant::now();
+        for _ in 0..5 {
+            let hits = source.search_matches_with_options(
+                "ERROR",
+                crate::TerminalSearchOptions {
+                    regex: true,
+                    ..Default::default()
+                },
+                &|| false,
+            );
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.line, hit.start_col, hit.end_col))
+                    .collect::<Vec<_>>(),
+                vec![(-9476, 0, 5), (-476, 0, 5)]
+            );
+        }
+        eprintln!("five searches: {:?}", started.elapsed());
     }
 
     #[test]

@@ -108,8 +108,10 @@ pub enum SettingsSelect {
     TerminalSessionLogFileMode,
     TerminalCursorStyle,
     RemoteShellIntegrationMode,
+    XmodemBlockSize,
     TerminalTriggerMatchMode,
     TerminalTriggerAction,
+    TerminalTriggerClickAction,
     TerminalTriggerProcessMode,
     TerminalTriggerQuickCommand,
     TerminalTriggerTiming,
@@ -117,7 +119,9 @@ pub enum SettingsSelect {
     IdeAgentMode,
     LocalShell,
     LocalShellSemanticScheme(usize),
-    LocalPrivilegeKind,
+    LocalPrivilegePromptType,
+    LocalPrivilegeResponseMode,
+    LocalPrivilegeTotpCredential,
     ConnectionIdleTimeout,
     ReconnectMaxAttempts,
     ReconnectBaseDelay,
@@ -127,6 +131,7 @@ pub enum SettingsSelect {
     NetworkProxyAuth,
     AiProviderTemplate,
     AiEmbeddingProvider,
+    AiWebSearchProvider,
     KnowledgeCollectionScope,
     KnowledgeDocumentFormat,
     AiMcpTransport,
@@ -189,6 +194,7 @@ pub enum SettingsInput {
     TerminalFontSize,
     TerminalFontWeight,
     TerminalScrollback,
+    CommandHistoryRetention,
     TerminalLineHeight,
     TerminalPaddingHorizontal,
     TerminalPaddingVertical,
@@ -204,7 +210,7 @@ pub enum SettingsInput {
     BackgroundEffectMaxFps,
     BackgroundEffectColor(usize),
     LocalDefaultCwd,
-    LocalGitBashPath,
+    LocalShellPath(usize),
     LocalOhMyPoshTheme,
     LocalPrivilegeLabel,
     LocalPrivilegeUsernameHint,
@@ -214,6 +220,9 @@ pub enum SettingsInput {
     TotpPattern,
     TotpPeriod,
     LocalPrivilegePromptPatterns,
+    LocalPrivilegeHostPatterns,
+    LocalPrivilegeSecondFactorPatterns,
+    LocalPrivilegeSecondFactorUserHint,
     ConnectionDefaultUsername,
     ConnectionDefaultPort,
     ConnectionImportTargetGroup,
@@ -244,6 +253,8 @@ pub enum SettingsInput {
     TerminalTriggerDescription,
     TerminalTriggerPattern,
     TerminalTriggerActionValue,
+    TerminalTriggerMenuLabel,
+    TerminalTriggerTooltipText,
     TerminalTriggerExecutable,
     TerminalTriggerArguments,
     TerminalTriggerWorkingDirectory,
@@ -251,6 +262,7 @@ pub enum SettingsInput {
     TerminalTriggerCooldownMs,
     TerminalTriggerConnectionSearch,
     KeybindingSearch,
+    SkillSearch,
     CustomThemeName,
     CustomThemeTerminalColor(usize),
     CustomThemeUiColor(usize),
@@ -582,12 +594,15 @@ impl SettingsInput {
             Self::TerminalCommandBarFocusHandoff
                 | Self::TerminalCommandSpecsJson
                 | Self::TerminalTriggerArguments
+                | Self::TerminalTriggerTooltipText
                 | Self::AiSystemPrompt
                 | Self::AiMemoryContent
                 | Self::AiAcpAgentArgs(_)
                 | Self::AiAcpAgentEnv(_)
                 | Self::AiMcpArgs
                 | Self::LocalPrivilegePromptPatterns
+                | Self::LocalPrivilegeHostPatterns
+                | Self::LocalPrivilegeSecondFactorPatterns
                 | Self::ManagedKeyPastePrivateKey
         )
     }
@@ -603,6 +618,8 @@ impl SettingsInput {
             | Self::AiAcpAgentEnv(_)
             | Self::AiMcpArgs
             | Self::LocalPrivilegePromptPatterns
+            | Self::LocalPrivilegeHostPatterns
+            | Self::LocalPrivilegeSecondFactorPatterns
             | Self::ManagedKeyPastePrivateKey => 20.0,
             _ => DEFAULT_SETTINGS_TEXTAREA_LINE_HEIGHT,
         }
@@ -616,6 +633,7 @@ impl SettingsInput {
             Self::TerminalFontSize => 1,
             Self::TerminalFontWeight => 21,
             Self::TerminalScrollback => 33_000,
+            Self::CommandHistoryRetention => 33_010,
             Self::TerminalLineHeight => 2,
             Self::TerminalPaddingHorizontal => 22,
             Self::TerminalPaddingVertical => 23,
@@ -631,7 +649,7 @@ impl SettingsInput {
             Self::BackgroundEffectMaxFps => 33_006,
             Self::BackgroundEffectColor(index) => 33_004 + index as u64,
             Self::LocalDefaultCwd => 6,
-            Self::LocalGitBashPath => 7,
+            Self::LocalShellPath(index) => 35_000 + index as u64,
             Self::LocalOhMyPoshTheme => 8,
             Self::LocalPrivilegeLabel => 31_000,
             Self::LocalPrivilegeUsernameHint => 31_001,
@@ -641,6 +659,9 @@ impl SettingsInput {
             Self::TotpPattern => 31_012,
             Self::TotpPeriod => 31_013,
             Self::LocalPrivilegePromptPatterns => 31_003,
+            Self::LocalPrivilegeHostPatterns => 31_004,
+            Self::LocalPrivilegeSecondFactorPatterns => 31_005,
+            Self::LocalPrivilegeSecondFactorUserHint => 31_006,
             Self::ConnectionDefaultUsername => 9,
             Self::ConnectionDefaultPort => 10,
             Self::ConnectionImportTargetGroup => 20,
@@ -671,6 +692,8 @@ impl SettingsInput {
             Self::TerminalTriggerDescription => 33_101,
             Self::TerminalTriggerPattern => 33_102,
             Self::TerminalTriggerActionValue => 33_103,
+            Self::TerminalTriggerMenuLabel => 33_110,
+            Self::TerminalTriggerTooltipText => 33_111,
             Self::TerminalTriggerExecutable => 33_104,
             Self::TerminalTriggerArguments => 33_105,
             Self::TerminalTriggerWorkingDirectory => 33_106,
@@ -678,6 +701,7 @@ impl SettingsInput {
             Self::TerminalTriggerCooldownMs => 33_108,
             Self::TerminalTriggerConnectionSearch => 33_109,
             Self::KeybindingSearch => 18,
+            Self::SkillSearch => 22_004,
             Self::CustomThemeName => 10_000,
             Self::CustomThemeTerminalColor(index) => 10_100 + index as u64,
             Self::CustomThemeUiColor(index) => 10_200 + index as u64,

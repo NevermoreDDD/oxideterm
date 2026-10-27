@@ -28,6 +28,7 @@ fn pending_terminal(
             TelnetSessionConfig {
                 host: "127.0.0.1".into(),
                 port: 0,
+                line_endings: Default::default(),
             },
             oxideterm_connections::SavedUpstreamProxyPolicy::Direct,
             None,

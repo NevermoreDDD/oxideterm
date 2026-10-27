@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "Tarefas em segundo plano: {{count}}",
+      "search": "Buscar tarefas em segundo plano…",
+      "transferring": "Transferindo",
+      "reconnecting": "Reconectando"
+    },
+    "tab_scope": {
+      "show_all": "Mostrar tudo",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "Mostrar todas as {{total}} abas desta janela.",
+      "filtered_tooltip": "Exibindo apenas as abas de “{{scope}}” ({{visible}}/{{total}}). As outras continuam abertas.",
+      "all": "Todas as abas",
+      "global": "Páginas globais",
+      "local": "Terminais locais",
+      "connection": "Conexão",
+      "empty": "Nenhuma aba neste escopo",
+      "search": "Buscar escopos de abas…",
+      "categories": "Categorias",
+      "connections": "Conexões",
+      "hint": "↑↓ Selecionar · Enter Aplicar · Esc Cancelar"
+    },
     "search": {
       "title": "Pesquisar sessões",
       "placeholder": "Pesquisar sessões…",
@@ -13,6 +35,7 @@
       "connected_first": "Conectadas primeiro"
     },
     "actions": {
+      "enter_zen": "Entrar no modo Zen",
       "expand": "Expandir barra lateral",
       "collapse": "Recolher barra lateral",
       "new_local_terminal": "Novo terminal local",
@@ -41,6 +64,7 @@
       "import_tooltip": "Importar de arquivo .oxide",
       "export_tooltip": "Exportar para arquivo .oxide",
       "host_tools": "Ferramentas do host",
+      "more_tools": "Mais ferramentas",
       "knowledge": "Base de conhecimento",
       "host_monitor": "Monitoramento",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "Pacotes"
     },
     "tooltips": {
+      "switch_to_light": "Mudar para o tema claro",
+      "switch_to_dark": "Mudar para o tema escuro",
       "settings": "Configurações",
       "ai_hint": "OxideSens",
       "switch_tree": "Visualização em árvore",
       "switch_focus": "Visualização em foco",
+      "switch_host": "Visualização por host",
       "new_connection": "Nova conexão",
       "lock_app": "Bloquear OxideTerm",
       "setup_app_lock": "Configurar bloqueio",

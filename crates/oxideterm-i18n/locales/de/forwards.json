@@ -1,4 +1,18 @@
 {
+  "ssh_tunnel": {
+    "description": "Ports über einen gespeicherten SSH-Host weiterleiten.",
+    "title": "SSH-Tunnel",
+    "name": "Tunnelname",
+    "group": "Gruppe",
+    "group_invalid": "Gruppenpfade dürfen keine leeren Abschnitte enthalten.",
+    "host": "SSH-Host",
+    "choose_host": "Gespeicherten SSH-Host auswählen",
+    "startup": "Beim Anwendungsstart verbinden",
+    "missing_host": "Der gespeicherte SSH-Host ist nicht verfügbar.",
+    "name_required": "Geben Sie einen Tunnelnamen ein. Name und Gruppe dürfen keine Zeilenumbrüche enthalten.",
+    "address_required": "Geben Sie gültige Bindungs- und Zieladressen ein.",
+    "save_failed": "Der SSH-Tunnel konnte nicht aktualisiert werden."
+  },
   "copy_address": "Adresse kopieren",
   "copied": "Kopiert!",
   "forwards": {
@@ -9,13 +23,13 @@
       "vscode": "VS Code (8080)"
     },
     "table": {
-      "title": "Aktive Weiterleitungen",
+      "title": "Portweiterleitungen",
       "type": "Typ",
       "local_address": "Lokale Adresse",
       "remote_address": "Remote-Adresse",
       "status": "Status",
       "actions": "Aktionen",
-      "no_forwards": "Keine aktiven Portweiterleitungen"
+      "no_forwards": "Keine Portweiterleitungsregeln"
     },
     "type": {
       "local": "lokal",
@@ -50,6 +64,7 @@
       "cancel": "Abbrechen",
       "type": "Typ",
       "create_forward": "Weiterleitung erstellen",
+      "save_and_start": "Speichern und starten",
       "creating": "Wird erstellt...",
       "save_changes": "Änderungen speichern",
       "saving": "Wird gespeichert...",
@@ -101,7 +116,7 @@
       "alreadyForwarded": "Weitergeleitet"
     },
     "messages": {
-      "node_not_ready": "Öffnen Sie ein aktives SSH-Terminal für diesen Knoten, bevor Sie Weiterleitungen verwalten.",
+      "node_not_ready": "Die SSH-Verbindung konnte nicht gestartet werden. Verbinden Sie diesen Server und versuchen Sie es erneut.",
       "connection_not_ready": "SSH-Verbindung ist noch nicht bereit.",
       "created": "Weiterleitung erstellt",
       "updated": "Weiterleitung aktualisiert",

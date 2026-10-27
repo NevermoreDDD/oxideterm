@@ -54,7 +54,7 @@ impl WorkspaceApp {
                 let Some(node_id) = node_id else {
                     return Ok(None);
                 };
-                self.open_ide_folder_picker_tab(node_id, cx);
+                self.restore_ide_folder_picker_tab(node_id, cx);
             }
             TabKind::RemoteDesktop => {
                 let Some(id) = saved

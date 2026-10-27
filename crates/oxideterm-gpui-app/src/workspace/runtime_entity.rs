@@ -584,7 +584,7 @@ impl WorkspaceRuntimeEntity {
         if let Some(pending) = self
             .pending_ssh_terminal_opens
             .iter_mut()
-            .find(|pending| pending.node_id == *node_id)
+            .find(|pending| pending.node_id == *node_id && pending.reconnect_session_id.is_none())
         {
             // Only newly materialized direct roots are removed after failure.
             pending.cleanup_node_id = Some(cleanup_node_id);
@@ -597,7 +597,7 @@ impl WorkspaceRuntimeEntity {
     ) -> Option<NodeId> {
         self.pending_ssh_terminal_opens
             .iter()
-            .find(|pending| pending.node_id == *node_id)
+            .find(|pending| pending.node_id == *node_id && pending.reconnect_session_id.is_none())
             .and_then(|pending| pending.cleanup_node_id.clone())
     }
 
@@ -1172,9 +1172,11 @@ impl WorkspaceRuntimeEntity {
         &mut self,
         mode: RemoteShellIntegrationMode,
         awareness_enabled: bool,
+        deferred: std::collections::BTreeMap<String, u32>,
     ) {
         self.remote_shell_integration
             .configure(mode, awareness_enabled);
+        self.remote_shell_integration.set_deferred(deferred);
         if mode == RemoteShellIntegrationMode::Disabled || !awareness_enabled {
             for (_, (_, abort_handle)) in self.remote_shell_gate_tasks.drain() {
                 abort_handle.abort();
@@ -1225,13 +1227,46 @@ impl WorkspaceRuntimeEntity {
         self.remote_shell_integration.accept_confirm()
     }
 
+    pub(in crate::workspace) fn remote_shell_integration_host_key(
+        &self,
+        node_id: &NodeId,
+    ) -> Option<String> {
+        let store = self.node_router.runtime_store();
+        let mut route = Vec::new();
+        for node in store.path_to_node(node_id).ok()? {
+            let snapshot = store.snapshot(&node)?;
+            if let Some(hops) = snapshot.config.proxy_chain.as_ref() {
+                for hop in hops {
+                    route.push((hop.host.clone(), hop.port, hop.username.clone()));
+                }
+            }
+            route.push((
+                snapshot.config.host,
+                snapshot.config.port,
+                snapshot.config.username,
+            ));
+        }
+        // Only endpoint identity is persisted, never authentication or agent settings.
+        serde_json::to_string(&route).ok()
+    }
+
     pub(in crate::workspace) fn start_remote_shell_integration_gate(
         &mut self,
         node_id: NodeId,
         force_install: bool,
     ) -> bool {
         use settings::RemoteShellIntegrationFailure;
-        let Some(generation) = self.remote_shell_integration.begin_terminal_gate(&node_id) else {
+        if !force_install
+            && self
+                .remote_shell_integration_host_key(&node_id)
+                .is_some_and(|key| self.remote_shell_integration.is_deferred(&key))
+        {
+            return false;
+        }
+        let Some(generation) = self
+            .remote_shell_integration
+            .begin_terminal_gate(&node_id, force_install)
+        else {
             return false;
         };
         let mode = self.remote_shell_integration.deployment_mode();
@@ -1271,10 +1306,10 @@ impl WorkspaceRuntimeEntity {
                 if should_install_remote_shell_integration(force_install, mode, status.state) {
                     oxideterm_terminal::install_remote_shell_integration(&sftp, Some(&remote_env))
                         .await
-                        .map(|status| (status, true))
+                        .map(|installed| (installed, Some(status.state)))
                         .map_err(RemoteShellIntegrationFailure::Integration)
                 } else {
-                    Ok((status, false))
+                    Ok((status, None))
                 }
             }
             .await;
@@ -2752,6 +2787,13 @@ impl WorkspaceRuntimeEntity {
                     .remote_shell_integration
                     .finish_terminal_gate(node_id, generation, result);
                 match outcome {
+                    settings::RemoteShellIntegrationGateOutcome::Configured(node_id, previous) => {
+                        Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
+                            notice: Some(settings::RemoteShellIntegrationNotice::Configured(
+                                node_id, previous,
+                            )),
+                        })
+                    }
                     settings::RemoteShellIntegrationGateOutcome::Applied => {
                         Some(ReconnectRuntimeEffect::RemoteShellIntegrationGateFinished {
                             notice: None,
@@ -2954,9 +2996,10 @@ fn should_install_remote_shell_integration(
     mode: RemoteShellIntegrationMode,
     state: oxideterm_terminal::RemoteShellIntegrationState,
 ) -> bool {
-    force_install
-        || (mode == RemoteShellIntegrationMode::Enabled
-            && state != oxideterm_terminal::RemoteShellIntegrationState::Installed)
+    state != oxideterm_terminal::RemoteShellIntegrationState::NewerVersion
+        && (force_install
+            || (mode == RemoteShellIntegrationMode::Enabled
+                && state != oxideterm_terminal::RemoteShellIntegrationState::Installed))
 }
 
 fn reconnect_error_is_non_retryable(error: &str) -> bool {
@@ -3083,6 +3126,20 @@ mod tests {
     #[test]
     fn remote_shell_gate_installs_only_when_requested_or_enabled_and_missing() {
         use oxideterm_terminal::RemoteShellIntegrationState;
+
+        for mode in [
+            RemoteShellIntegrationMode::Ask,
+            RemoteShellIntegrationMode::Enabled,
+            RemoteShellIntegrationMode::Disabled,
+        ] {
+            for force in [false, true] {
+                assert!(!should_install_remote_shell_integration(
+                    force,
+                    mode,
+                    RemoteShellIntegrationState::NewerVersion
+                ));
+            }
+        }
 
         assert!(should_install_remote_shell_integration(
             true,
@@ -3774,6 +3831,54 @@ mod tests {
                 Some("saved-a")
             );
             assert!(entity.take_runtime_effects(cx).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn cleanup_marker_stays_on_the_plain_open_when_a_reconnect_queues_first(
+        cx: &mut TestAppContext,
+    ) {
+        let entity = test_runtime_entity(cx);
+        let node_id = NodeId::new("node-a");
+        let session_id = TerminalSessionId(7);
+        let cleanup_node_id = NodeId::new("temp-root");
+        entity.update(cx, |entity, cx| {
+            entity.register_ssh_terminal_session(session_id, node_id.clone());
+            // The pane reconnect queues before the saved-connection open, so a
+            // node-only lookup would stamp the cleanup marker onto the reconnect.
+            entity.queue_ssh_terminal_open(
+                PendingSshTerminalOpen {
+                    node_id: node_id.clone(),
+                    reconnect_session_id: Some(session_id),
+                    post_connect_command: None,
+                    mark_used_connection_id: None,
+                    save_after_open: None,
+                    cleanup_node_id: None,
+                    title: String::new(),
+                },
+                cx,
+            );
+            entity.queue_ssh_terminal_open(
+                PendingSshTerminalOpen {
+                    node_id: node_id.clone(),
+                    reconnect_session_id: None,
+                    post_connect_command: None,
+                    mark_used_connection_id: None,
+                    save_after_open: None,
+                    cleanup_node_id: None,
+                    title: "Restored".to_string(),
+                },
+                cx,
+            );
+            entity.mark_pending_ssh_terminal_open_cleanup(&node_id, cleanup_node_id.clone());
+
+            // Closing the pane drops its queued reconnect; the marker has to survive
+            // on the plain open so a failed dial still removes the temporary root.
+            entity.unregister_ssh_terminal_session(session_id);
+            assert_eq!(
+                entity.pending_ssh_terminal_open_cleanup_for_node(&node_id),
+                Some(cleanup_node_id)
+            );
         });
     }
 

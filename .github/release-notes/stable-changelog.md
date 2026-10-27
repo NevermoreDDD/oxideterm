@@ -3,6 +3,518 @@
 Stable releases are listed newest first. The release workflow uses each versioned
 section as the detailed changelog attached to the corresponding GitHub Release.
 
+## 2.2.6
+
+### 中文
+
+OxideTerm 2.2.6 修复 Windows 构建中 Shell 集成脚本的换行问题，并完善已有损坏安装的更新与校验。本版完整包含 2.2.5 的更新：加入按连接筛选标签、快捷命令分组筛选与图标颜色、独立 SSH 隧道和可选的命令输出折叠，统一终端与编辑器搜索，并支持在当前终端环境中打开远程 IDE。同时完善界面动效、提权认证、明暗外观方案、插件连接同步及 RDP 显示器布局，修复中文选区、文件链接、SSH Agent 和受限服务器上的文件访问问题。
+
+#### 🛠️ Shell 集成修复
+
+- 修复 Windows 构建将 CRLF 换行带入自带 Shell 脚本，导致远端 Bash 加载时报语法错误的问题；同时覆盖本地 Shell、WSL 启动脚本及编辑器适配脚本。（Issue [#720](https://github.com/AnalyseDeCircuit/oxideterm/issues/720)）
+- 已有旧版集成可通过更新重新写入，同版本内容不符或文件缺失可通过修复恢复。只替换 OxideTerm 自带文件和带标记的启动引用，内容未变的启动文件跳过写入。
+- 安装、更新和修复后回读校验完整内容；写入失败或校验不符时保留重试入口，确认完整后才提示成功。
+
+#### 🗂️ 工作区与标签
+
+- 顶部范围选择器可显示全部标签、全局页面、本地终端或指定连接的标签，切换连接时保留各自的页面选择。筛选状态显示可见数量与总数，并提供“显示全部”；取消筛选时保持当前页面。
+- 范围名称在标题栏中居中显示。标签宽度按标题和控件内容计算，改善长标题、关闭按钮和横向滚动的布局一致性。
+- 标题栏加入常用工作区操作和后台任务摘要，可从任务列表定位对应工作。悬停提示的切换、移动和消失更平滑，禅模式提示使用实际配置的快捷键。
+- 助手与主机工具整理到右侧活动栏，工具按用途分组并使用更明确的图标；空间不足时才显示溢出入口。
+
+#### ⚡ 快捷命令
+
+- 命令条左侧增加固定的分组选择入口，支持搜索分组，右侧命令独立滚动。选择会保存到下次启动，与管理面板的筛选相互独立；分组删除后回到全部，空分组仍可切换。（Issue [#717](https://github.com/AnalyseDeCircuit/oxideterm/issues/717)）
+- 分组图标支持自定义颜色、输入校验和恢复主题色，组内命令继承该颜色；颜色随分组保存、导入导出及云同步。
+- 长命令名称自动显示省略号，悬停可查看完整名称和命令预览。超长正文限制预览行数与字符数，避免提示覆盖大片终端；排序继续由管理面板负责。
+
+#### 🔎 搜索与远程 IDE
+
+- 终端、IDE 和 SFTP 编辑器统一搜索控件，支持区分大小写、正则表达式和多行输入；编辑器支持捕获组替换与批量替换。（PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)）
+- 终端搜索优先定位当前视口附近的结果，手动滚动后重新按当前视口导航；持续输出时更新匹配结果，并修正中文宽字符的高亮范围。编辑器可将最后一行滚入视口，光标与搜索定位同步处理水平滚动。（PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)）
+- 完善多行查找与替换的换行输入、独立窗口的搜索焦点，以及拖动选择文本到编辑器边缘时的自动滚动。
+- 远程 IDE 可选择 SFTP 或 SSH 文件访问；SSH 可使用纯 Shell 或按需安装／复用代理。支持从当前终端“转换为 IDE”，继承当前用户、容器和目录，并返回原终端。（PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)）
+- 远程代理安装显示进度；文件读取提前识别二进制内容，保存按文件串行执行并保留冲突检测。纯 Shell 搜索有结果和执行边界，远程保存临时文件采用受限权限。（PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)）
+- IDE 文件树分隔线支持拖动调整；文件访问方式选择复用应用主题对话框，并支持键盘操作。
+
+#### ⌨️ 终端与 Shell 集成
+
+- 增加默认关闭的命令输出折叠，启用后可收起已完成命令的输出，保留摘要、退出码和展开入口；调整窗口大小后保持折叠范围，并增强左侧标记的辨识度。
+- 终端触发器增加匹配文本的点击操作、菜单项和悬停提示，可在文本与地址中使用匹配内容和命名捕获组。
+- Shell 集成报告工作目录、命令起止和退出状态，并协调 Shell 原生标记与注入标记。远程集成区分安装、更新和修复，支持稍后处理；更新后在新终端中生效。
+- 鼠标悬停 Unix 时间戳时显示本地时间。点击受支持的压缩包路径可根据当前 Shell 和可用工具生成解压命令，先预览再填入命令栏。
+- 修正半透明选区在中文双列字符上的重复叠色，并正确使用主题的选区颜色和透明度；Windows 文件链接正确处理盘符、网络共享路径、中文及特殊字符。
+- 已配置的中键／右键粘贴优先于终端程序的鼠标跟踪；修复 Kitty 图片在同步重绘期间丢失的问题，完善等宽字体回退和不可用字体提示。
+- 本地 Shell 支持为当前设备指定程序路径并恢复自动检测；该路径不会作为跨设备设置导出。
+- 删除已保存的 Telnet、Mosh 或串口配置时同步清理关联命令历史，并防止异步恢复重新带回已删除历史；空的清理前缀不会误删全部历史。（PR [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709)、[#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)）
+
+#### 🔌 SSH、隧道与设备连接
+
+- 新增独立 SSH 隧道配置，支持本地、远程和动态 SOCKS5 转发，保存后可直接启动或设置随应用启动。隧道可在没有终端窗格时运行，配置支持云同步与加密 `.oxide` 导入导出；退出应用会停止隧道。
+- SSH Agent 认证先尝试所有身份，再进行 RSA 算法兼容重试，避免无效身份过早耗尽服务端认证次数。同一物理连接上的多个 Shell 通道复用已接受的 Agent 转发。
+- SFTP 在服务端 SSH 会话数量受限时复用可用通道，减少额外打开会话导致的失败。
+- 主机工具兼容拒绝 exec、仅支持 Shell 或 PTY 的 SSH 服务端，并正确处理探测命令回显。命令已发送但结果未知时不自动重放，避免重复执行。（PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701)）
+- Telnet 支持分别配置发送与接收换行方式；XMODEM 上传块大小可选择 128 字节或 1024 字节。
+
+#### 🔑 提权凭据与认证
+
+- SSH 通用提权凭据支持主机通配匹配，按连接专属、主机匹配、通用默认的顺序选择。唯一匹配时可选择自动填入并回车。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)）
+- 提示类型与响应模式独立配置，支持仅密码、密码后单独输入 TOTP，以及密码与 TOTP 合并响应。二阶段验证支持独立提示匹配和用户提示；再次要求第二因素时转为手动输入。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)）
+- 加密连接导出仅携带匹配当前连接主机的通用提权凭据副本及其引用的 TOTP 凭据，导入后保持连接作用域。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)）
+- 仅导入凭据元数据时，保留身份、类型和连接作用域一致的本地密钥串引用；替换凭据时清理旧秘密，延迟清理不会删除仍被使用的引用。（PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703)）
+- 保存凭据失败时保留真正的持久化错误，清理失败会安排重试，避免被后续清理错误掩盖。（PR [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706)）
+
+#### 🎨 外观与 AI
+
+- 支持固定浅色、固定深色或跟随系统外观，分别配置明暗方案中的应用与终端主题，并可将当前外观保存为所选方案。
+- 统一侧边栏、选项高亮、弹窗、通知和按钮反馈的过渡；连续切换或反向操作时从当前状态平滑衔接，避免动画重新开始造成跳变。
+- 界面动效统一遵循标准、快速、减少和关闭四档设置。减少模式省略位移和旋转，保留轻量淡入淡出；关闭后立即更新界面，不等待动画结束。
+- 知识库顶部“笔记”栏与左侧导航使用一致的半透明主题底色，增强背景素材下的界面层次。
+- 网络请求使用操作系统证书信任库，支持已安装的企业或代理 CA；模型刷新失败时显示更明确的错误。（PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）
+- Nix 包保留用户指定的证书环境变量，并优先使用宿主证书；模型刷新通知避免展示服务端原始错误正文及凭据。（PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）
+- 修复自定义 OpenAI 兼容端点的模型列表识别；对话图片显示在文字气泡上方。
+
+#### 🧩 插件连接与远程桌面
+
+- 插件可提供持续更新的工作台和可保存的连接类型，连接配置可在会话管理中打开、编辑和删除。
+- 插件连接配置及凭据支持云同步和加密 `.oxide` 导入导出，并保留预览、变更合并和敏感信息选择。
+- 统一 RDP 单屏与多屏尺寸控制：单屏随窗口请求分辨率，多屏使用活动显示器布局，窗口调整只改变本地显示比例。完善内置屏关闭、外接屏变化和重连时的布局更新，避免窗口尺寸覆盖多屏布局。
+- macOS 发行包改用较新的 SDK 构建，统一发行构建的系统控件样式基础；Intel 与 Apple Silicon 构建均显式使用 macOS 13.0 最低目标，修复 Intel 包的版本信息校验失败。
+
+#### 👥 贡献者
+
+- @BilityLeu：Shell-only SSH 主机工具兼容、终端环境远程 IDE，以及终端与编辑器搜索改进（PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701)、[#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)、[#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)）。
+- @m00nLi：提权凭据保存与清理，以及命令历史删除和恢复一致性修复（PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703)、[#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706)、[#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709)、[#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)）。
+- @idxdy：主机匹配、自动填入和两阶段提权认证，以及系统证书信任支持（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)、[#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）。
+
+#### 📌 使用与升级说明
+
+- 若曾使用 2.2.5 安装远程 Shell 集成，升级应用后请对受影响主机执行集成“更新”或“修复”，成功后打开新终端；仅升级应用不会立即改写所有远端主机。启用自动集成时会在新建远程终端的检查流程中更新，询问模式需按提示确认。本地集成脚本在新建本地终端时重新生成。
+
+- RDP 显示器与尺寸重新协商修复需搭配 RDP 插件 0.2.0；该插件要求 OxideTerm 2.2.5 或更高版本。
+- 从当前终端转换为 IDE 前，应回到空闲 Shell 提示符并处理未提交输入。转换期间该终端输入暂停；纯 Shell 文件访问需要 Linux 和 GNU find、stat、grep、coreutils，代理方式会在所选环境安装或复用代理。
+- 自动填入提权凭据需主动开启；SSH 通用凭据的主机匹配为 `*` 时覆盖所有主机，请按实际使用范围配置。
+- 本版更新日志范围：[v2.2.4…v2.2.6](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.4...v2.2.6)。
+
+### English
+
+OxideTerm 2.2.6 fixes Shell integration line endings in Windows builds and improves updating and verifying damaged installations. It includes all changes from 2.2.5: connection-scoped tabs, quick-command group filtering and icon colors, standalone SSH tunnels, and optional command-output folding. It unifies terminal and editor search and supports opening the remote IDE in the current terminal environment. The release also improves interface motion, privilege authentication, light/dark appearance schemes, plugin connection sync, and RDP display layouts, while fixing CJK selections, file links, SSH Agent handling, and file access on restricted servers.
+
+
+#### 🛠️ Shell integration fixes
+
+- Fixed Windows builds embedding CRLF line endings in bundled Shell scripts, causing syntax errors when remote Bash loaded them. The fix also covers local Shell integration, WSL launch scripts, and editor adapter scripts. (Issue [#720](https://github.com/AnalyseDeCircuit/oxideterm/issues/720))
+- Existing older integrations can be rewritten through Update; mismatched contents or missing files at the current version can be restored through Repair. Only OxideTerm's bundled files and marked startup references are replaced, and unchanged startup files are not rewritten.
+- Installation, updates, and repairs now read back and verify the complete contents. Write failures or verification mismatches remain retryable, and success is reported only after verification.
+
+#### 🗂️ Workspace and tabs
+
+- The title-bar scope selector shows all tabs, global pages, local terminals, or tabs for one connection, remembering the selected page in each scope. Filtered scopes show visible and total counts and a Show All action; clearing the filter preserves the current page.
+- Scope names are centered in the title bar. Tab widths account for titles and controls, improving long titles, close buttons, and horizontal scrolling.
+- Added compact workspace actions and a background-task summary to the title bar, with navigation to the associated work. Tooltips transition more smoothly when moving, switching, or disappearing, and Zen-mode hints reflect configured shortcuts.
+- Moved the assistant and host tools to the right activity rail, grouped tools by purpose, and clarified their icons. Overflow appears only when the rail runs out of space.
+
+#### ⚡ Quick commands
+
+- Added a fixed group selector with search to the left of the quick bar while commands scroll independently on the right. The selection persists across restarts independently of management-panel filtering; deleting a group returns to All Groups, and empty groups remain switchable. (Issue [#717](https://github.com/AnalyseDeCircuit/oxideterm/issues/717))
+- Group icons support custom colors, validation, and resetting to the theme color. Commands inherit their group's color, which is preserved in saved data, import/export, and cloud sync.
+- Long command names use an ellipsis, with the full name and command preview available on hover. Long previews have line and character limits to avoid covering the terminal; ordering remains in the management panel.
+
+#### 🔎 Search and remote IDE
+
+- Unified search controls across terminals, the IDE, and SFTP editors, including case sensitivity, regular expressions, and multiline input. Editors support capture-group replacement and Replace All. (PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719))
+- Terminal search starts near the current viewport and reanchors navigation after manual scrolling. Matches update during ongoing output, and CJK highlight ranges use the correct cell widths. Editors can scroll the final line into view and coordinate horizontal scrolling with cursor and search navigation. (PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719))
+- Improved newline entry in multiline find/replace, search focus in detached windows, and automatic scrolling when dragging a text selection to editor edges.
+- Remote IDE access can use SFTP or SSH; SSH supports pure Shell access or an agent installed or reused on demand. Convert to IDE from an existing terminal preserves its current user, container, and directory and supports returning to the original terminal. (PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716))
+- Agent installation shows progress, file reads detect binary content early, and saves are serialized per file while retaining conflict checks. Pure Shell search has bounded results and execution, and remote save temporaries use restricted permissions. (PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716))
+- The IDE file-tree divider is draggable. File-access choices use themed application dialogs with keyboard support.
+
+#### ⌨️ Terminal and Shell integration
+
+- Added opt-in command-output folding. Completed output can be collapsed while retaining a summary, exit status, and an expand action. Fold ranges survive window resizing, with clearer gutter markers.
+- Terminal triggers support click actions, menu entries, and hover hints for matched text, with matched content and named captures available in text and addresses.
+- Shell integration reports the working directory, command boundaries, and exit status, coordinating native and injected Shell markers. Remote integration distinguishes installation, updates, and repairs and supports deferring an update; changes take effect in new terminals.
+- Hovering Unix timestamps shows local time. Clicking supported archive paths generates an extraction command for the current Shell and available tools, with a preview before inserting it into the command bar.
+- Fixed translucent selection backgrounds being painted twice over wide CJK characters and applied theme selection colors and opacity correctly. Windows file links now handle drive letters, network shares, Unicode, and special characters.
+- Configured middle/right-click paste takes precedence over application mouse tracking. Fixed Kitty images disappearing during synchronized redraws and improved monospace font fallback and unavailable-font notices.
+- Local Shell executables can be overridden per device or restored to automatic detection. These paths are excluded from cross-device settings exports.
+- Deleting saved Telnet, Mosh, or serial profiles removes their associated command history, and asynchronous restoration cannot bring deleted history back. Empty retirement prefixes no longer risk clearing all history. (PR [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709), [#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712))
+
+#### 🔌 SSH, tunnels, and device connections
+
+- Added standalone SSH tunnel profiles for local, remote, and dynamic SOCKS5 forwarding, with Save and Start and optional application-startup activation. Tunnels can run without a terminal pane; profiles support cloud sync and encrypted `.oxide` import/export. Exiting the application stops the tunnels.
+- SSH Agent authentication tries all identities before RSA algorithm retries, avoiding premature exhaustion of the server's authentication budget. Multiple Shell channels on one physical connection reuse accepted Agent forwarding.
+- SFTP reuses available channels when the server limits SSH sessions, reducing failures caused by opening additional sessions.
+- Host tools support servers that reject exec or require Shell/PTY access and correctly handle echoed probe commands. Commands whose results are unknown after submission are not automatically replayed. (PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701))
+- Telnet send and receive line endings are configurable independently. XMODEM upload blocks can use 128 or 1024 bytes.
+
+#### 🔑 Privilege credentials and authentication
+
+- Common SSH privilege credentials support host wildcards, with connection-specific credentials taking precedence over host matches and generic defaults. A unique match can optionally be filled and submitted automatically. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708))
+- Prompt types and response modes are configured independently: password only, password followed by a separate TOTP response, or a combined password-and-TOTP response. Two-stage verification supports separate prompt matching and user hints; repeated second-factor requests fall back to manual input. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708))
+- Encrypted connection exports include only common privilege credentials matching the connection's host and the TOTP credentials they reference. Imported copies remain scoped to the connection. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708))
+- Metadata-only credential imports retain existing keychain references when identity, type, and connection scope match. Replacements clean up old secrets, and deferred cleanup preserves references still in use. (PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703))
+- Credential save failures retain the original persistence error. Failed cleanup is queued for retry rather than masking the save failure. (PR [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706))
+
+#### 🎨 Appearance and AI
+
+- Choose fixed light, fixed dark, or system-following appearance, configure application and terminal themes independently for each scheme, and assign the current appearance to a scheme.
+- Unified transitions across sidebars, selection highlights, dialogs, notifications, and button feedback. Rapid changes and reversals continue smoothly from the current state instead of restarting and jumping.
+- Interface motion consistently follows the Normal, Fast, Reduced, and Off profiles. Reduced removes movement and rotation while retaining subtle fades; Off updates the interface immediately without waiting for animations.
+- The Knowledge workspace's Notes header now matches the navigation sidebar's translucent theme background for clearer structure over background media.
+- Network requests use the operating system's certificate trust store, including installed corporate or proxy CAs. Model-refresh failures show clearer errors. (PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718))
+- Nix packages preserve explicit certificate environment overrides and prefer host certificates. Model-refresh notifications avoid exposing raw server error bodies or credentials. (PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718))
+- Fixed model-list discovery for custom OpenAI-compatible endpoints. Conversation images now appear above the text bubble.
+
+#### 🧩 Plugin connections and remote desktops
+
+- Plugins can provide live workbenches and persistent connection types that can be opened, edited, and deleted in Session Manager.
+- Plugin connection profiles and credentials support cloud sync and encrypted `.oxide` import/export, including previews, change merging, and sensitive-data selection.
+- Unified RDP single- and multi-monitor sizing: single-monitor resolution follows the window, while multi-monitor sessions use the active display layout and window resizing changes only local scaling. Improved layout updates when the internal display is disabled, external displays change, or sessions reconnect, preventing window dimensions from overriding multi-monitor layouts.
+- macOS release packages use a newer SDK to align the system-control styling baseline. Intel and Apple Silicon builds explicitly target macOS 13.0 as the minimum, fixing build-version verification failures for Intel packages.
+
+#### 👥 Contributors
+
+- @BilityLeu: Shell-only SSH host-tool compatibility, remote IDE access in the terminal environment, and terminal/editor search improvements (PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701), [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716), [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)).
+- @m00nLi: Privilege-credential persistence and cleanup, and command-history deletion/restoration consistency (PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703), [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706), [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709), [#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)).
+- @idxdy: Host matching, automatic filling, two-stage privilege authentication, and system certificate trust (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708), [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)).
+
+#### 📌 Usage and upgrade notes
+
+- If remote Shell integration was installed using 2.2.5, update the application, run integration Update or Repair for affected hosts, and open a new terminal after success. Updating the application alone does not immediately rewrite every remote host. Automatic integration updates during the checks for a new remote terminal; Ask mode requires confirmation. Local integration scripts are regenerated when a new local terminal is opened.
+
+- The RDP display and resize-renegotiation fixes require RDP plugin 0.2.0, which requires OxideTerm 2.2.5 or later.
+- Before converting the current terminal to IDE mode, return to an idle Shell prompt and handle any pending input. Terminal input is paused during conversion. Pure Shell file access requires Linux with GNU find, stat, grep, and coreutils; agent mode installs or reuses an agent in the selected environment.
+- Automatic privilege filling is opt-in. A common SSH credential with the host pattern `*` applies to every host; configure patterns for the intended scope.
+- Full changelog: [v2.2.4…v2.2.6](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.4...v2.2.6).
+
+
+## 2.2.5
+
+### 中文
+
+OxideTerm 2.2.5 加入按连接筛选标签、快捷命令分组筛选与图标颜色、独立 SSH 隧道和可选的命令输出折叠，统一终端与编辑器搜索，并支持在当前终端环境中打开远程 IDE。同时完善界面动效、提权认证、明暗外观方案、插件连接同步及 RDP 显示器布局，修复中文选区、文件链接、SSH Agent 和受限服务器上的文件访问问题。
+
+#### 🗂️ 工作区与标签
+
+- 顶部范围选择器可显示全部标签、全局页面、本地终端或指定连接的标签，切换连接时保留各自的页面选择。筛选状态显示可见数量与总数，并提供“显示全部”；取消筛选时保持当前页面。
+- 范围名称在标题栏中居中显示。标签宽度按标题和控件内容计算，改善长标题、关闭按钮和横向滚动的布局一致性。
+- 标题栏加入常用工作区操作和后台任务摘要，可从任务列表定位对应工作。悬停提示的切换、移动和消失更平滑，禅模式提示使用实际配置的快捷键。
+- 助手与主机工具整理到右侧活动栏，工具按用途分组并使用更明确的图标；空间不足时才显示溢出入口。
+
+#### ⚡ 快捷命令
+
+- 命令条左侧增加固定的分组选择入口，支持搜索分组，右侧命令独立滚动。选择会保存到下次启动，与管理面板的筛选相互独立；分组删除后回到全部，空分组仍可切换。（Issue [#717](https://github.com/AnalyseDeCircuit/oxideterm/issues/717)）
+- 分组图标支持自定义颜色、输入校验和恢复主题色，组内命令继承该颜色；颜色随分组保存、导入导出及云同步。
+- 长命令名称自动显示省略号，悬停可查看完整名称和命令预览。超长正文限制预览行数与字符数，避免提示覆盖大片终端；排序继续由管理面板负责。
+
+#### 🔎 搜索与远程 IDE
+
+- 终端、IDE 和 SFTP 编辑器统一搜索控件，支持区分大小写、正则表达式和多行输入；编辑器支持捕获组替换与批量替换。（PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)）
+- 终端搜索优先定位当前视口附近的结果，手动滚动后重新按当前视口导航；持续输出时更新匹配结果，并修正中文宽字符的高亮范围。编辑器可将最后一行滚入视口，光标与搜索定位同步处理水平滚动。（PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)）
+- 完善多行查找与替换的换行输入、独立窗口的搜索焦点，以及拖动选择文本到编辑器边缘时的自动滚动。
+- 远程 IDE 可选择 SFTP 或 SSH 文件访问；SSH 可使用纯 Shell 或按需安装／复用代理。支持从当前终端“转换为 IDE”，继承当前用户、容器和目录，并返回原终端。（PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)）
+- 远程代理安装显示进度；文件读取提前识别二进制内容，保存按文件串行执行并保留冲突检测。纯 Shell 搜索有结果和执行边界，远程保存临时文件采用受限权限。（PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)）
+- IDE 文件树分隔线支持拖动调整；文件访问方式选择复用应用主题对话框，并支持键盘操作。
+
+#### ⌨️ 终端与 Shell 集成
+
+- 增加默认关闭的命令输出折叠，启用后可收起已完成命令的输出，保留摘要、退出码和展开入口；调整窗口大小后保持折叠范围，并增强左侧标记的辨识度。
+- 终端触发器增加匹配文本的点击操作、菜单项和悬停提示，可在文本与地址中使用匹配内容和命名捕获组。
+- Shell 集成报告工作目录、命令起止和退出状态，并协调 Shell 原生标记与注入标记。远程集成区分安装、更新和修复，支持稍后处理；更新后在新终端中生效。
+- 鼠标悬停 Unix 时间戳时显示本地时间。点击受支持的压缩包路径可根据当前 Shell 和可用工具生成解压命令，先预览再填入命令栏。
+- 修正半透明选区在中文双列字符上的重复叠色，并正确使用主题的选区颜色和透明度；Windows 文件链接正确处理盘符、网络共享路径、中文及特殊字符。
+- 已配置的中键／右键粘贴优先于终端程序的鼠标跟踪；修复 Kitty 图片在同步重绘期间丢失的问题，完善等宽字体回退和不可用字体提示。
+- 本地 Shell 支持为当前设备指定程序路径并恢复自动检测；该路径不会作为跨设备设置导出。
+- 删除已保存的 Telnet、Mosh 或串口配置时同步清理关联命令历史，并防止异步恢复重新带回已删除历史；空的清理前缀不会误删全部历史。（PR [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709)、[#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)）
+
+#### 🔌 SSH、隧道与设备连接
+
+- 新增独立 SSH 隧道配置，支持本地、远程和动态 SOCKS5 转发，保存后可直接启动或设置随应用启动。隧道可在没有终端窗格时运行，配置支持云同步与加密 `.oxide` 导入导出；退出应用会停止隧道。
+- SSH Agent 认证先尝试所有身份，再进行 RSA 算法兼容重试，避免无效身份过早耗尽服务端认证次数。同一物理连接上的多个 Shell 通道复用已接受的 Agent 转发。
+- SFTP 在服务端 SSH 会话数量受限时复用可用通道，减少额外打开会话导致的失败。
+- 主机工具兼容拒绝 exec、仅支持 Shell 或 PTY 的 SSH 服务端，并正确处理探测命令回显。命令已发送但结果未知时不自动重放，避免重复执行。（PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701)）
+- Telnet 支持分别配置发送与接收换行方式；XMODEM 上传块大小可选择 128 字节或 1024 字节。
+
+#### 🔑 提权凭据与认证
+
+- SSH 通用提权凭据支持主机通配匹配，按连接专属、主机匹配、通用默认的顺序选择。唯一匹配时可选择自动填入并回车。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)）
+- 提示类型与响应模式独立配置，支持仅密码、密码后单独输入 TOTP，以及密码与 TOTP 合并响应。二阶段验证支持独立提示匹配和用户提示；再次要求第二因素时转为手动输入。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)）
+- 加密连接导出仅携带匹配当前连接主机的通用提权凭据副本及其引用的 TOTP 凭据，导入后保持连接作用域。（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)）
+- 仅导入凭据元数据时，保留身份、类型和连接作用域一致的本地密钥串引用；替换凭据时清理旧秘密，延迟清理不会删除仍被使用的引用。（PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703)）
+- 保存凭据失败时保留真正的持久化错误，清理失败会安排重试，避免被后续清理错误掩盖。（PR [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706)）
+
+#### 🎨 外观与 AI
+
+- 支持固定浅色、固定深色或跟随系统外观，分别配置明暗方案中的应用与终端主题，并可将当前外观保存为所选方案。
+- 统一侧边栏、选项高亮、弹窗、通知和按钮反馈的过渡；连续切换或反向操作时从当前状态平滑衔接，避免动画重新开始造成跳变。
+- 界面动效统一遵循标准、快速、减少和关闭四档设置。减少模式省略位移和旋转，保留轻量淡入淡出；关闭后立即更新界面，不等待动画结束。
+- 知识库顶部“笔记”栏与左侧导航使用一致的半透明主题底色，增强背景素材下的界面层次。
+- 网络请求使用操作系统证书信任库，支持已安装的企业或代理 CA；模型刷新失败时显示更明确的错误。（PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）
+- Nix 包保留用户指定的证书环境变量，并优先使用宿主证书；模型刷新通知避免展示服务端原始错误正文及凭据。（PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）
+- 修复自定义 OpenAI 兼容端点的模型列表识别；对话图片显示在文字气泡上方。
+
+#### 🧩 插件连接与远程桌面
+
+- 插件可提供持续更新的工作台和可保存的连接类型，连接配置可在会话管理中打开、编辑和删除。
+- 插件连接配置及凭据支持云同步和加密 `.oxide` 导入导出，并保留预览、变更合并和敏感信息选择。
+- 统一 RDP 单屏与多屏尺寸控制：单屏随窗口请求分辨率，多屏使用活动显示器布局，窗口调整只改变本地显示比例。完善内置屏关闭、外接屏变化和重连时的布局更新，避免窗口尺寸覆盖多屏布局。
+- macOS 发行包改用较新的 SDK 构建，统一发行构建的系统控件样式基础；Intel 与 Apple Silicon 构建均显式使用 macOS 13.0 最低目标，修复 Intel 包的版本信息校验失败。
+
+#### 👥 贡献者
+
+- @BilityLeu：Shell-only SSH 主机工具兼容、终端环境远程 IDE，以及终端与编辑器搜索改进（PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701)、[#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716)、[#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)）。
+- @m00nLi：提权凭据保存与清理，以及命令历史删除和恢复一致性修复（PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703)、[#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706)、[#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709)、[#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)）。
+- @idxdy：主机匹配、自动填入和两阶段提权认证，以及系统证书信任支持（PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708)、[#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)）。
+
+#### 📌 使用与升级说明
+
+- RDP 显示器与尺寸重新协商修复需搭配 RDP 插件 0.2.0；该插件要求 OxideTerm 2.2.5 或更高版本。
+- 从当前终端转换为 IDE 前，应回到空闲 Shell 提示符并处理未提交输入。转换期间该终端输入暂停；纯 Shell 文件访问需要 Linux 和 GNU find、stat、grep、coreutils，代理方式会在所选环境安装或复用代理。
+- 自动填入提权凭据需主动开启；SSH 通用凭据的主机匹配为 `*` 时覆盖所有主机，请按实际使用范围配置。
+- 本版更新日志范围：[v2.2.4…v2.2.5](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.4...v2.2.5)。
+
+### English
+
+OxideTerm 2.2.5 adds connection-scoped tabs, quick-command group filtering and icon colors, standalone SSH tunnels, and optional command-output folding. It unifies terminal and editor search and supports opening the remote IDE in the current terminal environment. The release also improves interface motion, privilege authentication, light/dark appearance schemes, plugin connection sync, and RDP display layouts, while fixing CJK selections, file links, SSH Agent handling, and file access on restricted servers.
+
+#### 🗂️ Workspace and tabs
+
+- The title-bar scope selector shows all tabs, global pages, local terminals, or tabs for one connection, remembering the selected page in each scope. Filtered scopes show visible and total counts and a Show All action; clearing the filter preserves the current page.
+- Scope names are centered in the title bar. Tab widths account for titles and controls, improving long titles, close buttons, and horizontal scrolling.
+- Added compact workspace actions and a background-task summary to the title bar, with navigation to the associated work. Tooltips transition more smoothly when moving, switching, or disappearing, and Zen-mode hints reflect configured shortcuts.
+- Moved the assistant and host tools to the right activity rail, grouped tools by purpose, and clarified their icons. Overflow appears only when the rail runs out of space.
+
+#### ⚡ Quick commands
+
+- Added a fixed group selector with search to the left of the quick bar while commands scroll independently on the right. The selection persists across restarts independently of management-panel filtering; deleting a group returns to All Groups, and empty groups remain switchable. (Issue [#717](https://github.com/AnalyseDeCircuit/oxideterm/issues/717))
+- Group icons support custom colors, validation, and resetting to the theme color. Commands inherit their group's color, which is preserved in saved data, import/export, and cloud sync.
+- Long command names use an ellipsis, with the full name and command preview available on hover. Long previews have line and character limits to avoid covering the terminal; ordering remains in the management panel.
+
+#### 🔎 Search and remote IDE
+
+- Unified search controls across terminals, the IDE, and SFTP editors, including case sensitivity, regular expressions, and multiline input. Editors support capture-group replacement and Replace All. (PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719))
+- Terminal search starts near the current viewport and reanchors navigation after manual scrolling. Matches update during ongoing output, and CJK highlight ranges use the correct cell widths. Editors can scroll the final line into view and coordinate horizontal scrolling with cursor and search navigation. (PR [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719))
+- Improved newline entry in multiline find/replace, search focus in detached windows, and automatic scrolling when dragging a text selection to editor edges.
+- Remote IDE access can use SFTP or SSH; SSH supports pure Shell access or an agent installed or reused on demand. Convert to IDE from an existing terminal preserves its current user, container, and directory and supports returning to the original terminal. (PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716))
+- Agent installation shows progress, file reads detect binary content early, and saves are serialized per file while retaining conflict checks. Pure Shell search has bounded results and execution, and remote save temporaries use restricted permissions. (PR [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716))
+- The IDE file-tree divider is draggable. File-access choices use themed application dialogs with keyboard support.
+
+#### ⌨️ Terminal and Shell integration
+
+- Added opt-in command-output folding. Completed output can be collapsed while retaining a summary, exit status, and an expand action. Fold ranges survive window resizing, with clearer gutter markers.
+- Terminal triggers support click actions, menu entries, and hover hints for matched text, with matched content and named captures available in text and addresses.
+- Shell integration reports the working directory, command boundaries, and exit status, coordinating native and injected Shell markers. Remote integration distinguishes installation, updates, and repairs and supports deferring an update; changes take effect in new terminals.
+- Hovering Unix timestamps shows local time. Clicking supported archive paths generates an extraction command for the current Shell and available tools, with a preview before inserting it into the command bar.
+- Fixed translucent selection backgrounds being painted twice over wide CJK characters and applied theme selection colors and opacity correctly. Windows file links now handle drive letters, network shares, Unicode, and special characters.
+- Configured middle/right-click paste takes precedence over application mouse tracking. Fixed Kitty images disappearing during synchronized redraws and improved monospace font fallback and unavailable-font notices.
+- Local Shell executables can be overridden per device or restored to automatic detection. These paths are excluded from cross-device settings exports.
+- Deleting saved Telnet, Mosh, or serial profiles removes their associated command history, and asynchronous restoration cannot bring deleted history back. Empty retirement prefixes no longer risk clearing all history. (PR [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709), [#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712))
+
+#### 🔌 SSH, tunnels, and device connections
+
+- Added standalone SSH tunnel profiles for local, remote, and dynamic SOCKS5 forwarding, with Save and Start and optional application-startup activation. Tunnels can run without a terminal pane; profiles support cloud sync and encrypted `.oxide` import/export. Exiting the application stops the tunnels.
+- SSH Agent authentication tries all identities before RSA algorithm retries, avoiding premature exhaustion of the server's authentication budget. Multiple Shell channels on one physical connection reuse accepted Agent forwarding.
+- SFTP reuses available channels when the server limits SSH sessions, reducing failures caused by opening additional sessions.
+- Host tools support servers that reject exec or require Shell/PTY access and correctly handle echoed probe commands. Commands whose results are unknown after submission are not automatically replayed. (PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701))
+- Telnet send and receive line endings are configurable independently. XMODEM upload blocks can use 128 or 1024 bytes.
+
+#### 🔑 Privilege credentials and authentication
+
+- Common SSH privilege credentials support host wildcards, with connection-specific credentials taking precedence over host matches and generic defaults. A unique match can optionally be filled and submitted automatically. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708))
+- Prompt types and response modes are configured independently: password only, password followed by a separate TOTP response, or a combined password-and-TOTP response. Two-stage verification supports separate prompt matching and user hints; repeated second-factor requests fall back to manual input. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708))
+- Encrypted connection exports include only common privilege credentials matching the connection's host and the TOTP credentials they reference. Imported copies remain scoped to the connection. (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708))
+- Metadata-only credential imports retain existing keychain references when identity, type, and connection scope match. Replacements clean up old secrets, and deferred cleanup preserves references still in use. (PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703))
+- Credential save failures retain the original persistence error. Failed cleanup is queued for retry rather than masking the save failure. (PR [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706))
+
+#### 🎨 Appearance and AI
+
+- Choose fixed light, fixed dark, or system-following appearance, configure application and terminal themes independently for each scheme, and assign the current appearance to a scheme.
+- Unified transitions across sidebars, selection highlights, dialogs, notifications, and button feedback. Rapid changes and reversals continue smoothly from the current state instead of restarting and jumping.
+- Interface motion consistently follows the Normal, Fast, Reduced, and Off profiles. Reduced removes movement and rotation while retaining subtle fades; Off updates the interface immediately without waiting for animations.
+- The Knowledge workspace's Notes header now matches the navigation sidebar's translucent theme background for clearer structure over background media.
+- Network requests use the operating system's certificate trust store, including installed corporate or proxy CAs. Model-refresh failures show clearer errors. (PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718))
+- Nix packages preserve explicit certificate environment overrides and prefer host certificates. Model-refresh notifications avoid exposing raw server error bodies or credentials. (PR [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718))
+- Fixed model-list discovery for custom OpenAI-compatible endpoints. Conversation images now appear above the text bubble.
+
+#### 🧩 Plugin connections and remote desktops
+
+- Plugins can provide live workbenches and persistent connection types that can be opened, edited, and deleted in Session Manager.
+- Plugin connection profiles and credentials support cloud sync and encrypted `.oxide` import/export, including previews, change merging, and sensitive-data selection.
+- Unified RDP single- and multi-monitor sizing: single-monitor resolution follows the window, while multi-monitor sessions use the active display layout and window resizing changes only local scaling. Improved layout updates when the internal display is disabled, external displays change, or sessions reconnect, preventing window dimensions from overriding multi-monitor layouts.
+- macOS release packages use a newer SDK to align the system-control styling baseline. Intel and Apple Silicon builds explicitly target macOS 13.0 as the minimum, fixing build-version verification failures for Intel packages.
+
+#### 👥 Contributors
+
+- @BilityLeu: Shell-only SSH host-tool compatibility, remote IDE access in the terminal environment, and terminal/editor search improvements (PR [#701](https://github.com/AnalyseDeCircuit/oxideterm/pull/701), [#716](https://github.com/AnalyseDeCircuit/oxideterm/pull/716), [#719](https://github.com/AnalyseDeCircuit/oxideterm/pull/719)).
+- @m00nLi: Privilege-credential persistence and cleanup, and command-history deletion/restoration consistency (PR [#703](https://github.com/AnalyseDeCircuit/oxideterm/pull/703), [#706](https://github.com/AnalyseDeCircuit/oxideterm/pull/706), [#709](https://github.com/AnalyseDeCircuit/oxideterm/pull/709), [#712](https://github.com/AnalyseDeCircuit/oxideterm/pull/712)).
+- @idxdy: Host matching, automatic filling, two-stage privilege authentication, and system certificate trust (PR [#708](https://github.com/AnalyseDeCircuit/oxideterm/pull/708), [#718](https://github.com/AnalyseDeCircuit/oxideterm/pull/718)).
+
+#### 📌 Usage and upgrade notes
+
+- The RDP display and resize-renegotiation fixes require RDP plugin 0.2.0, which requires OxideTerm 2.2.5 or later.
+- Before converting the current terminal to IDE mode, return to an idle Shell prompt and handle any pending input. Terminal input is paused during conversion. Pure Shell file access requires Linux with GNU find, stat, grep, and coreutils; agent mode installs or reuses an agent in the selected environment.
+- Automatic privilege filling is opt-in. A common SSH credential with the host pattern `*` applies to every host; configure patterns for the intended scope.
+- Full changelog: [v2.2.4…v2.2.5](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.4...v2.2.5).
+
+## 2.2.4
+
+### 中文
+
+OxideTerm 2.2.4 为 OxideSens 加入图片输入、工具返回图片、小米 MiMo 提供商，以及独立配置的 DeepSeek 搜索与网页读取；同时完善 SSH 提权凭据、命令历史、文件导航和离线端口转发管理，整理设置与首次使用引导，并修复云同步初始化、主机监控和 SSH 重连问题。
+
+#### 🖼️ AI 图片输入与工具图片
+
+- 对话支持从剪贴板粘贴图片或选择图片文件，输入区以可移除的缩略图展示附件；发送后的图片随对话保存，重新打开历史对话时仍可查看。
+- 图片输入适配 OpenAI Chat Completions、Responses、Anthropic 和 Gemini 接口。图片会经过格式、尺寸及请求大小检查，并在发送前缩放；上下文预算纳入图片 token 估算，未确定的计费规则按暂估处理，实际用量以服务商返回值为准。
+- 修正模型图片能力判断：明确不支持图片的模型会在添加附件时提示；能力未知的自定义模型不再被直接当作纯文本模型。模型图片能力仍可在设置中指定。
+- 切换到不支持图片的模型时，如果历史上下文包含图片，会先确认是否保留对话中的图片、仅以文字继续，不会直接删除历史附件。
+- 工具返回的图片贯通工具消息、模型请求和对话存储，包括 MCP 图片结果与 ACP 宿主工具回复；图片附件与普通工具文字输出分开处理。
+- 新增小米 MiMo 提供商配置，并补充对应模型的图片能力与推理设置适配。
+
+#### 🌐 独立联网工具与全局子 Agent 设置
+
+- 新增 DeepSeek 搜索和网页读取工具，搜索账号独立于聊天模型配置。可在全局 AI 设置中选择已保存的官方 DeepSeek 配置，让其他聊天模型通过工具使用搜索服务。
+- 搜索与网页读取结果显示来源链接，并区分认证、余额不足、限流、页面不可用及请求失败等情况。网页读取限于受支持的公开 HTTP/HTTPS 地址。
+- 子 Agent 的启用状态、默认模型和并发限制统一为全局设置；所有对话共享并发上限，等待中的任务释放运行名额。关闭后不再启动新子任务，已运行任务可继续完成。
+- 工具设置明确区分“允许使用工具”和“自动批准操作”。自动批准列表中未勾选的操作仍可在确认后运行；停用工具则不能运行。子 Agent 沿用父任务允许的工具范围与审批规则。
+
+#### 🔑 SSH 提权凭据与动态验证码
+
+- 新增 SSH 通用提权凭据范围，可复用 sudo、su 和自定义密码提示凭据；连接专属匹配优先，本地终端保持独立范围。
+- 密码提示只有一个匹配凭据时，可按 Enter 填入；存在多个匹配时，先显示名称、类型和来源供选择，支持方向键、Enter、鼠标和 Esc。开始手动输入或切换终端会关闭选择器。
+- 启用敏感凭据同步且同步全部连接时，SSH 通用凭据随连接同步；只同步部分连接时不改动通用范围。包含密码的加密连接导出包会保存按连接限定的副本，导入后不会自动变成全局默认凭据。
+- 共享 TOTP 凭据支持在设置中编辑连接绑定，保存时应用替换关系；命令行创建和编辑连接支持按名称或 ID 选择已有 TOTP 凭据，也可清除绑定。
+
+#### ⌨️ 命令历史与快捷命令
+
+- 已保存的 SSH、Telnet、Mosh 和串口连接可选择在本机保存命令历史，重启后继续使用；补齐 Telnet、Mosh 及串口文本控制台的历史建议。
+- 历史列表支持当前连接与全部连接范围，可暂停当前连接记录、删除单条记录或清空历史；保留天数可配置，所有已保存连接合计最多保留 10,000 条。
+- 快捷命令匹配规则支持选择主机地址、连接名称或全部字段，结合通配符与逗号分隔规则定位目标。
+- 简化命令历史范围切换控件，协调终端输入栏、快捷命令面板与命令发送器在背景下的表面样式。
+
+#### 📁 文件导航与端口转发
+
+- SFTP 新增“前往终端目录”，按同一服务器的当前终端或最近使用终端定位目录，也适用于独立 SFTP 窗口。默认快捷键为 macOS `⌘⇧G`、Windows/Linux `Ctrl+Shift+G`，支持自定义；终端目录变化不会自动移动文件浏览器。
+- 本地文件管理器支持拖动收藏项排序、调整收藏侧栏宽度及双击恢复默认宽度，顺序和宽度会保存；系统目录与驱动器保持原有位置。
+- 已保存的端口转发规则在连接断开时仍可查看、编辑、保存和删除。“保存并启动”可通过现有连接流程建立 SSH 连接，无须额外打开终端。（Issue [#694](https://github.com/AnalyseDeCircuit/oxideterm/issues/694)）
+- 停止转发后保留规则并关闭自动启动，手动停止的规则不会因重连再次启动；断线恢复保留规则身份，避免旧连接清理影响替换后的运行实例。
+
+#### 🎨 设置、技能管理与首次使用引导
+
+- 统一设置行的名称、说明、控件对齐和窄窗口换行；路径输入、代理表单、带单位数字框和背景预览继续使用适合各自内容的布局。
+- 技能管理新增名称与说明搜索、范围筛选、启用数量、可展开详情和格式、读取、同名覆盖诊断，并提供打开所在目录的入口；停用技能保留原文件。
+- 重新组织 AI 提供商与上下文页面，明确当前聊天配置、搜索服务配置和高级上下文容量设置；整理工具审批与子 Agent 的作用范围说明。
+- 外部 MCP 控制页分别展示服务端点、监听端口、待审批操作和客户端权限；细粒度权限按功能分组，允许使用的工具与审批模式分别设置，保留原有权限含义。
+- 协调壁纸下的标签、卡片、输入控件和终端辅助面板底色，限制嵌套表面的不透明度累加，并减弱侧栏分隔边缘；文字、强调色和媒体保持各自的绘制规则。
+- 继续整理五页首次使用引导：统一内容宽度与间距，把连接流程与功能介绍分栏，更多功能按需展开；AI 开关前置，背景素材区限制高度，开始使用页采用更紧凑的操作入口并移除重复快捷键。
+
+#### 🛠️ 连接、监控与同步修复
+
+- SSH 连接失败时只重置仍在等待连接的窗格，保留已经进入 Shell 启动阶段的重连，防止重复发起。（PR [#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682)）
+- 修复同一节点同时存在重连和新终端打开请求时，关闭重连窗格会丢失临时节点清理标记的问题。（PR [#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685)）
+- X11 转发按终端报告协商成功、缺少本地显示或授权、服务端拒绝和超时等状态，并补充 Windows 本地 X Server 的要求；远端 `DISPLAY` 仍由 SSH 服务端分配。
+- 远端平台检测显式使用 POSIX Shell，并支持仅接受交互式 Shell、不接受 exec 请求的 SSH 服务端；不支持的 Shell 不再反复触发自动集成检查提示。
+- 主机监控打开后立即采样，刷新时保留现有数据直到新数据到达；区分环境检测中、无法识别系统和采样失败，并提供重试入口。修复列表行提示状态互相影响的问题。
+- VNC 查看器断开或失败后保持停止，等待用户明确重连，不因页面重新绘制而重复启动连接。
+- 修复部分 WebDAV 服务在首次同步目录尚不存在时返回 409 导致初始化失败的问题；首次同步失败或取消后，密码仍可重新设置，已有加密数据则继续走密码更换流程。
+- 修正工作区启动和生命周期定时任务的调度，改善通知、后台状态和界面更新的时序一致性。
+
+#### 📦 构建环境
+
+- Nix 开发环境补齐图形运行库搜索路径，以及 `libdrm` 和 Mesa，使通过 `nix develop` 后执行 `cargo run` 的程序能够找到相关运行库；此项针对开发环境，发行包无法启动的反馈仍需单独定位。（PR [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688)）
+- macOS 构建通过 Xcode 查找已安装的 Metal 工具链，避免仅依赖默认工具路径；本机仍需安装 Metal Toolchain。
+
+#### 👥 贡献者
+
+- @m00nLi：修复 SSH 重连状态与临时节点清理问题（PR [#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682)、[#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685)）。
+- @sincerely-hello-world：修复 Nix 开发环境的图形运行库配置（PR [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688)）。
+
+#### 📌 使用与升级说明
+
+- 本机命令历史保存默认关闭；开启后完整命令会写入未加密的本地文件，参数中的密码或令牌也可能被记录。仅记录开启后的命令，默认保留 90 天，设为 0 可永久保留。
+- 联网工具需启用工具调用并配置官方 DeepSeek 账号；搜索词和网页地址会发送给 DeepSeek，搜索及网页读取按请求单独计费。
+- 图片输入能力取决于实际模型和接入端点，图片 token 估算不代替服务商账单。
+- 本版更新日志范围：[v2.2.3…v2.2.4](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.3...v2.2.4)。
+
+### English
+
+OxideTerm 2.2.4 adds image input, tool-result images, Xiaomi MiMo, and independently configured DeepSeek web search and page reading to OxideSens. It also improves SSH privilege credentials, command history, file navigation, and offline forwarding management, reorganizes settings and onboarding, and fixes cloud-sync initialization, host monitoring, and SSH reconnection.
+
+#### 🖼️ AI image input and tool-result images
+
+- Conversations accept pasted images and image files, with removable thumbnails in the composer. Sent attachments are saved with the conversation and remain available when reopening history.
+- Image input supports OpenAI Chat Completions, Responses, Anthropic, and Gemini interfaces. Images undergo format, size, and request-budget checks and are resized before sending. Context budgeting includes estimated image tokens; unspecified pricing rules remain provisional, and provider-reported usage is authoritative.
+- Corrected model capability detection: models known to lack image support show an error when adding attachments, while unknown custom models are no longer treated as text-only. Image capability can still be specified in settings.
+- Switching to a text-only model with images in the conversation context asks whether to retain the images in history and continue with text only, rather than deleting the attachments.
+- Tool-result images now flow through tool messages, model requests, and conversation storage, including MCP image results and ACP host-tool replies. Attachments remain separate from ordinary tool text output.
+- Added Xiaomi MiMo provider configuration, with image-capability and reasoning-setting support for its models.
+
+#### 🌐 Independent web tools and global subagent settings
+
+- Added DeepSeek web search and page-reading tools with a search account configured separately from the chat model. Global AI settings can use a saved official DeepSeek configuration so other chat models can access the search service through tools.
+- Search and page-reading results show source links and distinguish authentication errors, insufficient balance, rate limits, unavailable pages, and request failures. Page reading accepts supported public HTTP/HTTPS URLs.
+- Subagent enablement, default model, and concurrency limits are now global. Conversations share the concurrency limit, and waiting tasks release their running slots. Disabling subagents prevents new subtasks while allowing running tasks to finish.
+- Tool settings distinguish tool availability from automatic approval. Unchecked entries in the automatic-approval list can still run after confirmation; disabled tools cannot run. Subagents retain their parent task's allowed tools and approval rules.
+
+#### 🔑 SSH privilege credentials and one-time passwords
+
+- Added a common SSH privilege-credential scope for sudo, su, and custom password prompts. Connection-specific matches take priority, and local terminals retain a separate scope.
+- At a password prompt, Enter fills a single matching credential. Multiple matches open a chooser showing name, type, and source, with arrow-key, Enter, mouse, and Esc support. Manual input or switching terminals closes the chooser.
+- Full connection sync includes common SSH credentials when sensitive-credential sync is enabled; syncing selected connections leaves the common scope unchanged. Encrypted connection exports that include passwords carry connection-scoped copies, which do not become global defaults on import.
+- Shared TOTP credentials now support editing connection bindings in settings, with replacements applied on save. CLI connection creation and editing can select an existing TOTP credential by name or ID, or remove its binding.
+
+#### ⌨️ Command history and quick commands
+
+- Saved SSH, Telnet, Mosh, and serial connections can optionally retain command history on this device across restarts. Restored history suggestions for Telnet, Mosh, and serial text consoles.
+- History supports current-connection and all-connection scopes, pausing recording for a connection, deleting individual entries, and clearing history. Retention is configurable, with up to 10,000 entries across saved connections.
+- Quick-command rules can match host addresses, connection names, or all fields, using wildcards and comma-separated patterns.
+- Simplified the history scope selector and coordinated wallpaper-backed surfaces in the terminal input bar, quick-command panel, and command sender.
+
+#### 📁 File navigation and port forwarding
+
+- Added Go to Terminal Directory in SFTP, using the current or most recently used terminal on the same server, including detached SFTP windows. The customizable default shortcut is `⌘⇧G` on macOS and `Ctrl+Shift+G` on Windows/Linux. Terminal navigation does not automatically move the file browser.
+- Local File Manager favorites can be reordered by dragging, and the favorites sidebar can be resized or reset by double-clicking its edge. Order and width are saved; system folders and drives keep their positions.
+- Saved forwarding rules remain visible and editable while disconnected and can be saved or deleted offline. Save and Start uses the existing SSH connection flow without opening an extra terminal. (Issue [#694](https://github.com/AnalyseDeCircuit/oxideterm/issues/694))
+- Stopping a forward retains its rule and disables automatic startup. Manually stopped rules remain stopped after reconnection; interrupted forwards retain their identity, and cleanup from an old connection does not affect its replacement.
+
+#### 🎨 Settings, skills, and onboarding
+
+- Unified setting labels, descriptions, control alignment, and narrow-window wrapping, while retaining suitable layouts for paths, proxy forms, numeric fields with units, and background previews.
+- Skill management now offers name and description search, scope filtering, enabled counts, expandable details, and diagnostics for invalid, unreadable, or overridden skills, plus an Open Containing Folder action. Disabling a skill preserves its files.
+- Reorganized AI provider and context pages to distinguish the current chat configuration, search-service configuration, and advanced context-capacity settings, with clearer tool-approval and subagent scope descriptions.
+- External MCP controls separate the endpoint, listening port, pending approvals, and client permissions. Fine-grained permissions are grouped by function, with tool access and approval mode configured separately and existing permission semantics preserved.
+- Coordinated wallpaper-backed tabs, cards, input controls, and terminal panels, limited accumulated opacity in nested surfaces, and softened sidebar separators. Text, accents, and media retain their own rendering rules.
+- Refined the five-page onboarding flow with consistent widths and spacing, side-by-side connection steps and feature introductions, and expandable additional features. AI switches appear earlier, the background gallery has a bounded height, and the final page uses compact actions without duplicate shortcuts.
+
+#### 🛠️ Connections, monitoring, and sync fixes
+
+- SSH connection failures now reset only panes still waiting for a connection, preserving reconnects already starting a shell and preventing duplicate attempts. (PR [#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682))
+- Fixed loss of temporary-node cleanup state when a reconnect and a new terminal open share a node and the reconnect pane is closed. (PR [#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685))
+- X11 forwarding reports per-terminal negotiation success, missing local display or authorization, server rejection, and timeouts. Windows guidance now explains the local X server requirement; the SSH server assigns the remote `DISPLAY`.
+- Remote platform detection explicitly uses a POSIX shell and supports SSH servers that accept interactive shell requests but reject exec requests. Unsupported shells no longer trigger repeated automatic integration-check notices.
+- Host monitoring samples immediately on opening and retains existing data during refresh until replacements arrive. It distinguishes environment detection, unknown systems, and sampling failures, with a retry action. Fixed tooltip state leaking between list rows.
+- Disconnected or failed VNC viewers remain stopped until an explicit reconnect instead of restarting during a redraw.
+- Fixed first-sync initialization against WebDAV servers that return 409 when a sync directory's ancestor is missing. Failed or canceled initial sync attempts allow password setup to be retried, while existing encrypted data continues to use the password-rotation flow.
+- Corrected scheduling of workspace startup and lifecycle timers for more consistent notification, background-state, and UI updates.
+
+#### 📦 Build environments
+
+- The Nix development shell now exposes graphics runtime-library paths and includes `libdrm` and Mesa, allowing `cargo run` inside `nix develop` to locate the required libraries. This fixes the development environment; reported packaged-app startup failures still require separate investigation. (PR [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688))
+- macOS builds locate the installed Metal toolchain through Xcode instead of relying solely on the default tool path. Metal Toolchain must still be installed locally.
+
+#### 👥 Contributors
+
+- @m00nLi: SSH reconnect-state and temporary-node cleanup fixes (PR [#682](https://github.com/AnalyseDeCircuit/oxideterm/pull/682), [#685](https://github.com/AnalyseDeCircuit/oxideterm/pull/685)).
+- @sincerely-hello-world: Nix development-shell graphics runtime configuration (PR [#688](https://github.com/AnalyseDeCircuit/oxideterm/pull/688)).
+
+#### 📌 Usage and upgrade notes
+
+- Saving command history locally is off by default. When enabled, complete commands are written to an unencrypted local file, including any passwords or tokens in arguments. Recording begins when enabled; the default retention is 90 days, and 0 retains history indefinitely.
+- Web tools require tool calling and an official DeepSeek account. Search queries and page URLs are sent to DeepSeek, and search and page-reading requests are billed separately.
+- Image support depends on the actual model and endpoint. Estimated image tokens do not replace the provider's billing data.
+- Full changelog: [v2.2.3…v2.2.4](https://github.com/AnalyseDeCircuit/oxideterm/compare/v2.2.3...v2.2.4).
+
 ## 2.2.3
 
 ### 中文

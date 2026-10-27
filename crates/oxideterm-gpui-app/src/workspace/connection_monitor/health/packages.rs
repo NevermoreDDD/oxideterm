@@ -115,7 +115,7 @@ impl HostToolsEntity {
         let anchor_frame = ime.clone();
         text_input_anchor_probe(
             ime.anchor_id(),
-            text_input(
+            ime.text_input(
                 tokens,
                 TextInputView {
                     value: &self.ui.host_package_search_query,
@@ -483,6 +483,11 @@ impl HostToolsEntity {
         let service = host_package_service_label(&entry);
 
         div()
+            .id(host_tools_row_id(
+                "host-package-row",
+                connection_id,
+                entry.id.clone(),
+            ))
             .w_full()
             .min_w_0()
             .border_b_1()

@@ -25,6 +25,26 @@ impl WorkspaceApp {
             }
         }
 
+        let surface = self.tab_by_id(tab_id, cx).and_then(|tab| {
+            tab.active_pane_id
+                .and_then(|pane| {
+                    self.ide_workspace
+                        .read(cx)
+                        .shell_surface_for_pane(pane)
+                        .map(|(_, surface)| surface)
+                })
+                .or_else(|| {
+                    (*tab_kind == TabKind::Ide)
+                        .then(|| self.ide_workspace.read(cx).surface(tab_id))
+                        .flatten()
+                })
+        });
+        if let Some(modal) =
+            surface.and_then(|surface| self.ide_workspace.read(cx).modal_for_surface(&surface))
+        {
+            modals.push(modal.into_any_element());
+        }
+
         let window_id = window.window_handle().window_id();
         let document_dialog_owned_by_window = self
             .ai_entity
@@ -104,6 +124,7 @@ impl WorkspaceApp {
                     node_id.clone(),
                     tab_id,
                     has_background,
+                    window,
                     cx,
                 ));
                 modals.push(self.render_forward_delete_confirm(
@@ -158,6 +179,12 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let window_id = window.window_handle().window_id();
+        let previous_tab = self.active_tab_id(cx);
+        self.sync_tab_scope(cx);
+        if previous_tab != self.active_tab_id(cx) {
+            self.sync_active_tab_surface(cx);
+            self.needs_active_pane_focus = true;
+        }
         let active_ime_target = self.active_ime_target_for_window(window_id, cx);
         self.workspace_input.update(cx, |input, cx| {
             input.sync_active_target(active_ime_target, cx);
@@ -192,6 +219,7 @@ impl WorkspaceApp {
         // just like Tauri's linuxBackdropBlurClass compatibility gate.
         set_tauri_backdrop_blur_allowed(self.render_policy.allow_background_blur);
         if self.needs_active_pane_focus
+            && !window.has_active_prompt()
             && active_tab_projection.as_ref().is_some_and(|(_, kind, _)| {
                 !matches!(
                     kind,
@@ -216,9 +244,19 @@ impl WorkspaceApp {
         {
             self.needs_active_pane_focus = false;
             self.clear_ai_sidebar_keyboard_focus(cx);
-            window.on_next_frame(move |window, cx| {
-                pane.update(cx, |pane, cx| pane.focus(window, cx));
-            });
+            if let Some(surface) = self.active_ide_surface(cx) {
+                window.on_next_frame(move |window, cx| {
+                    if !window.has_active_prompt() {
+                        window.focus(&surface.read(cx).focus_handle(cx), cx);
+                    }
+                });
+            } else {
+                window.on_next_frame(move |window, cx| {
+                    if !window.has_active_prompt() {
+                        pane.update(cx, |pane, cx| pane.focus(window, cx));
+                    }
+                });
+            }
         }
 
         self.split_drop_regions.borrow_mut().clear();
@@ -263,6 +301,8 @@ impl WorkspaceApp {
                     self.render_empty_workspace(available_width, cx)
                 }
             }
+        } else if *self.tab_host.read(cx).scope() != tabs::TabScope::All {
+            self.render_empty_tab_scope(cx)
         } else {
             let available_width = self.welcome_main_content_width(window, cx);
             self.render_empty_workspace(available_width, cx)
@@ -329,6 +369,13 @@ impl WorkspaceApp {
         let read_only_selection_workspace = cx.entity();
         self.update_main_window_tabbar_drop_bounds(window, titlebar_visible, zen_mode, cx);
 
+        let mut key_context = gpui::KeyContext::new_with_defaults();
+        key_context.add("Workspace");
+        if self.active_window_modal_owner(cx).is_some() && !self.ide_modal_owns_input(cx) {
+            // IDE dialogs register this context on their independently observed window layer.
+            key_context.add(oxideterm_gpui_ui::modal::MODAL_KEY_CONTEXT);
+        }
+
         div()
             .id("workspace-root")
             .size_full()
@@ -351,7 +398,7 @@ impl WorkspaceApp {
                 root.cursor(CursorStyle::ResizeRow)
             })
             .track_focus(&self.focus_handle)
-            .key_context("Workspace")
+            .key_context(key_context)
             // Host Tools actions bubble here from both sidebar pages and portaled dialogs.
             .on_action(
                 cx.listener(|this, request: &HostToolsWindowRequest, window, cx| {
@@ -360,15 +407,8 @@ impl WorkspaceApp {
                 }),
             )
             .on_action(cx.listener(|this, _: &Quit, _window, cx| {
-                if this.guard_dirty_knowledge_app_quit(cx) {
-                    // The global listener terminates the process, so retain this action until the
-                    // user has explicitly saved or discarded the Knowledge draft.
-                    cx.stop_propagation();
-                } else {
-                    // GPUI actions stop during the bubble phase by default. A clean workspace must
-                    // explicitly continue to the application-level quit handler.
-                    cx.propagate();
-                }
+                this.request_application_quit(cx);
+                cx.stop_propagation();
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -399,6 +439,16 @@ impl WorkspaceApp {
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape"
+                    && this.cancel_file_manager_bookmarks_resize(
+                        window.window_handle().window_id(),
+                        cx,
+                    )
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "escape" && this.cancel_tab_merge_drag(cx) {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -422,7 +472,21 @@ impl WorkspaceApp {
                     cx.stop_propagation();
                     return;
                 }
-                if this.active_sftp_editor_owns_key(event.keystroke.key.as_str(), cx)
+                if this.active_window_modal_owner(cx).is_some() {
+                    // Yield only to the modal's own input or editor, never background routing.
+                    return;
+                }
+                if this.search_editor_focused(window, cx) {
+                    if this.handle_search_editor_key(event, window, cx) {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if this
+                    .plugin_ui_state(cx)
+                    .focused_text_area_context(window, cx)
+                    .is_some()
                     || this.quick_command_text_editor_focused(window, cx)
                     || this
                         .tab_host
@@ -466,6 +530,9 @@ impl WorkspaceApp {
                 } else if active_ime_target.is_some()
                     && this.handle_active_text_input_transpose(&event.keystroke, cx)
                 {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if this.handle_privilege_credential_picker_key(event, window, cx) {
                     window.prevent_default();
                     cx.stop_propagation();
                 } else if this.handle_terminal_git_branch_picker_key(event, cx) {
@@ -700,6 +767,7 @@ impl WorkspaceApp {
             ))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.update_sidebar_resize(event, window, cx);
+                this.update_file_manager_bookmarks_resize(event, window, cx);
                 this.update_knowledge_resize(event, window, cx);
                 this.update_embedded_sftp_sidebar_resize(event, window, cx);
                 this.update_ai_sidebar_resize(event, window, cx);
@@ -711,7 +779,6 @@ impl WorkspaceApp {
                 this.update_settings_slider_drag(event, cx);
                 this.update_terminal_cast_seek_drag(event, cx);
                 // Continue scrollbar dragging after the pointer leaves its thin hit target.
-                this.update_host_tools_tab_scrollbar_drag(event, cx);
                 this.update_tabbar_scrollbar_drag(event, window, cx);
                 if this.read_only_selection_drag_active() && !event.dragging() {
                     // A platform capture loss can omit the matching mouse-up. The
@@ -864,7 +931,10 @@ impl WorkspaceApp {
             .on_action(cx.listener(|this, _: &SplitNavRight, window, cx| {
                 this.focus_adjacent_pane(true, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &Copy, _window, cx| {
+            .on_action(cx.listener(|this, _: &Copy, window, cx| {
+                if this.handle_ide_modal_edit_action("c", window, cx) {
+                    return;
+                }
                 if this.copy_active_text_input(cx) {
                     return;
                 }
@@ -875,7 +945,10 @@ impl WorkspaceApp {
                     this.copy(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &Cut, _window, cx| {
+            .on_action(cx.listener(|this, _: &Cut, window, cx| {
+                if this.handle_ide_modal_edit_action("x", window, cx) {
+                    return;
+                }
                 if this.cut_active_text_input(cx) {
                     return;
                 }
@@ -886,7 +959,10 @@ impl WorkspaceApp {
                     let _ = this.cut(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &Paste, _window, cx| {
+            .on_action(cx.listener(|this, _: &Paste, window, cx| {
+                if this.handle_ide_modal_edit_action("v", window, cx) {
+                    return;
+                }
                 if this.paste_active_text_input(cx) {
                     return;
                 }
@@ -1091,6 +1167,9 @@ impl WorkspaceApp {
                         // the gutter and content here makes resize hit-testing
                         // easy to regress on scroll-heavy Host Tools pages.
                         layout.child(self.render_animated_context_sidebar_frame(cx))
+                    })
+                    .when(!zen_mode, |layout| {
+                        layout.child(self.render_context_activity_bar(window, cx))
                     }),
             )
             .when(!zen_mode && !self.sidebar_collapsed, |root| {
@@ -1128,16 +1207,29 @@ impl WorkspaceApp {
                 )
             })
             .when(
-                self.browser_pointer_capture_owner(cx)
-                    .is_some_and(browser_behavior::pointer_capture_needs_workspace_overlay),
+                self.file_manager_bookmarks_resize_active(window.window_handle().window_id(), cx)
+                    || self
+                        .browser_pointer_capture_owner(cx)
+                        .is_some_and(browser_behavior::pointer_capture_needs_workspace_overlay),
                 |root| root.child(self.render_workspace_pointer_capture_overlay(cx)),
             )
             .when_some(self.render_session_sort_menu(cx), |root, menu| {
                 root.child(menu)
             })
-            .when(self.connection_form_state(cx).form.is_some(), |root| {
-                root.child(self.render_new_connection_modal(window, cx))
+            .when_some(self.render_context_tools_menu(window, cx), |root, menu| {
+                root.child(menu)
             })
+            .when(
+                self.connection_form_state(cx).form.is_some() && self.ssh_tunnels.form.is_none(),
+                |root| root.child(self.render_new_connection_modal(window, cx)),
+            )
+            .when_some(self.render_ssh_tunnel_form(window, cx), |root, dialog| {
+                root.child(dialog)
+            })
+            .when_some(
+                self.render_plugin_connection_form(window, cx),
+                |root, form| root.child(form),
+            )
             .when_some(self.render_ssh_algorithm_context_menu(cx), |root, menu| {
                 root.child(menu)
             })
@@ -1210,7 +1302,11 @@ impl WorkspaceApp {
             )
             .when(
                 overlay_confirm_snapshot.as_ref().is_some_and(|snapshot| {
-                    matches!(&snapshot.kind, WorkspaceOverlayConfirmKind::SettingsReset)
+                    matches!(
+                        &snapshot.kind,
+                        WorkspaceOverlayConfirmKind::SettingsReset
+                            | WorkspaceOverlayConfirmKind::CommandHistoryClear { .. }
+                    )
                 }),
                 |root| root.child(self.render_settings_reset_confirm_dialog(cx)),
             )
@@ -1278,6 +1374,9 @@ impl WorkspaceApp {
             )
             // Tab renaming is a main-window portal and never remounts the terminal tab.
             .when_some(self.render_tab_rename_dialog(cx), |root, dialog| {
+                root.child(dialog)
+            })
+            .when_some(self.render_archive_command(window, cx), |root, dialog| {
                 root.child(dialog)
             })
             // Tab-owned dialogs are portaled here so their backdrops cover all window chrome.
@@ -1425,10 +1524,7 @@ impl WorkspaceApp {
             return self.render_tab_drag_capture(None, cx);
         }
         let cursor = match self.browser_pointer_capture_owner(cx) {
-            Some(
-                browser_behavior::BrowserPointerCaptureOwner::HostToolsTabScrollbar
-                | browser_behavior::BrowserPointerCaptureOwner::TabDrag,
-            ) => CursorStyle::ClosedHand,
+            Some(browser_behavior::BrowserPointerCaptureOwner::TabDrag) => CursorStyle::ClosedHand,
             Some(
                 browser_behavior::BrowserPointerCaptureOwner::EmbeddedSftpSidebarResize
                 | browser_behavior::BrowserPointerCaptureOwner::SftpQueueResize
@@ -1452,6 +1548,7 @@ impl WorkspaceApp {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.update_tab_drag(event, window, cx);
                 this.update_sidebar_resize(event, window, cx);
+                this.update_file_manager_bookmarks_resize(event, window, cx);
                 this.update_embedded_sftp_sidebar_resize(event, window, cx);
                 this.update_knowledge_resize(event, window, cx);
                 this.update_ai_sidebar_resize(event, window, cx);
@@ -1459,7 +1556,6 @@ impl WorkspaceApp {
                 this.update_sftp_queue_resize(event, window, cx);
                 this.update_terminal_command_sender_resize(event, window, cx);
                 this.update_terminal_quick_commands_resize(event, cx);
-                this.update_host_tools_tab_scrollbar_drag(event, cx);
                 cx.stop_propagation();
             }))
             .on_mouse_up(
@@ -1479,6 +1575,8 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let capture_owner = self.browser_pointer_capture_owner(cx);
+        let resized_bookmarks =
+            self.finish_file_manager_bookmarks_resize(window.window_handle().window_id(), cx);
         let was_read_only_dragging = self.read_only_selection_drag_active();
         self.finish_sidebar_resize(cx);
         self.finish_knowledge_resize(cx);
@@ -1491,7 +1589,6 @@ impl WorkspaceApp {
         self.finish_split_drag(cx);
         self.finish_settings_slider_drag(cx);
         self.finish_terminal_cast_seek_drag(cx);
-        self.finish_host_tools_tab_scrollbar_drag(cx);
         self.finish_tabbar_scrollbar_drag(cx);
         self.finish_ime_selection_drag(cx);
         self.stop_selectable_text_autoscroll();
@@ -1503,7 +1600,11 @@ impl WorkspaceApp {
         if cancelled_sftp_drag {
             cx.notify();
         }
-        if capture_owner.is_some() || was_read_only_dragging || cancelled_sftp_drag {
+        if capture_owner.is_some()
+            || was_read_only_dragging
+            || cancelled_sftp_drag
+            || resized_bookmarks
+        {
             cx.stop_propagation();
         }
     }

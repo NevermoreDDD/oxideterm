@@ -164,6 +164,11 @@ impl WorkspaceApp {
             .pr(px(self.tokens.spacing.two))
             .border_b_1()
             .border_color(rgb(self.tokens.ui.border))
+            .bg(color_for_background(
+                self.tokens.ui.bg_secondary,
+                self.background_surface_active("knowledge"),
+                KNOWLEDGE_BACKGROUND_SURFACE_ALPHA,
+            ))
             .child(self.knowledge_navigator_action(
                 "notes-toggle-navigation",
                 if navigator_visible {
@@ -726,8 +731,8 @@ impl WorkspaceApp {
             return None;
         }
         let target = ime::WorkspaceImeTarget::KnowledgeRename;
-        let input = oxideterm_gpui_ui::text_input::text_input(
-            &self.tokens,
+        let input = self.workspace_text_input(
+            target,
             oxideterm_gpui_ui::text_input::TextInputView {
                 value: &rename.name,
                 placeholder: String::new(),

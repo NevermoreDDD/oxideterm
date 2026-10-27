@@ -12,7 +12,7 @@ struct SftpPaneRenderSnapshot {
 }
 
 struct SftpSurfaceRenderSnapshot {
-    init_error: Option<String>,
+    init_error: Option<SftpViewError>,
     pane_split_ratio: f32,
     active_pane: SftpPane,
     drag_over_pane: Option<SftpPane>,
@@ -320,6 +320,7 @@ impl WorkspaceApp {
                                 cx,
                             ))
                             .child(self.render_sftp_refresh_button(SftpPane::Remote, cx))
+                            .child(self.render_sftp_terminal_directory_button(cx))
                             .child(self.render_sftp_icon_button(
                                 LucideIcon::Upload,
                                 self.i18n.t("sftp.context.upload"),
@@ -1007,6 +1008,15 @@ impl WorkspaceApp {
             ))
             .child(self.render_sftp_refresh_button(pane, cx));
 
+        if pane == SftpPane::Remote
+            && matches!(
+                self.sftp_view().read(cx).current_remote_id,
+                Some(SftpRemoteId::Node(_))
+            )
+        {
+            header = header.child(self.render_sftp_terminal_directory_button(cx));
+        }
+
         if selected_count > 0 {
             let label = match transfer_direction {
                 SftpTransferDirection::Upload => self
@@ -1497,26 +1507,27 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let target = WorkspaceImeTarget::Sftp(self.sftp_surface_id(), input);
-        let control = text_input(
-            &self.tokens,
-            TextInputView {
-                value,
-                placeholder: self.i18n.t(placeholder_key),
-                focused,
-                caret_visible: self.input_caret.visible(),
-                secret: false,
-                selected_all: false,
-                selected_range: self.ime_selected_range_for_target(target, cx),
-                marked_text: self.marked_text_for_target(target, cx),
-            },
-        )
-        .flex_1()
-        .min_w(px(0.0))
-        .h_full()
-        .px(px(0.0))
-        .border_0()
-        .bg(rgba(0x00000000))
-        .text_size(px(SFTP_TEXT_XS));
+        let control = self
+            .workspace_text_input(
+                target,
+                TextInputView {
+                    value,
+                    placeholder: self.i18n.t(placeholder_key),
+                    focused,
+                    caret_visible: self.input_caret.visible(),
+                    secret: false,
+                    selected_all: false,
+                    selected_range: self.ime_selected_range_for_target(target, cx),
+                    marked_text: self.marked_text_for_target(target, cx),
+                },
+            )
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .px(px(0.0))
+            .border_0()
+            .bg(rgba(0x00000000))
+            .text_size(px(SFTP_TEXT_XS));
 
         // Path completion reads the same frame-local anchor stored by the shared IME primitive.
         self.text_input_with_workspace_ime(

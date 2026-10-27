@@ -10,6 +10,8 @@ pub struct TerminalSession {
 pub struct TelnetSessionConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub line_endings: TelnetLineEndings,
 }
 
 /// One-shot URI credentials consumed by the Telnet worker and never persisted.
@@ -390,6 +392,14 @@ impl TerminalSession {
         self.backend.mosh_connection_status()
     }
 
+    pub fn shell_channel_owned(&self) -> bool {
+        self.backend.shell_channel_owned()
+    }
+
+    pub fn acquire_shell_channel(&mut self) -> Result<crate::ShellChannelAcquisition> {
+        self.backend.acquire_shell_channel()
+    }
+
     pub fn set_output_processor(&mut self, processor: Option<TerminalOutputProcessor>) {
         self.backend.set_output_processor(processor);
     }
@@ -407,6 +417,14 @@ impl TerminalSession {
 
     pub fn serial_runtime_options(&self) -> Option<SerialRuntimeOptions> {
         self.backend.serial_runtime_options()
+    }
+
+    pub fn telnet_line_endings(&self) -> Option<TelnetLineEndings> {
+        self.backend.telnet_line_endings()
+    }
+
+    pub fn set_telnet_line_endings(&mut self, options: TelnetLineEndings) -> Result<()> {
+        self.backend.set_telnet_line_endings(options)
     }
 
     pub fn set_serial_runtime_options(&mut self, options: SerialRuntimeOptions) -> Result<()> {
@@ -558,6 +576,10 @@ impl TerminalSession {
 
     pub fn process_info(&self) -> TerminalProcessInfo {
         self.backend.process_info()
+    }
+
+    pub fn launch_shell(&self) -> Option<crate::ShellInfo> {
+        self.backend.launch_shell()
     }
 
     pub fn process_info_probe(&self) -> Option<TerminalProcessProbe> {

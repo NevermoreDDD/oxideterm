@@ -2,6 +2,7 @@ mod entity;
 mod form_entity;
 mod form_state;
 mod form_view;
+pub(super) use form_view::NEW_CONNECTION_TYPE_SIDEBAR_WIDTH;
 mod ftp;
 mod host_key_dialog;
 mod kbi_dialog;
@@ -22,6 +23,7 @@ pub(super) use form_state::{
     password_draft_mut, refresh_connection_timeout_seconds, refresh_identity_agent_availability,
     ssh_auth_tab_from_saved_auth, terminal_serial_flow_from_profile,
     terminal_serial_parity_from_profile, terminal_serial_runtime_options_from_profile,
+    terminal_telnet_line_endings_from_profile,
 };
 pub(super) use host_key_dialog::HostKeyChallenge;
 pub(super) use kbi_dialog::KeyboardInteractiveChallenge;

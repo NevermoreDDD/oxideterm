@@ -257,6 +257,21 @@
     "shortcut_count": "개의 단축키"
   },
   "plugin": {
+    "connections": {
+      "name": "이름",
+      "group": "그룹",
+      "cancel": "취소",
+      "save": "저장",
+      "save_connect": "저장 후 연결",
+      "failed": "작업을 완료하지 못했습니다. 연결 설정과 플러그인 권한을 확인하세요.",
+      "disconnect": "연결 해제",
+      "connecting": "연결 중…",
+      "connected": "연결됨",
+      "disconnected": "연결 끊김",
+      "unavailable": "연결 플러그인을 사용할 수 없습니다. 연결하려면 플러그인을 활성화하거나 설치하세요.",
+      "password_unchanged": "저장된 값을 유지하려면 비워 두세요",
+      "clear_credentials": "저장된 인증 정보 삭제"
+    },
     "install_queued": "대기 중 · {{position}}번째",
     "installing_named": "{{name}} 설치 중",
     "install_queue_count": "{{count}}개 대기 중",
@@ -296,6 +311,7 @@
     "native_sidebar_empty_description": "플러그인 탭에서 현재 native 상태를 확인하세요.",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "현재 비밀번호가 이 동기화 공간에서 사용한 비밀번호와 다릅니다. 기존 비밀번호를 입력하고 저장한 후 변경하세요. 기존 비밀번호를 잊었다면 새 네임스페이스를 지정하고 이 기기의 설정을 업로드하세요.",
         "protocol_upgrade_required": "동기화 서버를 새 클라우드 동기화 프로토콜을 지원하는 버전으로 업데이트한 후 다시 동기화하세요.",
         "password_change_pending": "비밀번호 변경이 완료되지 않았습니다. 이전에 입력한 새 비밀번호로 다시 시도해 주세요.",
         "change_password": "동기화 비밀번호 변경",
@@ -484,7 +500,7 @@
         "auto_upload_interval": "자동 업로드 간격 (분)",
         "default_conflict_strategy": "기본 충돌 해결 방법",
         "sync_connections": "연결 동기화",
-        "sync_forwards": "저장된 포워딩 동기화",
+        "sync_forwards": "포트 포워딩 및 SSH 터널 동기화",
         "sync_quick_commands": "빠른 명령 동기화",
         "sync_serial_profiles": "시리얼 프로필 동기화",
         "sync_telnet_profiles": "Telnet 프로필 동기화",
@@ -860,6 +876,7 @@
         "redacted": "숨김"
       },
       "diff_fields": {
+        "plugin_configuration": "연결 설정",
         "name": "이름",
         "group": "그룹",
         "host": "호스트",
@@ -1141,6 +1158,8 @@
     "continue_button": "OxideTerm 2 시작"
   },
   "onboarding": {
+    "more_features": "더 많은 기능 보기",
+    "less_features": "추가 기능 접기",
     "step_welcome": "환영합니다",
     "step_appearance": "외관",
     "step_workflow": "연결과 사용 방법",
@@ -1318,8 +1337,8 @@
     "external_import_desc": "SSH 설정과 지원되는 타사 터미널 관리자에서 미리보기와 중복 처리와 함께 호스트를 가져옵니다."
   },
   "zen_mode": {
-    "hint": "Zen 모드 — ⌘⇧Z를 눌러 종료",
-    "hint_other": "Zen 모드 — Ctrl+Shift+Z를 눌러 종료"
+    "hint": "Zen 모드 — {{shortcut}} 키를 눌러 종료",
+    "hint_unbound": "Zen 모드 — 명령 팔레트에서 종료할 수 있습니다"
   },
   "tabbar": {
     "drag_to_dock": "드래그하여 도킹",

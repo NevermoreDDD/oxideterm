@@ -132,6 +132,7 @@ impl Render for DetachedTabWindow {
             .track_focus(&self.focus_handle)
             .on_mouse_move(cx.listener(|detached, event: &MouseMoveEvent, window, cx| {
                 detached.session.update(cx, |session, cx| {
+                    session.update_file_manager_bookmarks_resize(event, window, cx);
                     session.update_detached_tab_return_drag(detached.tab_id, event, window, cx);
                     if session.split_drag_belongs_to_tab(detached.tab_id) {
                         session.update_split_drag(event, window, cx);
@@ -142,6 +143,10 @@ impl Render for DetachedTabWindow {
                 MouseButton::Left,
                 cx.listener(|detached, event: &MouseUpEvent, window, cx| {
                     detached.session.update(cx, |session, cx| {
+                        session.finish_file_manager_bookmarks_resize(
+                            window.window_handle().window_id(),
+                            cx,
+                        );
                         session.finish_detached_tab_return_drag(detached.tab_id, event, window, cx);
                         if session.split_drag_belongs_to_tab(detached.tab_id) {
                             session.finish_split_drag(cx);
@@ -151,6 +156,14 @@ impl Render for DetachedTabWindow {
             )
             .capture_key_down(cx.listener(|detached, event: &KeyDownEvent, window, cx| {
                 let handled = detached.session.update(cx, |session, cx| {
+                    if event.keystroke.key == "escape"
+                        && session.cancel_file_manager_bookmarks_resize(
+                            window.window_handle().window_id(),
+                            cx,
+                        )
+                    {
+                        return true;
+                    }
                     if event.keystroke.key == "escape" && session.cancel_tab_merge_drag(cx) {
                         return true;
                     }
@@ -185,57 +198,24 @@ impl Render for DetachedTabWindow {
                         }
                         return true;
                     }
+                    if session.search_editor_focused(window, cx) {
+                        return session.handle_search_editor_key(event, window, cx);
+                    }
                     if !session.app_lock.locked
                         && let Some(pane_id) = session
                             .tab_by_id(detached.tab_id, cx)
                             .and_then(|tab| tab.active_pane_id)
                     {
                         let input = session.active_ime_target_for_window(window_id, cx);
-                        if input.is_none_or(|target| {
-                            matches!(target, super::ime::WorkspaceImeTarget::Search(_))
-                        }) && crate::keybindings::keystroke_matches_action(
-                            &event.keystroke,
-                            "terminal.search",
-                            &session.settings_store.settings().keybindings.overrides,
-                        ) {
+                        if input.is_none()
+                            && crate::keybindings::keystroke_matches_action(
+                                &event.keystroke,
+                                "terminal.search",
+                                &session.settings_store.settings().keybindings.overrides,
+                            )
+                        {
                             session.open_search_for_pane(pane_id, window, cx);
                             return true;
-                        }
-                        if matches!(
-                            session.active_ime_target_for_window(window_id, cx),
-                            Some(super::ime::WorkspaceImeTarget::Search(_))
-                        ) {
-                            if session.defer_active_ime_key(&event.keystroke, window, cx) {
-                                return false;
-                            }
-                            if session.handle_active_text_input_edit_shortcut(&event.keystroke, cx)
-                                || session
-                                    .handle_active_text_input_delete_selection(&event.keystroke, cx)
-                                || session.handle_active_text_input_transpose(&event.keystroke, cx)
-                                || session.handle_active_text_input_navigation(&event.keystroke, cx)
-                            {
-                                return true;
-                            }
-                            match event.keystroke.key.as_str() {
-                                "escape" => {
-                                    session.hide_search(pane_id, cx);
-                                    if let Some(pane) =
-                                        session.tab_host.read(cx).panes().get(&pane_id).cloned()
-                                    {
-                                        pane.update(cx, |pane, cx| pane.focus(window, cx));
-                                    }
-                                    return true;
-                                }
-                                "enter" => {
-                                    session.search_next_for_pane(
-                                        pane_id,
-                                        !event.keystroke.modifiers.shift,
-                                        cx,
-                                    );
-                                    return true;
-                                }
-                                _ => {}
-                            }
                         }
                     }
                     if !session.app_lock.locked
@@ -340,16 +320,10 @@ impl Render for DetachedTabWindow {
                 }
             }))
             .on_action(cx.listener(|detached, _: &Quit, _window, cx| {
-                let intercepted = detached
+                detached
                     .session
-                    .update(cx, |session, cx| session.guard_dirty_knowledge_app_quit(cx));
-                if intercepted {
-                    cx.stop_propagation();
-                } else {
-                    // Detached roots also stop actions during bubbling, so clean exits must reach
-                    // the application-level handler explicitly.
-                    cx.propagate();
-                }
+                    .update(cx, |session, cx| session.request_application_quit(cx));
+                cx.stop_propagation();
             }))
             .map(|root| {
                 // Window creation can paint this root while its Workspace is leased.
@@ -378,6 +352,18 @@ impl Render for DetachedTabWindow {
             .child(window_shell::render_resizable_window_content(
                 content, window,
             ))
+            .when(
+                self.ready
+                    && self.session.read(cx).file_manager_bookmarks_resize_active(
+                        window.window_handle().window_id(),
+                        cx,
+                    ),
+                |root| {
+                    root.child(self.session.update(cx, |workspace, cx| {
+                        workspace.render_workspace_pointer_capture_overlay(cx)
+                    }))
+                },
+            )
             .when(
                 self.ready
                     && self

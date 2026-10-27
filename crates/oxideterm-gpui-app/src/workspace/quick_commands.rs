@@ -1,9 +1,9 @@
 pub(super) use oxideterm_quick_commands::{
     QUICK_COMMANDS_SCHEMA_VERSION, QuickCommand, QuickCommandAvailability, QuickCommandCategory,
     QuickCommandCategoryDraft, QuickCommandConfirmationPolicy, QuickCommandIcon,
-    QuickCommandImportResult, QuickCommandImportStrategy, QuickCommandParameter,
-    QuickCommandParameterKind, QuickCommandTargetProtocol, QuickCommandsSnapshot,
-    default_quick_command_categories, default_quick_commands, now_ms,
+    QuickCommandImportResult, QuickCommandImportStrategy, QuickCommandMatchField,
+    QuickCommandParameter, QuickCommandParameterKind, QuickCommandTargetProtocol,
+    QuickCommandsSnapshot, default_quick_command_categories, default_quick_commands, now_ms,
 };
 use std::{cell::RefCell, collections::HashMap, path::Path, path::PathBuf};
 
@@ -33,6 +33,7 @@ pub(super) enum QuickCommandInput {
     ParameterDefault(usize),
     ParameterChoices(usize),
     CategoryName,
+    CategoryColor,
 }
 
 impl QuickCommandInput {
@@ -44,6 +45,7 @@ impl QuickCommandInput {
             Self::CommandDescription => 4,
             Self::CommandHostPattern => 5,
             Self::CategoryName => 6,
+            Self::CategoryColor => 7,
             Self::ParameterName(index) => 100 + index as u64 * 4,
             Self::ParameterLabel(index) => 101 + index as u64 * 4,
             Self::ParameterDefault(index) => 102 + index as u64 * 4,
@@ -70,6 +72,7 @@ pub(super) struct QuickCommandEditorDraft {
     pub category: String,
     pub description: String,
     pub host_patterns: String,
+    pub match_field: QuickCommandMatchField,
     pub parameters: Vec<QuickCommandParameterEditorDraft>,
     pub protocols: Vec<QuickCommandTargetProtocol>,
     pub confirmation: QuickCommandConfirmationPolicy,

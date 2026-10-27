@@ -11,14 +11,16 @@ use std::{
 };
 
 use oxideterm_sftp::{
-    LocalDownloadDisposition, SftpTransferManager, TarTransferOptions, probe_scp_capabilities,
-    probe_tar_capabilities, profile_local_directory, scp_download_directory, scp_download_file,
-    scp_upload_directory, scp_upload_file, tar_upload_directory,
+    LocalDownloadDisposition, SftpExecChannelOpener, SftpTransferManager, TarTransferOptions,
+    probe_scp_capabilities, probe_tar_capabilities, profile_local_directory,
+    scp_download_directory, scp_download_file, scp_upload_directory, scp_upload_file,
+    tar_upload_directory,
 };
 use oxideterm_ssh::{
     AuthMethod, ConnectionConsumer, ConnectionPoolConfig, ProxyHopConfig, SshConfig,
     SshConnectionRegistry, SshTransportClient, SshTransportCommand, UpstreamProxyAuth,
-    UpstreamProxyConfig, UpstreamProxyProtocol, upstream_proxy_from_env,
+    UpstreamProxyConfig, UpstreamProxyProtocol, X11ForwardPolicy, X11ForwardingFailure,
+    X11ForwardingStatus, upstream_proxy_from_env,
 };
 use rand10::{RngExt, SeedableRng};
 use tokio::{
@@ -86,6 +88,89 @@ async fn local_sshd_upstream_proxy_e2e_matrix() {
         no_proxy_count,
         "matching no_proxy rules must bypass the upstream proxy"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires local sshd, ssh-keygen and xauth; run with --test-threads=1"]
+async fn local_sshd_x11_reports_fallback_and_server_assigned_display() {
+    let rejected = SshdFixture::start();
+    let accepted = SshdFixture::with_x11(10, true);
+    let authority = accepted.dir.join("local.authority");
+    let xauth = if PathBuf::from("/opt/X11/bin/xauth").is_file() {
+        "/opt/X11/bin/xauth"
+    } else {
+        "/usr/bin/xauth"
+    };
+    run(Command::new(xauth).arg("-f").arg(&authority).args([
+        "add",
+        "192.0.2.1:77",
+        "MIT-MAGIC-COOKIE-1",
+        "0123456789abcdef0123456789abcdef",
+    ]));
+    let _authority = EnvVarGuard::set("XAUTHORITY", authority.display().to_string());
+    for (server, display, expected) in [
+        (
+            &accepted,
+            "invalid",
+            X11ForwardingStatus::Unavailable(X11ForwardingFailure::LocalDisplayUnavailable),
+        ),
+        (
+            &rejected,
+            "192.0.2.1:77",
+            X11ForwardingStatus::Unavailable(X11ForwardingFailure::ServerRejected),
+        ),
+        (&accepted, "192.0.2.1:77", X11ForwardingStatus::Accepted),
+    ] {
+        let _display = EnvVarGuard::set("DISPLAY", display.into());
+        let mut config = target_config(server);
+        config.x11_forwarding = Some(X11ForwardPolicy::trusted());
+        let mut terminal = SshTransportClient::new(config)
+            .connect_shell()
+            .await
+            .unwrap();
+        terminal
+            .command_tx
+            .send(SshTransportCommand::Data(
+                b"printf '\\n%s%s%s\\n' '__X11_' 'DISPLAY__=' \"$DISPLAY\"; printf '\\n%s%s\\n' '__SSH_' 'READY__'\n"
+                    .to_vec(),
+            ))
+            .await
+            .unwrap();
+        let remote_display = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut output = Vec::new();
+            loop {
+                match terminal.output_rx.try_recv() {
+                    Ok(chunk) => output.extend_from_slice(&chunk),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("X11 fallback closed the regular shell: {error}"),
+                }
+                let text = String::from_utf8_lossy(&output);
+                if text.contains("__SSH_READY__")
+                    && let Some((_, suffix)) = text.split_once("__X11_DISPLAY__=")
+                {
+                    break suffix.lines().next().unwrap_or_default().trim().to_string();
+                }
+            }
+        })
+        .await
+        .expect("regular shell must run with or without X11");
+        assert_eq!(terminal.take_x11_forwarding_status(), Some(expected));
+        assert_eq!(terminal.take_x11_forwarding_status(), None);
+        if expected == X11ForwardingStatus::Accepted {
+            let (host, display) = remote_display
+                .split_once(':')
+                .expect("server display address");
+            assert_eq!(host, "localhost");
+            let (number, screen) = display.split_once('.').unwrap();
+            assert!(number.parse::<u16>().unwrap() >= 1000);
+            assert_eq!(screen, "0");
+        } else {
+            assert_eq!(remote_display, "");
+        }
+    }
 }
 
 #[tokio::test]
@@ -464,6 +549,206 @@ impl SshConfigExt for SshConfig {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires local sshd and ssh-keygen"]
+async fn local_sshd_sftp_channel_pressure_preserves_transfers_and_refresh() {
+    for limit in [2, 3, 5, 10] {
+        let sshd = SshdFixture::with_max_sessions(limit);
+        let terminal = SshTransportClient::new(target_config(&sshd))
+            .connect_shell_with_registry(
+                SshConnectionRegistry::default(),
+                ConnectionConsumer::Terminal("sftp-pressure".into()),
+            )
+            .await
+            .unwrap();
+        let connection = terminal.ssh_connection_handle().unwrap();
+        let source = sshd.dir.join("source");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/child.txt"), b"nested contents").unwrap();
+        let payload = vec![0x5a; 1024 * 1024];
+        fs::write(source.join("payload.bin"), &payload).unwrap();
+        let root = sshd.dir.to_str().unwrap();
+
+        for _ in 0..40 {
+            let listing = connection.acquire_transfer_sftp().await.unwrap();
+            assert!(
+                listing
+                    .list_dir(root, None)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|f| f.name == "source")
+            );
+        }
+        // Existing shared consumers must remain usable when no new slot is available.
+        let browser = connection.acquire_sftp().await.unwrap();
+        let listing = connection.acquire_transfer_sftp().await.unwrap();
+        assert_eq!(
+            listing
+                .stat(source.join("nested/child.txt").to_str().unwrap())
+                .await
+                .unwrap()
+                .size,
+            15
+        );
+        drop(listing);
+        drop(browser);
+        connection.clear_sftp().await;
+
+        for round in 0..3 {
+            let transfer = connection.acquire_transfer_sftp().await.unwrap();
+            let manager = Arc::new(SftpTransferManager::new());
+            manager.set_speed_limit_kbps(1024);
+            let destination = sshd.dir.join(format!("uploaded-{round}"));
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(32);
+            let upload = async {
+                let result = transfer
+                    .upload_dir(
+                        source.to_str().unwrap(),
+                        destination.to_str().unwrap(),
+                        "pressure-upload",
+                        Some(progress_tx),
+                        Some(manager),
+                    )
+                    .await;
+                drop(transfer);
+                result
+            };
+            let refresh = async {
+                progress_rx
+                    .recv()
+                    .await
+                    .expect("upload must be active during refresh");
+                let listing = connection.acquire_transfer_sftp().await.unwrap();
+                assert!(
+                    listing
+                        .list_dir(root, None)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|f| f.name == "source")
+                );
+                while progress_rx.recv().await.is_some() {}
+            };
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::join!(upload, refresh)
+            })
+            .await
+            .expect("upload and refresh must not deadlock");
+            assert_eq!(result.unwrap(), 2);
+            assert_eq!(fs::read(destination.join("payload.bin")).unwrap(), payload);
+            assert_eq!(
+                fs::read(destination.join("nested/child.txt")).unwrap(),
+                b"nested contents"
+            );
+            let listing = connection.acquire_transfer_sftp().await.unwrap();
+            assert_eq!(
+                listing
+                    .stat(destination.join("payload.bin").to_str().unwrap())
+                    .await
+                    .unwrap()
+                    .size,
+                payload.len() as u64
+            );
+            if round == 0 {
+                let downloaded = sshd.dir.join("downloaded");
+                assert_eq!(
+                    listing
+                        .download_dir(
+                            destination.to_str().unwrap(),
+                            downloaded.to_str().unwrap(),
+                            "pressure-download",
+                            None,
+                            None
+                        )
+                        .await
+                        .unwrap(),
+                    2
+                );
+                assert_eq!(fs::read(downloaded.join("payload.bin")).unwrap(), payload);
+                assert_eq!(
+                    fs::read(downloaded.join("nested/child.txt")).unwrap(),
+                    b"nested contents"
+                );
+            }
+        }
+
+        let manager = Arc::new(SftpTransferManager::new());
+        manager.set_speed_limit_kbps(64);
+        let transfer = connection.acquire_transfer_sftp().await.unwrap();
+        let cancelled_destination = sshd.dir.join("cancelled");
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(32);
+        let upload = async {
+            transfer
+                .upload_dir(
+                    source.to_str().unwrap(),
+                    cancelled_destination.to_str().unwrap(),
+                    "cancel-pressure",
+                    Some(progress_tx),
+                    Some(manager.clone()),
+                )
+                .await
+        };
+        let cancel = async {
+            progress_rx.recv().await.unwrap();
+            let listing = connection.acquire_transfer_sftp().await.unwrap();
+            assert!(manager.cancel("cancel-pressure"));
+            while progress_rx.recv().await.is_some() {}
+            assert_eq!(
+                listing
+                    .stat(source.join("nested/child.txt").to_str().unwrap())
+                    .await
+                    .unwrap()
+                    .size,
+                15
+            );
+        };
+        let (cancelled, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(upload, cancel)
+        })
+        .await
+        .expect("cancellation must leave the shared listing usable");
+        assert!(matches!(
+            cancelled,
+            Err(oxideterm_sftp::SftpError::TransferCancelled)
+        ));
+        drop(transfer);
+
+        // Raw session channels cannot fall back to sharing: acquiring every slot
+        // proves transfer/refresh/cancellation did not leave an SFTP owner behind.
+        let mut slots = Vec::new();
+        for _ in 0..limit - 1 {
+            let channel = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match connection.open_exec_channel().await {
+                        Ok(channel) => break channel,
+                        Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    }
+                }
+            })
+            .await
+            .expect("all server slots must be reclaimed");
+            slots.push(channel);
+        }
+        assert!(connection.open_exec_channel().await.is_err());
+        let rejected =
+            tokio::time::timeout(Duration::from_secs(3), connection.acquire_transfer_sftp())
+                .await
+                .expect("unavailable slots must not cause an endless wait")
+                .unwrap_err();
+        assert!(matches!(
+            rejected,
+            oxideterm_sftp::SftpError::ChannelOpenRejected(_)
+        ));
+        for channel in slots {
+            channel.close().await.unwrap();
+        }
+        eprintln!(
+            "MaxSessions={limit}: 40 refreshes, 3 verified uploads with concurrent refresh, cancellation, and slot reclamation passed"
+        );
+    }
+}
+
 struct SshdFixture {
     dir: PathBuf,
     port: u16,
@@ -479,6 +764,10 @@ impl SshdFixture {
     }
 
     fn with_max_sessions(max_sessions: usize) -> Self {
+        Self::with_x11(max_sessions, false)
+    }
+
+    fn with_x11(max_sessions: usize, x11: bool) -> Self {
         let sshd = "/usr/sbin/sshd";
         let ssh_keygen = "ssh-keygen";
         assert!(
@@ -517,6 +806,20 @@ impl SshdFixture {
             .expect("write authorized keys");
         set_private_permissions(&dir, &client_key, &host_key, &authorized_keys);
 
+        let x11_config = if x11 {
+            let xauth = if PathBuf::from("/opt/X11/bin/xauth").is_file() {
+                "/opt/X11/bin/xauth"
+            } else {
+                "/usr/bin/xauth"
+            };
+            // Both client and server authority files remain inside the fixture.
+            format!(
+                "X11Forwarding yes\nX11DisplayOffset 1000\nXAuthLocation {xauth}\nPermitUserRC no\nSetEnv XAUTHORITY={}\n",
+                dir.join("remote.authority").display()
+            )
+        } else {
+            "X11Forwarding no\n".to_string()
+        };
         let config = format!(
             "\
 Port {port}
@@ -536,6 +839,7 @@ MaxSessions {max_sessions}
 PermitRootLogin no
 AllowUsers {username}
 LogLevel VERBOSE
+{x11_config}
 ",
             host_key = host_key.display(),
             pid_path = pid_path.display(),

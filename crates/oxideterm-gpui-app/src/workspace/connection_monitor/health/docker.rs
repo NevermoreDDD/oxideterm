@@ -277,7 +277,7 @@ impl HostToolsEntity {
         let anchor_frame = ime.clone();
         text_input_anchor_probe(
             ime.anchor_id(),
-            text_input(
+            ime.text_input(
                 tokens,
                 TextInputView {
                     value: &self.ui.host_docker_search_query,
@@ -527,6 +527,11 @@ impl HostToolsEntity {
         };
 
         div()
+            .id(host_tools_row_id(
+                "host-docker-row",
+                connection_id,
+                container.id.clone(),
+            ))
             .w_full()
             .min_w_0()
             .border_b_1()
@@ -1142,7 +1147,6 @@ impl HostToolsEntity {
     }
 
     fn refresh_host_docker_snapshot(&mut self, connection_id: String, cx: &mut Context<Self>) {
-        self.profiler_registry().stop(&connection_id);
         self.request_profiler_refresh(connection_id, cx);
     }
 
@@ -1650,8 +1654,7 @@ impl HostToolsEntity {
                 succeeded: delivery.result.unwrap_or(false),
             },
         ));
-        // Force a new Docker sample after the remote state transition.
-        self.profiler_registry.stop(&delivery.request.connection_id);
+        // Sample the remote state transition without clearing the current list.
         self.request_profiler_refresh(delivery.request.connection_id, cx);
         cx.notify();
     }

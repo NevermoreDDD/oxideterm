@@ -13,6 +13,8 @@ use crate::{AiPolicySafetyMode, AiToolChoice, AiToolUsePolicy};
 fn test_stream_config(provider_type: &str) -> AiChatStreamConfig {
     AiChatStreamConfig {
         api_protocol: crate::AiApiProtocol::default(),
+        image_input: Default::default(),
+        omit_history_images: false,
         execution_backend: AiExecutionBackend::Provider,
         provider_id: Some("provider".to_string()),
         acp_agent_id: None,
@@ -53,6 +55,361 @@ fn chat_message(id: &str, role: AiChatRole, content: &str) -> AiChatMessage {
         branches: None,
         suggestions: Vec::new(),
     }
+}
+
+#[test]
+fn tool_images_reach_completion_protocols_after_all_tool_results() {
+    let image = AiImageAttachment::new(
+        "screen.png".into(),
+        "image/png".into(),
+        32,
+        32,
+        b"pixel",
+        b"thumb",
+    )
+    .unwrap();
+    let mut assistant = chat_message("assistant", AiChatRole::Assistant, "");
+    assistant.tool_calls = vec![
+        serde_json::json!({"id":"a","name":"screen","arguments":"{}"}),
+        serde_json::json!({"id":"b","name":"state","arguments":"{}"}),
+    ];
+    let mut first = chat_message("first", AiChatRole::Tool, "Captured");
+    first.tool_call_id = Some("a".into());
+    set_message_images(&mut first, vec![image]);
+    let mut second = chat_message("second", AiChatRole::Tool, "Ready");
+    second.tool_call_id = Some("b".into());
+    let messages = [assistant, first, second];
+    let wire = openai_chat_messages(&test_stream_config("mimo"), &messages);
+    assert_eq!(
+        wire.iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["assistant", "tool", "tool", "user"]
+    );
+    assert_eq!(
+        wire[3]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,cGl4ZWw="
+    );
+    assert!(
+        wire[3]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("a")
+    );
+    let wire = crate::streaming::responses_body(&test_stream_config("openai"), &messages);
+    assert_eq!(
+        wire["input"][2]["output"][1]["image_url"],
+        "data:image/png;base64,cGl4ZWw="
+    );
+    for model in ["gemini-3-flash", "gemini-2.5-flash"] {
+        let contents = gemini_chat_contents(&messages, model).1;
+        let parts = &contents[2]["parts"];
+        let image = if model.starts_with("gemini-3") {
+            &parts[0]["functionResponse"]["parts"][0]
+        } else {
+            &parts[2]
+        };
+        assert_eq!(
+            image["inlineData"],
+            serde_json::json!({"mimeType":"image/png","data":"cGl4ZWw="})
+        );
+        assert_eq!(parts[0]["functionResponse"]["name"], "screen");
+        assert_eq!(
+            parts[0]["functionResponse"]["response"]["output"],
+            "Captured"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tool_images_do_not_disappear_when_a_text_only_model_returns_them() {
+    let mut message = chat_message("result", AiChatRole::Tool, "Captured");
+    message.tool_call_id = Some("a".into());
+    set_message_images(
+        &mut message,
+        vec![
+            AiImageAttachment::new(
+                "screen.png".into(),
+                "image/png".into(),
+                32,
+                32,
+                b"pixel",
+                b"thumb",
+            )
+            .unwrap(),
+        ],
+    );
+    let mut config = test_stream_config("deepseek");
+    config.model = "deepseek-chat".into();
+    config.omit_history_images = true;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    stream_chat_completion(config, vec![message], tx).await;
+    assert!(
+        matches!(rx.recv().await, Some(AiStreamEvent::Error(error)) if error == "ai_image_model_unsupported")
+    );
+}
+
+#[test]
+fn mimo_preset_discovers_chat_models_and_budgets_images() {
+    let template = providers::provider_template_by_type("mimo");
+    assert_eq!(template.base_url, "https://api.xiaomimimo.com/v1");
+    assert_eq!(
+        template.initial_models,
+        &["mimo-v2.6-pro", "mimo-v2.6-flash"]
+    );
+    assert_eq!(
+        parse_provider_models(
+            "mimo",
+            &serde_json::json!({"data": [
+                {"id": "mimo-v2.6-pro"}, {"id": "mimo-v2.5-tts"},
+                {"id": "mimo-v2.6-flash"}, {"id": "mimo-v2.5-asr"}
+            ]})
+        ),
+        ["mimo-v2.6-flash", "mimo-v2.6-pro"]
+    );
+    for model in [
+        "mimo-v2.6-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro-ultraspeed",
+        "mimo-v2.5",
+    ] {
+        assert_eq!(
+            model_image_input("mimo", model, AiImageInput::Auto),
+            Some(true)
+        );
+        assert_eq!(
+            model_context_window(model, &Default::default(), None, &Default::default()),
+            1_000_000
+        );
+        for (width, height, expected) in [
+            (1024, 1024, 1024),
+            (2000, 2000, 3844),
+            (64, 64, 9),
+            (4096, 4096, 8100),
+        ] {
+            let estimate = estimate_image_tokens("mimo", model, width, height);
+            assert_eq!(estimate.tokens, expected, "{model}: {width}x{height}");
+            assert!(estimate.known_rule);
+        }
+    }
+    assert_eq!(
+        model_image_input("mimo", "unlisted-model", AiImageInput::Auto),
+        None
+    );
+}
+
+#[tokio::test]
+async fn unknown_image_model_reaches_the_provider_with_its_attachment() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = test_stream_config("openai_compatible");
+    config.model = "custom-vision-model".into();
+    config.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(socket.read_u8().await.unwrap());
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        let length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["model"], "custom-vision-model");
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([
+                {"type":"image_url", "image_url":{"url":"data:image/png;base64,cGl4ZWw="}}
+            ])
+        );
+        let response = r#"{"choices":[{"message":{"role":"assistant","content":"Image received"},"finish_reason":"stop"}]}"#;
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+    });
+    let mut message = chat_message("image", AiChatRole::User, "");
+    set_message_images(
+        &mut message,
+        vec![
+            AiImageAttachment::new(
+                "screen.png".into(),
+                "image/png".into(),
+                32,
+                32,
+                b"pixel",
+                b"thumb",
+            )
+            .unwrap(),
+        ],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream_chat_completion(config, vec![message], tx),
+    )
+    .await
+    .unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    assert_eq!(
+        events,
+        vec![
+            AiStreamEvent::Content("Image received".into()),
+            AiStreamEvent::Done
+        ]
+    );
+    server.await.unwrap();
+}
+
+#[test]
+fn image_input_serializes_across_all_completion_protocols_and_keeps_image_only_turns() {
+    use serde_json::json;
+    let image = AiImageAttachment::new(
+        "screen.png".into(),
+        "image/png".into(),
+        1024,
+        1024,
+        b"pixel",
+        b"thumb",
+    )
+    .unwrap();
+    let mut message = chat_message("image", AiChatRole::User, "");
+    set_message_images(&mut message, vec![image]);
+    let mut messages = vec![message];
+    stream_state::normalize_ai_stream_history_for_provider(&mut messages);
+    for provider in [
+        "openai",
+        "openai_compatible",
+        "deepseek",
+        "ollama",
+        "kimi",
+        "glm",
+        "mimo",
+        "xai",
+        "custom_vendor",
+    ] {
+        let config = test_stream_config(provider);
+        assert_eq!(
+            openai_chat_messages(&config, &messages)[0]["content"],
+            json!([
+                {"type":"image_url", "image_url":{"url":"data:image/png;base64,cGl4ZWw="}}
+            ]),
+            "{provider}"
+        );
+    }
+    assert_eq!(
+        gemini_chat_contents(&messages, "gemini-2.5-flash").1[0]["parts"],
+        json!([
+            {"inlineData":{"mimeType":"image/png", "data":"cGl4ZWw="}}
+        ])
+    );
+    assert_eq!(
+        crate::streaming::responses_body(&test_stream_config("openai"), &messages)["input"][0]["content"],
+        json!([
+            {"type":"input_image", "image_url":"data:image/png;base64,cGl4ZWw=", "detail":"auto"}
+        ])
+    );
+    messages[0].content = "Explain".into();
+    assert_eq!(
+        openai_chat_messages(&test_stream_config("ollama"), &messages)[0]["content"][0],
+        json!({"type":"text","text":"Explain"})
+    );
+}
+
+#[test]
+fn image_input_model_switch_preserves_history_and_budgets_the_target_model() {
+    let mut message = chat_message("image", AiChatRole::User, "Describe");
+    set_message_images(
+        &mut message,
+        vec![
+            AiImageAttachment::new(
+                "screen.png".into(),
+                "image/png".into(),
+                1024,
+                1024,
+                b"pixel",
+                b"thumb",
+            )
+            .unwrap(),
+        ],
+    );
+    let original = vec![message];
+    for summary in [
+        stream_state::ai_compaction_summary_messages(&original),
+        stream_state::ai_conversation_summary_messages(&original),
+    ] {
+        assert_eq!(message_images(&summary[1]), message_images(&original[0]));
+        assert!(
+            summary[1]
+                .content
+                .contains("Image 1 belongs to conversation message 1.")
+        );
+    }
+    assert_eq!(
+        message_images(&stream_state::ai_compaction_anchor_snapshot(&original)[0]),
+        message_images(&original[0])
+    );
+    let mut config = test_stream_config("openai");
+    for (model, expected) in [("gpt-4o", 765), ("gpt-4o-mini", 25501), ("gpt-5.4", 1229)] {
+        config.model = model.into();
+        let mut request = original.clone();
+        prepare_image_history(&mut request, &config);
+        assert_eq!(
+            stream_state::ai_message_payload_estimated_tokens(&request[0], "openai")
+                - stream_state::ai_message_estimated_tokens(&request[0]),
+            expected,
+            "{model}"
+        );
+    }
+    config.omit_history_images = true;
+    let mut request = original.clone();
+    prepare_image_history(&mut request, &config);
+    assert!(message_images(&request[0]).is_empty());
+    assert_eq!(
+        request[0].content,
+        "Describe\n[Image 1 omitted: text-only conversation mode.]"
+    );
+    assert_eq!(
+        message_images(&original[0])[0].data.as_deref(),
+        Some("cGl4ZWw=")
+    );
+    assert_eq!(
+        model_image_input("deepseek", "deepseek-chat", AiImageInput::Auto),
+        Some(false)
+    );
+    assert_eq!(
+        model_image_input("openai_compatible", "custom", AiImageInput::Auto),
+        None
+    );
+    assert_eq!(
+        model_image_input("openai_compatible", "custom", AiImageInput::Enabled),
+        Some(true)
+    );
+    let unknown = estimate_image_tokens("openai_compatible", "custom", 1024, 1024);
+    assert_eq!(
+        unknown,
+        AiImageTokenEstimate {
+            tokens: 1369,
+            known_rule: false
+        }
+    );
+    assert_eq!(
+        estimate_image_tokens("openai", "gpt-5.4", 2048, 2048).tokens,
+        3000
+    );
+    assert_eq!(
+        estimate_image_tokens("openai", "gpt-6-astra", 2048, 2048).tokens,
+        4916
+    );
 }
 
 #[test]
@@ -157,6 +514,12 @@ fn orchestrator_v2_authority_inventory_covers_every_tool() {
         "list_memory_entries": { "authority": "memory_store", "fields": [] },
         "manage_memory_entry": { "authority": "memory_store", "fields": [] }
     });
+    for name in ["search_web", "read_web_page"] {
+        inventory.as_object_mut().unwrap().insert(
+            name.into(),
+            serde_json::json!({"authority":"global_search_configuration", "fields":[]}),
+        );
+    }
     inventory
         .as_object_mut()
         .expect("the contract inventory is an object")
@@ -1733,7 +2096,7 @@ fn gemini_messages_merge_roles_and_system_instruction() {
         chat_message("3", AiChatRole::User, "two"),
         chat_message("4", AiChatRole::Assistant, "answer"),
     ];
-    let (system, contents) = gemini_chat_contents(&messages);
+    let (system, contents) = gemini_chat_contents(&messages, "gemini-2.5-flash");
     assert_eq!(system.as_deref(), Some("sys"));
     assert_eq!(contents[0]["role"], "user");
     assert_eq!(contents[0]["parts"][0]["text"], "one");
@@ -1745,7 +2108,7 @@ fn gemini_messages_merge_roles_and_system_instruction() {
         chat_message("2", AiChatRole::System, ""),
         chat_message("3", AiChatRole::User, "one"),
     ];
-    let (system, _) = gemini_chat_contents(&messages);
+    let (system, _) = gemini_chat_contents(&messages, "gemini-2.5-flash");
     assert_eq!(system.as_deref(), Some("sys\n\n"));
 
     let messages = vec![
@@ -1753,7 +2116,7 @@ fn gemini_messages_merge_roles_and_system_instruction() {
         chat_message("2", AiChatRole::System, "sys"),
         chat_message("3", AiChatRole::User, "one"),
     ];
-    let (system, _) = gemini_chat_contents(&messages);
+    let (system, _) = gemini_chat_contents(&messages, "gemini-2.5-flash");
     assert_eq!(system.as_deref(), Some("sys"));
 
     let body = gemini_chat_body(
@@ -1842,7 +2205,7 @@ fn gemini_signed_parts_round_trip_without_rebuilding() {
     }
     set_ai_provider_parts(&mut assistant, "gemini", provider_parts);
 
-    let (_, contents) = gemini_chat_contents(&[assistant]);
+    let (_, contents) = gemini_chat_contents(&[assistant], "gemini-2.5-flash");
 
     assert_eq!(
         contents[1]["parts"],
@@ -1958,6 +2321,11 @@ fn deepseek_flash_template_has_current_name_and_capabilities() {
         "deepseek-v4-flash-vision-exp",
     ] {
         assert_eq!(
+            model_image_input("deepseek", model, AiImageInput::Auto),
+            Some(true),
+            "{model}"
+        );
+        assert_eq!(
             model_context_window(
                 model,
                 &serde_json::Map::new(),
@@ -1967,6 +2335,10 @@ fn deepseek_flash_template_has_current_name_and_capabilities() {
             1_048_576
         );
     }
+    assert_eq!(
+        model_image_input("deepseek", "deepseek-v4-pro", AiImageInput::Auto),
+        Some(false)
+    );
     let capability = model_reasoning_capability("deepseek", "deepseek-flash");
     assert!(capability.known_model);
     assert_eq!(

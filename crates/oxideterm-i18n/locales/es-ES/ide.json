@@ -1,5 +1,6 @@
 {
   "ide": {
+    "file_binary": "Este archivo es binario y no se puede abrir en el editor de texto.",
     "file_too_large": "El archivo supera el límite de edición del IDE de 100 MiB.",
     "file_encoding": "Codificación del archivo",
     "file_line_ending": "Finales de línea",
@@ -43,6 +44,7 @@
     "search_truncated": "Resultados truncados. Refina tu búsqueda para obtener coincidencias más específicas.",
     "search_results_count": "{{count}} resultados en {{files}} archivos",
     "find_placeholder": "Buscar",
+    "insert_newline": "Insertar salto de línea",
     "replace_placeholder": "Reemplazar",
     "find_next": "Siguiente coincidencia (Enter)",
     "find_previous": "Coincidencia anterior (Shift+Enter)",

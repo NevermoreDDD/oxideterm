@@ -84,8 +84,10 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::TerminalSessionLogFileMode => SelectAnchorId::SettingsTerminalSessionLogFileMode,
             Self::TerminalCursorStyle => SelectAnchorId::SettingsTerminalCursorStyle,
             Self::RemoteShellIntegrationMode => SelectAnchorId::SettingsRemoteShellIntegrationMode,
+            Self::XmodemBlockSize => SelectAnchorId::SettingsXmodemBlockSize,
             Self::TerminalTriggerMatchMode => SelectAnchorId::SettingsTerminalTriggerMatchMode,
             Self::TerminalTriggerAction => SelectAnchorId::SettingsTerminalTriggerAction,
+            Self::TerminalTriggerClickAction => SelectAnchorId::SettingsTerminalTriggerClickAction,
             Self::TerminalTriggerProcessMode => SelectAnchorId::SettingsTerminalTriggerProcessMode,
             Self::TerminalTriggerQuickCommand => {
                 SelectAnchorId::SettingsTerminalTriggerQuickCommand
@@ -97,7 +99,11 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::LocalShellSemanticScheme(index) => {
                 SelectAnchorId::SettingsLocalShellSemanticScheme(index)
             }
-            Self::LocalPrivilegeKind => SelectAnchorId::SettingsLocalPrivilegeKind,
+            Self::LocalPrivilegePromptType => SelectAnchorId::SettingsLocalPrivilegePromptType,
+            Self::LocalPrivilegeResponseMode => SelectAnchorId::SettingsLocalPrivilegeResponseMode,
+            Self::LocalPrivilegeTotpCredential => {
+                SelectAnchorId::SettingsLocalPrivilegeTotpCredential
+            }
             Self::ConnectionIdleTimeout => SelectAnchorId::SettingsConnectionIdleTimeout,
             Self::ReconnectMaxAttempts => SelectAnchorId::SettingsReconnectMaxAttempts,
             Self::ReconnectBaseDelay => SelectAnchorId::SettingsReconnectBaseDelay,
@@ -109,6 +115,7 @@ impl SettingsSelectAnchorExt for SettingsSelect {
             Self::NetworkProxyAuth => SelectAnchorId::SettingsNetworkProxyAuth,
             Self::AiProviderTemplate => SelectAnchorId::SettingsAiProviderTemplate,
             Self::AiEmbeddingProvider => SelectAnchorId::SettingsAiEmbeddingProvider,
+            Self::AiWebSearchProvider => SelectAnchorId::SettingsAiWebSearchProvider,
             Self::KnowledgeCollectionScope => SelectAnchorId::SettingsKnowledgeCollectionScope,
             Self::KnowledgeDocumentFormat => SelectAnchorId::SettingsKnowledgeDocumentFormat,
             Self::AiMcpTransport => SelectAnchorId::SettingsAiMcpTransport,

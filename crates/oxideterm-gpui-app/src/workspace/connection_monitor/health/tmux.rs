@@ -171,21 +171,22 @@ impl WorkspaceApp {
             let host_tools = self.host_tools.read(cx);
             let ui = &host_tools.ui;
             let dialog = ui.host_tmux_input_dialog.as_ref()?;
-            let input_control = text_input(
-                &self.tokens,
-                TextInputView {
-                    value: dialog.value.as_str(),
-                    placeholder: self.i18n.t(host_tmux_input_placeholder_key(&dialog.kind)),
-                    focused: ui.input_is_focused(HostToolsTextInput::TmuxDialog),
-                    caret_visible: self.input_caret.visible(),
-                    secret: false,
-                    selected_all: false,
-                    selected_range: self.ime_selected_range_for_target(target, cx),
-                    marked_text: self.marked_text_for_target(target, cx),
-                },
-            )
-            .h(px(34.0))
-            .cursor(CursorStyle::IBeam);
+            let input_control = self
+                .workspace_text_input(
+                    target,
+                    TextInputView {
+                        value: dialog.value.as_str(),
+                        placeholder: self.i18n.t(host_tmux_input_placeholder_key(&dialog.kind)),
+                        focused: ui.input_is_focused(HostToolsTextInput::TmuxDialog),
+                        caret_visible: self.input_caret.visible(),
+                        secret: false,
+                        selected_all: false,
+                        selected_range: self.ime_selected_range_for_target(target, cx),
+                        marked_text: self.marked_text_for_target(target, cx),
+                    },
+                )
+                .h(px(34.0))
+                .cursor(CursorStyle::IBeam);
             (
                 dialog.kind.clone(),
                 dialog.session_name.clone(),
@@ -389,7 +390,7 @@ impl HostToolsEntity {
         let anchor_frame = ime.clone();
         text_input_anchor_probe(
             ime.anchor_id(),
-            text_input(
+            ime.text_input(
                 tokens,
                 TextInputView {
                     value: &self.ui.host_tmux_search_query,
@@ -813,6 +814,11 @@ impl HostToolsEntity {
         let session_id = session.id.clone();
 
         div()
+            .id(host_tools_row_id(
+                "host-tmux-row",
+                connection_id,
+                session.id.clone(),
+            ))
             .w_full()
             .min_w_0()
             .border_b_1()
@@ -1343,6 +1349,7 @@ impl HostToolsEntity {
         let expanded = self.ui.host_tmux_expanded_window_id.as_deref() == Some(window.id.as_str());
         let window_id = window.id.clone();
         div()
+            .id((gpui::ElementId::from("host-tmux-window"), window.id.clone()))
             .mt_1()
             .rounded(px(tokens.radii.md))
             .border_1()
@@ -1440,6 +1447,7 @@ impl HostToolsEntity {
     ) -> AnyElement {
         let theme = tokens.ui;
         div()
+            .id((gpui::ElementId::from("host-tmux-pane"), pane.id.clone()))
             .px_2()
             .py_1()
             .flex()

@@ -1,4 +1,18 @@
 {
+  "ssh_tunnel": {
+    "description": "Reenvía puertos a través de un host SSH guardado.",
+    "title": "Túnel SSH",
+    "name": "Nombre del túnel",
+    "group": "Grupo",
+    "group_invalid": "La ruta del grupo no puede contener segmentos vacíos.",
+    "host": "Servidor SSH",
+    "choose_host": "Selecciona un servidor SSH guardado",
+    "startup": "Conectar al iniciar la aplicación",
+    "missing_host": "El servidor SSH guardado no está disponible.",
+    "name_required": "Introduce un nombre para el túnel. El nombre y el grupo no pueden contener saltos de línea.",
+    "address_required": "Introduce direcciones de escucha y destino válidas.",
+    "save_failed": "No se pudo actualizar el túnel SSH."
+  },
   "copy_address": "Copiar dirección",
   "copied": "¡Copiado!",
   "forwards": {
@@ -9,13 +23,13 @@
       "vscode": "VS Code (8080)"
     },
     "table": {
-      "title": "Reenvíos activos",
+      "title": "Reenvío de puertos",
       "type": "Tipo",
       "local_address": "Dirección local",
       "remote_address": "Dirección remota",
       "status": "Estado",
       "actions": "Acciones",
-      "no_forwards": "No hay reenvíos de puertos activos"
+      "no_forwards": "No hay reglas de reenvío de puertos"
     },
     "type": {
       "local": "Local",
@@ -50,6 +64,7 @@
       "cancel": "Cancelar",
       "type": "Tipo",
       "create_forward": "Crear reenvío",
+      "save_and_start": "Guardar e iniciar",
       "creating": "Creando...",
       "save_changes": "Guardar cambios",
       "saving": "Guardando...",
@@ -101,7 +116,7 @@
       "alreadyForwarded": "Reenviado"
     },
     "messages": {
-      "node_not_ready": "Abra una terminal SSH activa para este nodo antes de administrar reenvíos.",
+      "node_not_ready": "No se pudo iniciar la conexión SSH. Conéctese a este servidor e inténtelo de nuevo.",
       "connection_not_ready": "La conexión SSH aún no está lista.",
       "created": "Reenvío creado",
       "updated": "Reenvío actualizado",

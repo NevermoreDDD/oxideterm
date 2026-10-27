@@ -77,12 +77,8 @@ pub(in crate::workspace) struct HostToolsEntity {
     selector_open: bool,
     selector_highlighted_index: Option<usize>,
     selector_focus_origin: Option<browser_behavior::BrowserFocusOrigin>,
-    tab_scroll_handle: ScrollHandle,
-    // Secondary navigation and its pointer capture remain stable across every
-    // Host Tools mount point.
+    // Tool state survives sidebar navigation and visibility changes.
     active_tool: ContextSidebarTool,
-    previous_tool: ContextSidebarTool,
-    tab_scrollbar_drag: Option<HostToolsTabScrollbarDragState>,
     // Visibility is an Entity lifecycle input. It controls only page-scoped
     // sampling and never owns or releases shared SSH transports.
     pub(super) visibility: HostToolsVisibility,
@@ -608,10 +604,7 @@ impl HostToolsEntity {
             selector_open: false,
             selector_highlighted_index: None,
             selector_focus_origin: None,
-            tab_scroll_handle: ScrollHandle::new(),
             active_tool: ContextSidebarTool::Monitor,
-            previous_tool: ContextSidebarTool::Monitor,
-            tab_scrollbar_drag: None,
             visibility: HostToolsVisibility::Hidden,
             lifecycle_runtime: None,
             sampling_config: oxideterm_connection_monitor::ResourceSamplingConfig::default(),
@@ -755,6 +748,12 @@ impl HostToolsEntity {
                 .map(|environment| environment.os_type)
                 .unwrap_or_else(|| "Unknown".to_string())
         })
+    }
+
+    pub(super) fn remote_env_detection_running(&self, connection_id: &str) -> bool {
+        self.ssh_registry
+            .get(connection_id)
+            .is_some_and(|handle| handle.remote_env_detection_running())
     }
 
     pub(super) fn spawn_log_snapshot_capture(
@@ -1485,6 +1484,18 @@ impl HostToolsEntity {
         if !self.visibility.sidebar_is_visible() || self.sampling_config.is_empty() {
             return;
         }
+        if self
+            .ssh_registry
+            .get(&connection_id)
+            .is_some_and(|handle| handle.remote_env().is_none())
+        {
+            self.ssh_registry.retry_remote_env_detection(&connection_id);
+            cx.notify();
+            return;
+        }
+        if self.profiler_registry.request_refresh(&connection_id) {
+            return;
+        }
         let Some(runtime) = self.lifecycle_runtime.clone() else {
             return;
         };
@@ -1509,16 +1520,8 @@ impl HostToolsEntity {
         self.selected_connection_id.as_deref()
     }
 
-    pub(super) fn tab_scroll_handle(&self) -> ScrollHandle {
-        self.tab_scroll_handle.clone()
-    }
-
     pub(in crate::workspace) fn active_tool(&self) -> ContextSidebarTool {
         self.active_tool
-    }
-
-    pub(super) fn previous_tool(&self) -> ContextSidebarTool {
-        self.previous_tool
     }
 
     pub(in crate::workspace) fn select_tool(
@@ -1529,13 +1532,12 @@ impl HostToolsEntity {
         if self.active_tool == tool {
             return false;
         }
-        self.previous_tool = self.active_tool;
         self.active_tool = tool;
         cx.notify();
         true
     }
 
-    pub(super) fn select_sidebar_tool(
+    pub(in crate::workspace) fn select_sidebar_tool(
         &mut self,
         tool: ContextSidebarTool,
         cx: &mut Context<Self>,
@@ -1575,36 +1577,8 @@ impl HostToolsEntity {
             );
             self.request_active_tool_snapshot(HostSnapshotFeedback::Silent, cx);
         }
-        cx.emit(HostToolsEvent::ToolSelected(tool));
+        cx.emit(HostToolsEvent::ToolSelected);
         true
-    }
-
-    pub(in crate::workspace) fn reset_active_tool(&mut self, cx: &mut Context<Self>) -> bool {
-        self.select_tool(ContextSidebarTool::Monitor, cx)
-    }
-
-    pub(super) fn tab_scrollbar_drag_active(&self) -> bool {
-        self.tab_scrollbar_drag.is_some()
-    }
-
-    pub(super) fn tab_scrollbar_grab_offset(&self) -> Option<f32> {
-        self.tab_scrollbar_drag.map(|drag| drag.grab_offset_x)
-    }
-
-    pub(super) fn begin_tab_scrollbar_drag(&mut self, grab_offset_x: f32, cx: &mut Context<Self>) {
-        self.tab_scrollbar_drag = Some(HostToolsTabScrollbarDragState { grab_offset_x });
-        cx.notify();
-    }
-
-    pub(in crate::workspace) fn finish_tab_scrollbar_drag(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let changed = self.tab_scrollbar_drag.take().is_some();
-        if changed {
-            cx.notify();
-        }
-        changed
     }
 
     pub(in crate::workspace) fn selected_connection_id_owned(&self) -> Option<String> {
@@ -2245,6 +2219,8 @@ mod tests {
     fn visibility_stops_page_samplers_but_keeps_reliable_actions_and_node_owner(
         cx: &mut TestAppContext,
     ) {
+        // Real Tokio samplers wake delivery tasks from outside the GPUI test scheduler.
+        cx.executor().allow_parking();
         let runtime = tokio::runtime::Runtime::new().expect("create test runtime");
         let registry = SshConnectionRegistry::default();
         let node_consumer = ConnectionConsumer::NodeRouter("node-visibility".to_string());

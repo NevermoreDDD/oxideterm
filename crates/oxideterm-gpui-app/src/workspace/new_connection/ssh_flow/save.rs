@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use super::*;
+use crate::workspace::new_connection::form_state::terminal_serial_line_ending_from_profile;
 use crate::workspace::{
     WorkspaceNotificationKind, WorkspaceNotificationScope, WorkspaceNotificationSeverity,
     new_connection::terminal_serial_runtime_options_from_profile,
@@ -1635,6 +1636,8 @@ impl WorkspaceApp {
                 let should_save_profile =
                     editing_profile_id.is_some() || action != NewConnectionSubmitAction::Connect;
                 let save_request = should_save_profile.then(|| SaveTelnetProfileRequest {
+                    input_line_ending: Some(form.telnet_input_line_ending),
+                    output_line_ending: Some(form.telnet_output_line_ending),
                     upstream_proxy: Some(upstream_proxy.clone()),
                     id: editing_profile_id,
                     name: telnet_profile_name_or_endpoint(&form.telnet_profile_name, &host, port),
@@ -1648,7 +1651,18 @@ impl WorkspaceApp {
                     terminal: form.terminal.clone(),
                     connect_on_open: existing_connect_on_open,
                 });
-                let config = TelnetSessionConfig { host, port };
+                let config = TelnetSessionConfig {
+                    host,
+                    port,
+                    line_endings: oxideterm_terminal::TelnetLineEndings {
+                        input: terminal_serial_line_ending_from_profile(
+                            form.telnet_input_line_ending,
+                        ),
+                        output: terminal_serial_line_ending_from_profile(
+                            form.telnet_output_line_ending,
+                        ),
+                    },
+                };
                 let terminal_options = form.terminal.clone();
                 form.pending = true;
                 form.error = None;
@@ -2825,12 +2839,14 @@ impl WorkspaceApp {
             .connection_form_state(cx)
             .form
             .as_ref()
-            .filter(|form| form.save_password && action == SavedConnectionPromptAction::Connect)
+            .filter(|form| form.save_password && action != SavedConnectionPromptAction::Test)
             .and_then(|_| self.connection_store.get(&id))
             .map(super::super::password_prompt::SavedAuthSaveTarget::new);
         let secret_handoff = match action {
             SavedConnectionPromptAction::Test => RuntimeSecretHandoff::CopyForTest,
-            SavedConnectionPromptAction::Connect => RuntimeSecretHandoff::Move,
+            SavedConnectionPromptAction::Connect | SavedConnectionPromptAction::Tunnel => {
+                RuntimeSecretHandoff::Move
+            }
         };
         let Some((mut config, title)) = self.build_new_connection_config(secret_handoff, cx) else {
             return;
@@ -2862,6 +2878,15 @@ impl WorkspaceApp {
         }
 
         match action {
+            SavedConnectionPromptAction::Tunnel => {
+                if let Some(tunnel_id) = self.ssh_tunnels.pending_auth.take() {
+                    self.update_connection_form_state(cx, |state| state.form = None);
+                    self.connect_ssh_tunnel_with_config(&tunnel_id, config, window, cx);
+                    if let Some(node) = self.saved_ssh_nodes.get(&id).cloned() {
+                        self.arm_saved_auth_save(&node, auth_save_target);
+                    }
+                }
+            }
             SavedConnectionPromptAction::Connect => {
                 self.update_connection_form_state(cx, |state| {
                     if let Some(form) = state.form.as_mut() {

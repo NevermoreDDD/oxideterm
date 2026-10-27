@@ -1,7 +1,6 @@
 use super::*;
 
 pub(in crate::workspace) const AI_ACP_AGENT_TEXTAREA_MIN_H: f32 = 72.0; // Tauri min-h-[72px] for ACP args/env drafts.
-pub(in crate::workspace) const AI_TOOL_NUMBER_INPUT_W: f32 = 96.0; // Tauri w-24.
 pub(in crate::workspace) const AI_ACP_AGENT_FIELD_MIN_WIDTH: f32 = 220.0; // Keep ACP form fields readable on narrow settings panes.
 pub(in crate::workspace) const AI_ACP_AGENT_TEXTAREA_FIELD_MIN_WIDTH: f32 = 240.0; // Multiline command fields need more room than compact selects.
 pub(in crate::workspace) const AI_ACP_AGENT_CAPABILITY_MIN_WIDTH: f32 = 150.0; // Capability checkboxes should wrap as chips, not grid columns.
@@ -658,6 +657,7 @@ impl WorkspaceApp {
                 },
                 cx,
             ))
+            .child(div().mt(px(12.0)).child(self.ai_provider_add_controls(cx)))
             .when_some(provider_list, |section, provider_list| {
                 section.child(provider_list)
             })
@@ -673,7 +673,6 @@ impl WorkspaceApp {
             .iter()
             .map(|provider| self.ai_provider_card_estimated_height(provider, cx))
             .sum::<f32>()
-            + AI_PROVIDER_CARD_LIST_ESTIMATED_HEIGHT
     }
 
     pub(in crate::workspace) fn ai_provider_card_estimated_height(
@@ -715,14 +714,24 @@ impl WorkspaceApp {
         } else {
             0.0
         };
-        // This mirrors the nested card structure: header, toolbar, two-column
-        // fields, model-chip rows, optional API-key editor, and row spacing.
+        let protocol_height = if matches!(
+            provider.provider_type.as_str(),
+            "openai" | "openai_compatible" | "xai"
+        ) {
+            64.0
+        } else {
+            0.0
+        };
+        let remove_height = if provider.custom { 40.0 } else { 0.0 };
+        // Account for independently wrapped fields and the optional protocol/key controls.
         72.0 + 52.0
-            + 112.0
+            + 144.0
             + 34.0
             + chip_rows as f32 * AI_PROVIDER_MODEL_CHIP_ROW_ESTIMATED_HEIGHT
             + 48.0
             + key_input_height
+            + protocol_height
+            + remove_height
             + 16.0
     }
 
@@ -731,7 +740,7 @@ impl WorkspaceApp {
         providers: &[AiProviderView],
         cx: &App,
     ) {
-        let mut signatures = providers
+        let signatures = providers
             .iter()
             .map(|provider| {
                 let active_provider = self
@@ -745,6 +754,7 @@ impl WorkspaceApp {
                     .ai_entity
                     .read(cx)
                     .settings_provider_expanded(&provider.id, active_provider);
+                let mut hasher = DefaultHasher::new();
                 ai_provider_card_signature(
                     provider,
                     expanded,
@@ -753,11 +763,13 @@ impl WorkspaceApp {
                         .settings_provider_models_expanded(&provider.id),
                     self.ai_provider_has_key_cached(&provider.id, cx),
                 )
+                .hash(&mut hasher);
+                self.ai_web_provider_id()
+                    .is_ok_and(|id| id == provider.id)
+                    .hash(&mut hasher);
+                hasher.finish()
             })
             .collect::<Vec<_>>();
-        // The add-provider controls are the final virtual row inside this
-        // section. Keep a stable sentinel signature for that fixed row.
-        signatures.push(0xadd0_0001);
         let ai = self.ai_entity.read(cx);
         let model_ui = ai.model_ui();
         sync_tauri_variable_list_state_by_signatures(
@@ -782,14 +794,6 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let providers = ai_provider_views(self.settings_store.settings());
-        if index == providers.len() {
-            return div()
-                .w_full()
-                .min_w(px(0.0))
-                .pb(px(12.0))
-                .child(self.ai_provider_add_controls(cx))
-                .into_any_element();
-        }
         let Some(provider) = providers.get(index) else {
             return div().into_any_element();
         };
@@ -868,7 +872,7 @@ impl WorkspaceApp {
         let has_custom_prompt = !settings.ai.custom_system_prompt.trim().is_empty();
         settings_ai_editor_summary_section(
             &self.tokens,
-            self.ai_section_title("settings_view.ai.system_prompt_title"),
+            self.i18n.t("settings_view.ai.system_prompt_title"),
             self.i18n.t("settings_view.ai.system_prompt_hint"),
             None,
             self.i18n.t(if has_custom_prompt {
@@ -894,11 +898,7 @@ impl WorkspaceApp {
                 .any(|entry| !entry.content.trim().is_empty());
         settings_ai_editor_summary_section(
             &self.tokens,
-            settings_ai_icon_heading(
-                Self::render_lucide_icon(LucideIcon::Brain, 16.0, rgb(self.tokens.ui.text)),
-                self.ai_section_title("settings_view.ai.memory_title"),
-            )
-            .into_any_element(),
+            self.i18n.t("settings_view.ai.memory_title"),
             self.i18n.t("settings_view.ai.memory_hint"),
             Some(self.bool_row(
                 "settings_view.ai.memory_enabled",
@@ -989,6 +989,42 @@ impl WorkspaceApp {
                         .text_color(rgb(self.tokens.ui.text_muted))
                         .child(self.i18n.t("settings_view.ai.tool_use_approve_hint"))
                         .into_any_element(),
+                    policy_groups,
+                    settings_ai_policy_warning(
+                        &self.tokens,
+                        self.i18n.t("settings_view.ai.tool_policy_warning"),
+                    ),
+                ],
+            )
+        });
+
+        settings_ai_tool_use_section(
+            settings_ai_icon_heading(
+                Self::render_lucide_icon(LucideIcon::Wrench, 16.0, rgb(self.tokens.ui.text)),
+                self.ai_section_title("settings_view.ai.tool_use"),
+            ),
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(self.tokens.metrics.settings_card_gap))
+                .child(self.select_setting_row(
+                    "settings_view.ide.agent_mode_label",
+                    "settings_view.ide.agent_mode_hint",
+                    SettingsSelect::IdeAgentMode,
+                    ide_agent_label(settings.ide.agent_mode, &self.i18n),
+                    self.tokens.metrics.settings_select_width,
+                    cx,
+                ))
+                .child(self.bool_row(
+                    "settings_view.ai.tool_use_enabled",
+                    "settings_view.ai.tool_use_enabled_hint",
+                    settings.ai.tool_use.enabled,
+                    set_ai_tool_use_enabled,
+                    cx,
+                ))
+                .child(
                     self.ai_tool_number_input_row(
                         "settings_view.ai.tool_use_max_rounds",
                         "settings_view.ai.tool_use_max_rounds_hint",
@@ -1000,261 +1036,14 @@ impl WorkspaceApp {
                             .unwrap_or(oxideterm_settings::DEFAULT_AI_TOOL_MAX_ROUNDS),
                         cx,
                     ),
-                    self.render_ai_agent_concurrency_setting(cx),
-                    policy_groups,
-                    self.ai_disabled_tools_notice(settings, cx),
-                    settings_ai_policy_warning(
-                        &self.tokens,
-                        self.i18n.t("settings_view.ai.tool_policy_warning"),
-                    ),
-                ],
-            )
-        });
-
-        settings_ai_tool_use_section(
-            AI_PROVIDER_MAX_W,
-            settings_ai_icon_heading(
-                Self::render_lucide_icon(LucideIcon::Wrench, 16.0, rgb(self.tokens.ui.text)),
-                self.ai_section_title("settings_view.ai.tool_use"),
-            ),
+                )
+                .child(self.ai_disabled_tools_notice(settings, cx))
+                .into_any_element(),
+            self.card_title("settings_view.ai.tool_auto_approval_title"),
             self.ai_tool_expand_button(cx),
-            self.bool_row(
-                "settings_view.ai.tool_use_enabled",
-                "settings_view.ai.tool_use_enabled_hint",
-                settings.ai.tool_use.enabled,
-                set_ai_tool_use_enabled,
-                cx,
-            ),
             collapsed_summary,
             expanded_body,
         )
-    }
-
-    pub(in crate::workspace) fn ai_skills_section(
-        &self,
-        settings: &PersistedSettings,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let registry = self.skill_registry.read();
-        let records = registry.records().cloned().collect::<Vec<_>>();
-        let diagnostic_count = registry.diagnostics().len();
-        drop(registry);
-        let enabled_count = records.iter().filter(|record| record.enabled).count();
-        let mut section = div()
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(settings_ai_icon_heading(
-                        Self::render_lucide_icon(
-                            LucideIcon::BookOpen,
-                            16.0,
-                            rgb(self.tokens.ui.text),
-                        ),
-                        self.ai_section_title("settings_view.ai.skills_title"),
-                    ))
-                    .child(self.workspace_toolbar_action_button(
-                        self.i18n.t("settings_view.ai.skills_refresh"),
-                        Some(Self::render_lucide_icon(
-                            LucideIcon::RefreshCw,
-                            12.0,
-                            rgb(self.tokens.ui.text),
-                        )),
-                        ToolbarButtonOptions {
-                            button: ButtonOptions {
-                                variant: ButtonVariant::Outline,
-                                size: ButtonSize::Sm,
-                                radius: ButtonRadius::Md,
-                                disabled: false,
-                            },
-                            ..ToolbarButtonOptions::default()
-                        },
-                        cx.listener(|this, _event, _window, cx| {
-                            this.refresh_ai_skill_registry();
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    )),
-            )
-            .child(
-                div()
-                    .text_size(px(self.tokens.metrics.ui_text_xs))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .line_height(px(18.0))
-                    .child(self.i18n.t("settings_view.ai.skills_hint")),
-            )
-            .child(self.bool_row(
-                "settings_view.ai.skills_enabled",
-                "settings_view.ai.skills_enabled_hint",
-                settings.ai.skills.enabled,
-                set_ai_skills_enabled,
-                cx,
-            ))
-            .child(
-                div()
-                    .text_size(px(self.tokens.metrics.ui_text_xs))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(
-                        self.i18n
-                            .t("settings_view.ai.skills_summary")
-                            .replace("{{enabled}}", &enabled_count.to_string())
-                            .replace("{{total}}", &records.len().to_string())
-                            .replace("{{diagnostics}}", &diagnostic_count.to_string()),
-                    ),
-            );
-
-        if records.is_empty() {
-            return section
-                .child(
-                    div()
-                        .py(px(8.0))
-                        .text_size(px(self.tokens.metrics.ui_text_xs))
-                        .text_color(rgb(self.tokens.ui.text_muted))
-                        .child(self.i18n.t("settings_view.ai.skills_empty")),
-                )
-                .into_any_element();
-        }
-
-        for record in records {
-            let skill_path = record.skill_path.to_string_lossy().into_owned();
-            let checked = record.enabled;
-            let source = match record.origin {
-                oxideterm_skills::SkillOrigin::AgentStandard => ".agents",
-                oxideterm_skills::SkillOrigin::OxideTerm => "OxideTerm",
-                oxideterm_skills::SkillOrigin::ClaudeCompatible => ".claude",
-                oxideterm_skills::SkillOrigin::CopilotCompatible => ".github",
-                oxideterm_skills::SkillOrigin::OpenCodeCompatible => ".opencode",
-                oxideterm_skills::SkillOrigin::Plugin => "skills/",
-            };
-            let scope_key = match record.scope {
-                oxideterm_skills::SkillScope::Workspace => {
-                    "settings_view.ai.skills_scope_workspace"
-                }
-                oxideterm_skills::SkillScope::User => "settings_view.ai.skills_scope_user",
-                oxideterm_skills::SkillScope::Plugin => "settings_view.ai.skills_scope_plugin",
-            };
-            section = section.child(
-                div()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .border_t_1()
-                    .border_color(rgba((self.tokens.ui.border << 8) | 0x66))
-                    .pt(px(10.0))
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(
-                                div()
-                                    .text_size(px(self.tokens.metrics.ui_text_sm))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(rgb(self.tokens.ui.text))
-                                    .child(record.name),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(self.tokens.metrics.ui_text_xs))
-                                    .text_color(rgb(self.tokens.ui.text_muted))
-                                    .child(record.description),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(self.tokens.ui.text_muted))
-                                    .child(format!("{} · {}", self.i18n.t(scope_key), source)),
-                            ),
-                    )
-                    .child(
-                        checkbox(&self.tokens, String::new(), checked).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                let skill_path = skill_path.clone();
-                                this.edit_settings(
-                                    move |settings| {
-                                        if checked {
-                                            if !settings
-                                                .ai
-                                                .skills
-                                                .disabled_paths
-                                                .iter()
-                                                .any(|path| path == &skill_path)
-                                            {
-                                                settings.ai.skills.disabled_paths.push(skill_path);
-                                            }
-                                        } else {
-                                            settings
-                                                .ai
-                                                .skills
-                                                .disabled_paths
-                                                .retain(|path| path != &skill_path);
-                                        }
-                                    },
-                                    cx,
-                                );
-                                this.refresh_ai_skill_registry();
-                                cx.stop_propagation();
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            );
-        }
-        section.into_any_element()
-    }
-
-    pub(in crate::workspace) fn refresh_ai_skill_registry(&mut self) {
-        let plugin_registry =
-            plugin_host::NativePluginRegistry::discover(self.settings_store.path());
-        let plugin_roots = plugin_registry
-            .plugins()
-            .iter()
-            .filter(|plugin| {
-                matches!(
-                    plugin.state,
-                    plugin_host::NativePluginState::ReadyManifestOnly
-                        | plugin_host::NativePluginState::ReadyWasm
-                        | plugin_host::NativePluginState::ReadyProcess
-                        | plugin_host::NativePluginState::Active
-                )
-            })
-            .map(|plugin| plugin.install_dir.clone())
-            .collect();
-        let disabled_paths = self
-            .settings_store
-            .settings()
-            .ai
-            .skills
-            .disabled_paths
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect();
-        let registry =
-            oxideterm_skills::SkillRegistry::discover(&oxideterm_skills::SkillDiscoveryOptions {
-                workspace_root: self.skill_workspace_root.clone(),
-                settings_path: Some(self.settings_store.path().to_path_buf()),
-                plugin_roots,
-                disabled_paths,
-            });
-        *self.skill_registry.write() = registry;
-        // A disabled or replaced skill must be loaded again before resources
-        // can be read in any existing conversation.
-        self.loaded_conversation_skills.clear();
     }
 
     pub(in crate::workspace) fn ai_tool_number_input_row(
@@ -1270,7 +1059,12 @@ impl WorkspaceApp {
             self.setting_row(
                 label_key,
                 hint_key,
-                self.number_input(input, value.to_string(), AI_TOOL_NUMBER_INPUT_W, cx),
+                self.number_input(
+                    input,
+                    value.to_string(),
+                    self.tokens.metrics.settings_number_input_width,
+                    cx,
+                ),
                 cx,
             ),
         )
@@ -1642,31 +1436,33 @@ impl WorkspaceApp {
         let input = SettingsInput::AiModelContextWindow(provider_index, model_index);
         let reset_provider_id = provider_id.to_string();
         let reset_model = model.to_string();
-        let reset = row.has_override.then(|| {
-            div()
-                .cursor_pointer()
-                .text_color(rgba((self.tokens.ui.text_muted << 8) | 0x99))
-                .hover(|style| style.text_color(rgb(self.tokens.ui.text)))
-                .child(Self::render_lucide_icon(
-                    LucideIcon::X,
-                    12.0,
-                    rgb(self.tokens.ui.text_muted),
-                ))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event, _window, cx| {
-                        let provider_id = reset_provider_id.clone();
-                        let model = reset_model.clone();
-                        this.edit_settings(
-                            move |settings| {
-                                set_ai_user_context_window(settings, &provider_id, &model, None);
-                            },
-                            cx,
-                        );
-                        cx.stop_propagation();
-                    }),
-                )
-                .into_any_element()
+        let reset = Some({
+            self.workspace_toolbar_action_button(
+                self.i18n.t("settings_view.ai.ctx_reset"),
+                None,
+                ToolbarButtonOptions {
+                    button: ButtonOptions {
+                        variant: ButtonVariant::Ghost,
+                        size: ButtonSize::Sm,
+                        disabled: !row.has_override,
+                        ..Default::default()
+                    },
+                    height: Some(28.0),
+                    ..Default::default()
+                },
+                cx.listener(move |this, _event, _window, cx| {
+                    let provider_id = reset_provider_id.clone();
+                    let model = reset_model.clone();
+                    this.edit_settings(
+                        move |settings| {
+                            set_ai_user_context_window(settings, &provider_id, &model, None);
+                        },
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
         });
         settings_ai_context_window_row(
             &self.tokens,
@@ -1796,6 +1592,25 @@ impl WorkspaceApp {
                     )
                 })
                 .into_any_element();
+            let disabled = item.key.is_some_and(|key| {
+                self.settings_store
+                    .settings()
+                    .ai
+                    .tool_use
+                    .disabled_tools
+                    .iter()
+                    .any(|name| name == key)
+            });
+            let control = if disabled {
+                self.text_badge(self.i18n.t("common.disabled"), self.tokens.ui.warning)
+            } else if locked {
+                self.text_badge(
+                    self.i18n.t("settings_view.ai.tool_no_confirmation"),
+                    self.tokens.ui.text_muted,
+                )
+            } else {
+                control
+            };
             items.push(settings_ai_tool_policy_item(
                 &self.tokens,
                 self.i18n.t(item.label_key),
@@ -1807,7 +1622,14 @@ impl WorkspaceApp {
             &self.tokens,
             self.i18n.t(group.title_key),
             self.i18n.t(group.description_key),
-            group_control.into_any_element(),
+            if group_state == AiToolPolicyGroupState::Locked {
+                self.text_badge(
+                    self.i18n.t("settings_view.ai.tool_fixed_policy"),
+                    self.tokens.ui.text_muted,
+                )
+            } else {
+                group_control.into_any_element()
+            },
             items,
         )
     }
@@ -1821,11 +1643,36 @@ impl WorkspaceApp {
         if count == 0 {
             return div().into_any_element();
         }
+        let labels = ai_tool_policy_groups(settings)
+            .into_iter()
+            .flat_map(|group| group.items)
+            .filter_map(|item| item.key.map(|key| (key, item.label_key)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let tools = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .children(settings.ai.tool_use.disabled_tools.iter().map(|name| {
+                div()
+                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                    .text_color(rgb(self.tokens.ui.text_muted))
+                    .child(
+                        labels
+                            .get(name.as_str())
+                            .map(|key| self.i18n.t(key))
+                            .unwrap_or_else(|| name.clone()),
+                    )
+            }))
+            .into_any_element();
         settings_ai_disabled_tools_notice(
             &self.tokens,
             self.i18n
                 .t("settings_view.ai.tool_use_disabled_tools_title")
                 .replace("{{count}}", &count.to_string()),
+            self.i18n.t("settings_view.ai.tool_use_disabled_tools_hint"),
+            tools,
             self.workspace_toolbar_action_button(
                 self.i18n
                     .t("settings_view.ai.tool_use_restore_disabled_tools"),

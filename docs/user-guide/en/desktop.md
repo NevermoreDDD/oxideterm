@@ -2,18 +2,18 @@
 
 ## First Launch
 
-Open OxideTerm, then check the left activity bar for the main work areas: sessions, connection pool, connection monitor, Host Tools, graphics/VNC, plugins, cloud sync, file manager, notifications, and settings.
+Open OxideTerm and use the left activity bar for connection management and global pages. OxideSens and Host Tools are on the right. The top bar filters tabs without interrupting hidden sessions; see [Workspace Navigation](workspace.md).
 
 If the app starts with no sessions, create a local shell tab first. This verifies the terminal renderer, shell integration, input handling, and theme settings before you add remote hosts.
 
 ## Activity Bar
 
-Use the activity bar as the entry point for app surfaces:
+Use the activity bars and connection entries to reach app surfaces:
 
 - Sessions: create, open, group, and monitor SSH work.
 - File manager and SFTP: browse files and manage transfers.
 - Connection pool, monitor, and Host Tools: inspect connection runtime state, resource snapshots, processes, containers, services, tmux, logs, ports, and metrics.
-- Graphics/VNC: open saved RDP/VNC profiles or visual sessions launched from a connected node.
+- Remote desktop: install and enable the RDP or VNC plugin, then open a profile from New Connection or Session Manager. For WSL Graphics on Windows, use New Connection → WSL Graphics.
 - Plugins: manage installed plugins and plugin settings.
 - Cloud sync: inspect sync status and run sync actions.
 - Notifications & Audit: review notifications, recorded operations, session history, and terminal-output recordings.
@@ -47,6 +47,26 @@ Common pane patterns:
 - Close only the pane or tab you no longer need; keep the saved connection profile intact.
 
 Use the terminal context menu and command bar for explicit pane actions such as copy, paste, search, command selection, and terminal-native file transfers. Background images and terminal image placements are visual/rendering state; if a full-screen TUI leaves stale image content behind, clear or reopen the pane rather than editing saved connection data.
+
+### Command Folding and Shell Integration
+
+Open **Settings → Terminal → Display** and enable **Command folding**. Click the button beside a completed command in the left gutter to collapse or expand its output. The command's context menu also offers **Collapse output** or **Expand output**; enable **Hover Actions** if you want those controls beside a selected command.
+
+The gutter uses one character column and works with zero terminal padding. Folding changes the view, not the terminal output or recording. Resizing the window retains the folded command selection while the terminal recalculates line positions. **Command Marks** controls range highlighting separately from the folding switch.
+
+Folding requires reliable command-start, output-start, and completion information from Shell integration. Running commands, incomplete boundaries, and output no longer retained in scrollback are not foldable. Enabling the display switch alone cannot reconstruct missing boundaries from old output.
+
+#### Install or Update SSH Shell Integration
+
+1. Open the target SSH terminal.
+2. Go to **Settings → Terminal → Awareness & Integration**, then check the remote Shell integration status.
+3. Install, update, or repair the integration as indicated. The deployment policy can ask when needed, install automatically, or leave installation to you.
+4. **Open a new SSH terminal afterward.** Existing shells keep their current hooks; updating files does not reload them.
+5. Run a command that produces several lines and finishes, then try its folding control.
+
+An outdated remote integration can trigger an update reminder when a new SSH terminal opens. Choosing **Later** leaves it unchanged; you can update manually from the same settings page.
+
+The remote integration installs readable hooks for Bash, Zsh, Fish, Nushell, and PowerShell. If folding remains unavailable after updating and opening a new terminal, check the actual shell and whether its startup files load the integration. Prompt themes and terminal multiplexers may also affect whether complete command boundaries reach OxideTerm.
 
 ### Free Type Mode
 
@@ -131,9 +151,13 @@ Use Host Tools for read-oriented host inspection. Keep destructive host actions 
 
 ## File Manager and SFTP
 
+In the local File Manager, drag saved favorites to reorder them. System folders and drives stay in place. Drag the favorites sidebar's right edge to resize it, or double-click the edge to restore its default width. Your order and preferred width are saved; narrow windows temporarily reduce the sidebar to leave room for files.
+
 Use the file manager for remote browsing, uploads, downloads, previews, and basic file operations. Treat remote edits as real remote writes: keep backups for critical files, and verify paths before overwriting.
 
 When a connection is unstable, pause large transfers and reconnect before retrying. Saved connection state and transfer state are separate; a failed transfer should not require deleting the connection.
+
+To jump to your terminal's working directory, use **Go to terminal directory** beside the remote SFTP refresh button. The default shortcut is **Command+Shift+G** on macOS or **Ctrl+Shift+G** on Windows and Linux; you can change it in **Settings → Keybindings**. The action uses the active terminal on the same server, or that server's most recently used terminal when the SFTP page is active. It is also available in detached SFTP windows. The button is disabled until a terminal directory is known, and navigating in the terminal does not automatically move the file browser.
 
 ### Transfer files through a terminal
 
@@ -150,9 +174,13 @@ The remote host needs the corresponding program installed. For a download that s
 
 For serial devices, open **Binary transfer** in the terminal control bar and choose the matching XMODEM, YMODEM, or ZMODEM upload/receive action. Put the device into its matching transfer mode first. XMODEM reception also needs a destination filename because the protocol does not carry one.
 
+XMODEM uploads use 128-byte blocks by default. For devices that support larger blocks, select 1024 bytes under **Settings → Terminal → File transfer → XMODEM**. Manual uploads and automatically detected single-file XMODEM uploads share this setting, which takes effect on the next transfer.
+
 Use SFTP when you want to browse directories and manage a transfer queue. See [transfer troubleshooting](troubleshooting.md#connection-and-transfer-checks) if a terminal transfer does not start.
 
 ## Audit and session recordings
+
+For a one-off recording, use the terminal's recording controls to start, pause/resume, stop and save a `.cast` file, or discard it. This records output rather than direct keystrokes. Open the file in the cast player for playback and search. Manual `.cast` files are plaintext; review their output before sharing. This is separate from the encrypted automatic audit recordings below.
 
 Open **Notifications & Audit** from the activity bar. Notifications show recent messages; **Audit**, **Sessions**, and **Session recordings** provide operation history and playback.
 
@@ -203,6 +231,18 @@ For command execution, prefer asking the AI to target a specific saved connectio
 Settings are grouped by feature area. Use the desktop UI for interactive changes such as appearance, terminal behavior, AI provider setup, cloud sync, portable runtime, and help/about.
 
 For scripted or repeatable changes, use the CLI with `--dry-run` first. The CLI and desktop app read the same configuration files.
+
+### Light, Dark, and Motion
+
+Under **Appearance**, select fixed light, fixed dark, or system appearance. Configure application and terminal themes separately for both schemes, or save the current appearance into a scheme. The top-bar icon shows the current mode; clicking switches to the other configured scheme. Missing configuration produces a prompt rather than an arbitrary theme choice.
+
+Motion offers **Normal**, **Fast**, **Reduced**, and **Off**. Reduced retains fades but omits movement and rotation; Off applies changes immediately. Interrupted or reversed transitions continue from their current state. Theme files contain colors; fonts, density, motion, and background choices remain application settings.
+
+### Local Shell Paths and Fonts
+
+Under **Terminal → Local**, edit or browse for the selected shell's executable path and open a new terminal. Enter a program path, not a command with arguments. Reset returns to automatic detection. This override is device-local and excluded from cross-device export and sync.
+
+Terminal font stacks are tried in order. Unavailable fonts produce a notice and use a monospace fallback. Check the preview when selecting a custom font; an installed bitmap font may not be usable by the application.
 
 ## Command Palette and Navigation
 

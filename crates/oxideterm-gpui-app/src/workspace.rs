@@ -6,6 +6,7 @@ mod ai_runtime_context;
 mod ai_state;
 mod app_lock;
 mod audit;
+mod background_tasks;
 mod breadcrumb_scroll;
 mod browser_behavior;
 mod cloud_sync;
@@ -33,6 +34,7 @@ mod overlay;
 mod pane_tree;
 mod path_completion;
 mod persistence;
+mod plugin_connections;
 mod plugin_entity;
 mod plugin_lifecycle;
 mod plugin_manager;
@@ -62,8 +64,10 @@ mod session_manager;
 mod settings;
 mod sftp;
 mod sidebar;
+mod ssh_tunnels;
 mod standalone_connections;
 mod tabs;
+mod terminal_archive;
 mod terminal_cast;
 mod terminal_command_bar;
 mod terminal_command_sender;
@@ -163,7 +167,7 @@ use oxideterm_connection_monitor::{
 use oxideterm_connections::{
     ConnectionStore, ConnectionTerminalOptions, ConnectionTerminalProfileKind,
     ConnectionTerminalSessionLogPolicy, MoshIpFamily as SavedMoshIpFamily, MoshPredictionMode,
-    MoshUdpPortSelection as SavedMoshUdpPortSelection, PrivilegeCredentialKind,
+    MoshUdpPortSelection as SavedMoshUdpPortSelection, PrivilegePromptType, PrivilegeResponseMode,
     SaveConnectionRequest, SavedPrivilegeCredential, SshConfigSyncService,
 };
 use oxideterm_forwarding::{
@@ -180,13 +184,13 @@ use oxideterm_gpui_terminal::{
     TerminalBackgroundFit, TerminalBackgroundPreferences, TerminalBroadcastInputKind,
     TerminalCommandSelectionLabels, TerminalContextAction, TerminalHighlightMatchScope,
     TerminalHighlightRenderMode, TerminalHighlightRule as UiHighlightRule,
-    TerminalHighlightRuleSetOverride, TerminalInputBroadcaster, TerminalInputInterceptor,
-    TerminalInputInterceptorResult, TerminalKittyFileTransmissionLabels, TerminalModemLabels,
-    TerminalNotice, TerminalNoticeVariant, TerminalOutputProcessor, TerminalPane,
-    TerminalPaneEvent, TerminalPasteLabels, TerminalRecordingState, TerminalRecordingStatus,
-    TerminalSearchStatus, TerminalSerialControlLabels, TerminalSessionLogContext,
-    TerminalSessionLogLabels, TerminalSessionLogOptions, TerminalSessionLogState,
-    TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
+    TerminalHighlightRuleSetOverride, TerminalHistoryStore, TerminalInputBroadcaster,
+    TerminalInputInterceptor, TerminalInputInterceptorResult, TerminalKittyFileTransmissionLabels,
+    TerminalModemLabels, TerminalNotice, TerminalNoticeVariant, TerminalOutputProcessor,
+    TerminalPane, TerminalPaneEvent, TerminalPasteLabels, TerminalRecordingState,
+    TerminalRecordingStatus, TerminalSearchStatus, TerminalSerialControlLabels,
+    TerminalSessionLogContext, TerminalSessionLogLabels, TerminalSessionLogOptions,
+    TerminalSessionLogState, TerminalSessionLogStatus, TerminalTmuxLabels, TerminalTrzszLabels,
     TerminalUiPreferenceOverrides, TerminalUiPreferences, TerminalUiTheme,
     TerminalWorkingDirectorySource, detect_custom_privilege_prompt, prune_terminal_session_logs,
     resolved_terminal_semantic_scheme, terminal_semantic_line_band,
@@ -197,7 +201,7 @@ use oxideterm_gpui_ui::{
     ConfirmDialogAction, ConfirmDialogVariant, ConfirmDialogView, MaterialRole, checkbox,
     material_surface,
     modal::{popover_backdrop, set_tauri_backdrop_blur_allowed},
-    text_input::{TextInputView, text_input},
+    text_input::TextInputView,
     toast::{ToastVariant, ToastView, toast_action, toast_close},
     toaster::toaster,
     tooltip::tooltip_surface,
@@ -656,10 +660,12 @@ struct ExitingTabVisual {
     width: f32,
     visual_index: usize,
     was_active: bool,
+    started_at: Instant,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum TabCloseConfirm {
+    ApplicationQuit,
     Single { tab_id: TabId },
     LocalChildProcess { tab_id: TabId },
     LocalChildProcessBatch { tab_ids: Vec<TabId> },
@@ -723,12 +729,6 @@ struct DetachedTabReturnHandoff {
     generation: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DetachedTabReturnPlaceholder {
-    tab_id: TabId,
-    visible_index: usize,
-}
-
 impl WorkspaceWindowTabState {
     fn new() -> Self {
         Self {
@@ -770,6 +770,9 @@ pub(crate) struct WorkspaceApp {
     _tab_host_subscription: Subscription,
     search: actions::TerminalSearchState,
     terminal_recording_menu_open: bool,
+    privilege_credential_picker: Option<terminal_command_bar::PrivilegeCredentialPicker>,
+    pending_privilege_totp: Option<terminal_command_bar::PendingPrivilegeTotp>,
+    privilege_prompt_sync_task: Option<Task<()>>,
     terminal_highlight_popover_open: bool,
     // Settings keep the source pane stable while editing session-only trigger overrides.
     terminal_trigger_settings_pane: Option<PaneId>,
@@ -786,7 +789,10 @@ pub(crate) struct WorkspaceApp {
     terminal_command_sender: Entity<terminal_command_sender::TerminalCommandSenderEntity>,
     _terminal_command_sender_observation: Subscription,
     local_terminal_command_history: SharedTerminalCommandHistory,
-    // Runtime history follows NodeRouter identity without owning or prolonging the transport.
+    terminal_history_store: TerminalHistoryStore,
+    _terminal_history_updates: Task<()>,
+    terminal_history_all_connections: bool,
+    // Active nodes retain history handles without owning or prolonging the transport.
     ssh_terminal_command_histories: HashMap<NodeId, SharedTerminalCommandHistory>,
     detached_local_terminals: HashMap<TerminalSessionId, DetachedLocalTerminalSession>,
     detached_local_terminal_order: Vec<TerminalSessionId>,
@@ -842,6 +848,8 @@ pub(crate) struct WorkspaceApp {
     active_surface: ActiveSurface,
     active_session_sidebar_view_mode: ActiveSessionSidebarViewMode,
     session_sort_menu_open: bool,
+    context_tools_menu: Option<ContextSidebarTool>,
+    context_tools_menu_scroll: ScrollHandle,
     session_search_open: bool,
     session_search_query: String,
     active_session_sidebar_focused_node_id: Option<NodeId>,
@@ -906,6 +914,8 @@ pub(crate) struct WorkspaceApp {
     forwarding_service: forwards::ForwardingRuntimeService,
     forwarding_runtime: Arc<tokio::runtime::Runtime>,
     sftp_transfer_manager: Arc<SftpTransferManager>,
+    background_transfers: Vec<background_tasks::TransferSummary>,
+    _background_transfer_observation: Task<()>,
     sftp_progress_store: Arc<dyn ProgressStore>,
     node_router: NodeRouter,
     notification_center: NotificationCenterState,
@@ -914,6 +924,10 @@ pub(crate) struct WorkspaceApp {
     ssh_nodes: HashMap<NodeId, WorkspaceSshNode>,
     saved_ssh_nodes: HashMap<String, NodeId>,
     expanded_ssh_nodes: HashSet<NodeId>,
+    /// Host view disclosure state keyed by synthetic group row ids. Host headers
+    /// default to expanded so the grouping is visible immediately; user rows
+    /// default to collapsed so their option stacks stay out of the way.
+    session_group_expanded: HashMap<NodeId, bool>,
     expanded_standalone_connections: HashSet<String>,
     local_session_group_expanded: bool,
     active_ssh_node_id: Option<NodeId>,
@@ -955,6 +969,7 @@ pub(crate) struct WorkspaceApp {
     _cloud_sync_subscription: Subscription,
     i18n: I18n,
     tokens: ThemeTokens,
+    theme_transition_task: Option<Task<()>>,
     system_dark: bool,
     appearance_edit_dark: Option<bool>,
     active_background: oxideterm_settings::BackgroundStyle,
@@ -977,6 +992,8 @@ pub(crate) struct WorkspaceApp {
     local_shells: Vec<ShellInfo>,
     local_shell_launcher_open: bool,
     local_shell_launcher_selected_id: Option<String>,
+    archive_command: Option<terminal_archive::ArchiveCommandPreview>,
+    ssh_tunnels: ssh_tunnels::SshTunnels,
     terminal: Entity<WorkspaceTerminalEntity>,
     _terminal_subscription: Subscription,
     overlay: Entity<WorkspaceOverlayEntity>,
@@ -987,6 +1004,7 @@ pub(crate) struct WorkspaceApp {
 
 impl Drop for WorkspaceApp {
     fn drop(&mut self) {
+        self.archive_command = None;
         // App Lock and Cloud Sync move the focused secret into this window IME
         // adapter, so window destruction must zeroize it even without a blur event.
         zeroize::Zeroize::zeroize(&mut self.settings_input_draft);

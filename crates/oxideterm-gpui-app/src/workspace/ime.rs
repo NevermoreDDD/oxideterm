@@ -15,6 +15,7 @@ use oxideterm_editor_core::utf16::{
     word_range_for_utf16_offset,
 };
 
+use super::WorkspaceApp;
 use super::connection_monitor::HostToolsTextInput;
 use super::file_manager::FileManagerInput;
 use super::forwards::ForwardInput;
@@ -30,16 +31,19 @@ use super::session_manager::{SessionManagerInput, SessionManagerState};
 use super::sftp::SftpInput;
 use super::sidebar::{ai_input_line_index_for_offset, ai_input_visual_lines};
 use super::terminal_git::TerminalGitPanelSection;
-use super::{PaneId, WorkspaceApp};
 use oxideterm_gpui_settings_view::SettingsInput;
 use oxideterm_gpui_ui::{
     tauri_ui_font_family,
     text_input::{
         TextInputAnchor, TextInputAnchorId, TextInputAnchorProbe, TextInputContentAlign,
-        text_input_anchor_probe, text_input_secret_mask,
+        TextInputView, TextInputViewport, text_input_anchor_probe, text_input_secret_mask,
+        text_input_visual_range, text_input_with_viewport_and_content_align,
     },
 };
 use zeroize::{Zeroize, Zeroizing};
+
+mod history;
+use history::{InputHistory, InputSnapshot};
 
 const READ_ONLY_TEXT_EM_WIDTH: f32 = 16.0;
 const READ_ONLY_TEXT_LINE_HEIGHT_ESTIMATE: f32 = 28.0;
@@ -47,7 +51,7 @@ const SECRET_IME_BMP_PROXY: char = '\u{2022}';
 const SECRET_IME_ASTRAL_PROXY: char = '\u{1f512}';
 const CARET_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(530);
 
-fn secret_ime_proxy(secret: &str) -> String {
+pub(super) fn secret_ime_proxy(secret: &str) -> String {
     // Preserve every UTF-16 boundary without copying secret content across the
     // Entity boundary. Editing ranges remain valid for both BMP and astral input.
     secret
@@ -88,9 +92,17 @@ fn session_manager_ime_text(
 #[derive(Clone, Default)]
 pub(super) struct TextInputAnchorStore {
     anchors: Rc<RefCell<HashMap<TextInputAnchorId, TextInputAnchor>>>,
+    viewports: Rc<RefCell<HashMap<TextInputAnchorId, TextInputViewport>>>,
 }
 
 impl TextInputAnchorStore {
+    pub(super) fn viewport(&self, id: TextInputAnchorId) -> TextInputViewport {
+        self.viewports.borrow_mut().entry(id).or_default().clone()
+    }
+
+    fn rendered_viewport(&self, id: TextInputAnchorId) -> Option<TextInputViewport> {
+        self.viewports.borrow().get(&id).cloned()
+    }
     pub(super) fn get(&self, id: TextInputAnchorId) -> Option<TextInputAnchor> {
         self.anchors.borrow().get(&id).copied()
     }
@@ -122,7 +134,6 @@ pub(super) enum WorkspaceImeTarget {
     AuditPolicy(super::audit::AuditPolicyInput),
     KnowledgeSearch,
     KnowledgeRename,
-    Search(PaneId),
     TerminalCommandSenderCompact,
     TerminalCwdSearch,
     TerminalGitBranchSearch,
@@ -259,6 +270,8 @@ impl WorkspaceCaretState {
 
 /// Owns the window-scoped caret phase and its only long-lived blink task.
 pub(super) struct WorkspaceInputEntity {
+    history: InputHistory,
+    connection_form_presence: Option<oxideterm_gpui_ui::motion::ExitPresence>,
     caret: WorkspaceCaretState,
     blink_generation: u64,
     blink_task: Option<gpui::Task<()>>,
@@ -267,6 +280,8 @@ pub(super) struct WorkspaceInputEntity {
 impl WorkspaceInputEntity {
     pub(super) fn new(visibility: WorkspaceCaretVisibility) -> Self {
         Self {
+            history: InputHistory::default(),
+            connection_form_presence: None,
             caret: WorkspaceCaretState::new(visibility),
             blink_generation: 0,
             blink_task: None,
@@ -341,15 +356,30 @@ pub(super) struct HostToolsPlainTextImeFrame {
     target: WorkspaceImeTarget,
     caret_visible: bool,
     selected_range: Option<Range<usize>>,
+    active_offset: Option<usize>,
     marked_text: Option<String>,
     anchor_store: TextInputAnchorStore,
 }
 
 impl HostToolsPlainTextImeFrame {
+    pub(super) fn text_input(
+        &self,
+        tokens: &oxideterm_theme::ThemeTokens,
+        view: TextInputView<'_>,
+    ) -> gpui::Div {
+        text_input_with_viewport_and_content_align(
+            tokens,
+            view,
+            TextInputContentAlign::Start,
+            &self.anchor_store.viewport(self.anchor_id()),
+            self.active_offset,
+        )
+    }
     fn new(
         input: HostToolsTextInput,
         caret_visible: bool,
         selected_range: Option<Range<usize>>,
+        active_offset: Option<usize>,
         marked_text: Option<String>,
         anchor_store: TextInputAnchorStore,
     ) -> Option<Self> {
@@ -361,6 +391,7 @@ impl HostToolsPlainTextImeFrame {
             target,
             caret_visible,
             selected_range,
+            active_offset,
             marked_text,
             anchor_store,
         })
@@ -500,7 +531,6 @@ impl WorkspaceImeTarget {
             Self::AuditPolicy(super::audit::AuditPolicyInput::Capacity) => 27,
             Self::KnowledgeSearch => 23,
             Self::KnowledgeRename => 24,
-            Self::Search(pane_id) => (1_u64 << 63) | pane_id.0,
             Self::TerminalCommandSenderCompact => 2,
             Self::TerminalCwdSearch => 18,
             Self::TerminalGitBranchSearch => 17,
@@ -696,6 +726,18 @@ pub(super) fn keystroke_uses_text_edit_modifier(keystroke: &Keystroke) -> bool {
     }
 }
 
+fn input_history_action(keystroke: &Keystroke, target: Option<WorkspaceImeTarget>) -> Option<bool> {
+    target.filter(|target| !ime_target_is_read_only(*target))?;
+    if !keystroke_uses_text_edit_modifier(keystroke) || keystroke.modifiers.alt {
+        return None;
+    }
+    match keystroke.key.as_str() {
+        "z" => Some(keystroke.modifiers.shift),
+        "y" if !cfg!(target_os = "macos") && !keystroke.modifiers.shift => Some(true),
+        _ => None,
+    }
+}
+
 impl InputHandler for WorkspaceInputHandler {
     fn selected_text_range(
         &mut self,
@@ -866,20 +908,32 @@ impl InputHandler for WorkspaceInputHandler {
                     .terminal_command_sender
                     .read(cx)
                     .active_compact_viewport(),
-                _ => None,
+                _ => view
+                    .text_input_anchors
+                    .rendered_viewport(target.anchor_id()),
             };
             if let Some(viewport) = viewport {
                 let visible_text = view.ime_text_with_marked_text_for_target(target, cx)?;
-                let byte_index = byte_index_for_utf16(&visible_text, range_utf16.end);
-                if let Some(position) = viewport.position_for_byte_index(byte_index) {
+                let secret = ime_target_is_secret(target);
+                let visual_offset = text_input_visual_range(
+                    &visible_text,
+                    secret,
+                    range_utf16.end..range_utf16.end,
+                )
+                .end;
+                let display = if secret {
+                    text_input_secret_mask(&visible_text)
+                } else {
+                    visible_text
+                };
+                let byte_index = byte_index_for_utf16(&display, visual_offset);
+                if let Some(caret_bounds) = viewport.caret_bounds_for_byte_index(
+                    byte_index,
+                    px(view.tokens.metrics.form_caret_width),
+                    px(view.tokens.metrics.form_caret_height),
+                ) {
                     // Keep the platform candidate window aligned with the scrolled caret.
-                    return Some(Bounds {
-                        origin: point(position.x, bounds.bottom()),
-                        size: gpui::size(
-                            px(view.tokens.metrics.form_caret_width),
-                            bounds.size.height,
-                        ),
-                    });
+                    return Some(caret_bounds);
                 }
             }
             Some(Bounds {
@@ -907,6 +961,32 @@ impl InputHandler for WorkspaceInputHandler {
 }
 
 impl WorkspaceApp {
+    pub(in crate::workspace) fn workspace_text_input(
+        &self,
+        target: WorkspaceImeTarget,
+        view: TextInputView<'_>,
+    ) -> gpui::Div {
+        self.workspace_text_input_with_align(target, view, TextInputContentAlign::Start)
+    }
+
+    pub(in crate::workspace) fn workspace_text_input_with_align(
+        &self,
+        target: WorkspaceImeTarget,
+        view: TextInputView<'_>,
+        align: TextInputContentAlign,
+    ) -> gpui::Div {
+        let active = self
+            .ime_selection_for_target(target)
+            .map(|selection| selection.active_offset());
+        text_input_with_viewport_and_content_align(
+            &self.tokens,
+            view,
+            align,
+            &self.text_input_anchors.viewport(target.anchor_id()),
+            active,
+        )
+    }
+
     pub(super) fn defer_active_ime_key(
         &mut self,
         keystroke: &Keystroke,
@@ -1024,6 +1104,8 @@ impl WorkspaceApp {
             input,
             self.input_caret.visible(),
             self.ime_selected_range_for_target(target, cx),
+            self.ime_selection_for_target(target)
+                .map(|selection| selection.active_offset()),
             self.marked_text_for_target(target, cx).map(str::to_owned),
             self.text_input_anchors.clone(),
         )
@@ -1147,6 +1229,7 @@ impl WorkspaceApp {
         if self.session_search_open
             && !self.sidebar_collapsed
             && !self.session_sort_menu_open
+            && self.context_tools_menu.is_none()
             && self.effective_sidebar_panel_section() == super::SidebarSection::Sessions
             && (self.selected_ime_target == Some(WorkspaceImeTarget::ActiveSessionSearch)
                 || self.selected_ime_range.as_ref().is_some_and(|selection| {
@@ -1356,7 +1439,8 @@ impl WorkspaceApp {
             return Some(target);
         }
 
-        self.focused_search_pane(cx).map(WorkspaceImeTarget::Search)
+        // Terminal search editors own their platform input handler and composition.
+        None
     }
 
     pub(super) fn active_ime_target_for_window(
@@ -1385,24 +1469,6 @@ impl WorkspaceApp {
         }
         let knowledge = self.knowledge_workspace.read(cx);
         let owner = match target {
-            WorkspaceImeTarget::Search(pane_id) => self
-                .tabs(cx)
-                .iter()
-                .find(|tab| {
-                    tab.root_pane
-                        .as_ref()
-                        .is_some_and(|root| root.contains_pane(pane_id))
-                })
-                .and_then(|tab| {
-                    self.tab_host
-                        .read(cx)
-                        .detached_window_handle(tab.id)
-                        .or_else(|| {
-                            self.window_registry
-                                .handle_for_role(super::window_registry::WindowRole::Main)
-                        })
-                })
-                .map(|handle| handle.window_id()),
             WorkspaceImeTarget::KnowledgeSearch => knowledge.navigator_search_window,
             WorkspaceImeTarget::KnowledgeRename => {
                 knowledge.rename.as_ref().map(|rename| rename.window_id)
@@ -1412,9 +1478,6 @@ impl WorkspaceApp {
         if target == WorkspaceImeTarget::AiInlinePrompt
             && self.terminal_ai_inline_window(cx) != Some(window_id)
         {
-            return None;
-        }
-        if matches!(target, WorkspaceImeTarget::Search(_)) && owner != Some(window_id) {
             return None;
         }
         if matches!(
@@ -1783,13 +1846,23 @@ impl WorkspaceApp {
                 .terminal_command_sender
                 .read(cx)
                 .active_compact_viewport(),
-            _ => None,
+            _ => self
+                .text_input_anchors
+                .rendered_viewport(target.anchor_id()),
         };
         if let Some(viewport) = viewport {
             if let Some(byte_index) = viewport.byte_index_for_position(position) {
                 let visible_text = self
                     .ime_text_with_marked_text_for_target(target, cx)
                     .unwrap_or_else(|| text.clone());
+                if ime_target_is_secret(target) {
+                    let display = text_input_secret_mask(&visible_text);
+                    let count = display
+                        [..floor_char_boundary(&display, byte_index.min(display.len()))]
+                        .chars()
+                        .count();
+                    return Some(utf16_offset_for_char_index(&visible_text, count));
+                }
                 return Some(utf16_offset_for_byte_index(
                     &visible_text,
                     byte_index.min(visible_text.len()),
@@ -2191,11 +2264,6 @@ impl WorkspaceApp {
                 .rename
                 .as_ref()
                 .map(|rename| rename.name.clone()),
-            WorkspaceImeTarget::Search(pane_id) => self
-                .search
-                .panes
-                .get(&pane_id)
-                .map(|search| search.query.clone()),
             WorkspaceImeTarget::TerminalCommandSenderCompact => self
                 .terminal_command_sender
                 .read(cx)
@@ -2465,7 +2533,7 @@ impl WorkspaceApp {
             .as_ref()
             .map(|range| range.start + text.encode_utf16().count());
         self.ime_marked_text = None;
-        self.replace_ime_target_text(target, replacement_range, text, cx);
+        self.replace_ime_target_text(target, replacement_range, text, caret, cx);
         if let Some(caret) = caret {
             self.set_ime_selection_from_anchor(target, caret, caret);
         } else {
@@ -2478,6 +2546,10 @@ impl WorkspaceApp {
         keystroke: &Keystroke,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(redo) = input_history_action(keystroke, self.active_ime_target(cx)) {
+            self.restore_active_text_input(redo, cx);
+            return true;
+        }
         if !keystroke_uses_text_edit_modifier(keystroke) {
             return false;
         }
@@ -2495,6 +2567,50 @@ impl WorkspaceApp {
             "v" => self.paste_active_text_input(cx),
             _ => false,
         }
+    }
+
+    fn restore_active_text_input(&mut self, redo: bool, cx: &mut Context<Self>) {
+        let Some(target) = self.active_ime_target(cx) else {
+            return;
+        };
+        if let Some(marked) = self
+            .ime_marked_text
+            .take()
+            .filter(|marked| marked.target == target)
+        {
+            self.set_ime_selection_from_anchor(
+                target,
+                marked.replacement_range.start,
+                marked.replacement_range.end,
+            );
+            self.show_active_input_caret(cx);
+            cx.notify();
+            return;
+        }
+        // Password owners expose only geometry proxies, never undoable secret snapshots.
+        if ime_target_is_secret(target) {
+            return;
+        }
+        self.sync_input_history_owner(target, cx);
+        let Some(current) = self.text_for_ime_target(target, cx).map(Zeroizing::new) else {
+            return;
+        };
+        let restored = self
+            .workspace_input
+            .update(cx, |input, _| input.history.restore(target, &current, redo));
+        let Some(restored) = restored else {
+            return;
+        };
+        self.replace_ime_target_text_inner(
+            target,
+            Some(0..current.encode_utf16().count()),
+            &restored.text,
+            cx,
+        );
+        self.selected_ime_target = None;
+        self.selected_ime_range = Some(restored.selection);
+        self.show_active_input_caret(cx);
+        cx.notify();
     }
 
     pub(super) fn handle_active_text_input_delete_selection(
@@ -2536,8 +2652,8 @@ impl WorkspaceApp {
             return true;
         }
         let caret = range.start;
+        self.replace_ime_target_text(target, Some(range), "", Some(caret), cx);
         self.clear_ime_selection();
-        self.replace_ime_target_text(target, Some(range), "", cx);
         self.set_ime_selection_from_anchor(target, caret, caret);
         true
     }
@@ -2672,8 +2788,8 @@ impl WorkspaceApp {
             return false;
         };
         let caret = replacement_range.start + 1;
+        self.replace_ime_target_text(target, Some(replacement_range), "\n", Some(caret), cx);
         self.clear_ime_selection();
-        self.replace_ime_target_text(target, Some(replacement_range), "\n", cx);
         self.set_ime_selection_from_anchor(target, caret, caret);
         self.ime_marked_text = None;
         self.show_active_input_caret(cx);
@@ -2717,9 +2833,9 @@ impl WorkspaceApp {
         else {
             return true;
         };
-        self.clear_ime_selection();
         let text_len = text.encode_utf16().count();
-        self.replace_ime_target_text(target, Some(0..text_len), &next_text, cx);
+        self.replace_ime_target_text(target, Some(0..text_len), &next_text, Some(next_caret), cx);
+        self.clear_ime_selection();
         self.set_ime_selection_from_anchor(target, next_caret, next_caret);
         self.ime_marked_text = None;
         self.show_active_input_caret(cx);
@@ -2760,8 +2876,8 @@ impl WorkspaceApp {
         };
         let caret = range.start;
         cx.write_to_clipboard(ClipboardItem::new_string(utf16_slice(&text, range.clone())));
+        self.replace_ime_target_text(target, Some(range), "", Some(caret), cx);
         self.clear_ime_selection();
-        self.replace_ime_target_text(target, Some(range), "", cx);
         self.set_ime_selection_from_anchor(target, caret, caret);
         true
     }
@@ -2773,7 +2889,14 @@ impl WorkspaceApp {
         if ime_target_is_read_only(target) {
             return true;
         }
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let item = cx.read_from_clipboard();
+        if target == WorkspaceImeTarget::AiChatInput
+            && let Some(item) = item.as_ref()
+            && self.paste_ai_image(item, cx)
+        {
+            return true;
+        }
+        let Some(text) = item.and_then(|item| item.text()) else {
             return true;
         };
         // Clipboard reads can contain private keys or passphrases. Own both the
@@ -2784,8 +2907,8 @@ impl WorkspaceApp {
         let caret = replacement_range
             .as_ref()
             .map(|range| range.start + text.encode_utf16().count());
+        self.replace_ime_target_text(target, replacement_range, &text, caret, cx);
         self.clear_ime_selection();
-        self.replace_ime_target_text(target, replacement_range, &text, cx);
         if let Some(caret) = caret {
             self.set_ime_selection_from_anchor(target, caret, caret);
         }
@@ -3004,6 +3127,60 @@ impl WorkspaceApp {
         target: WorkspaceImeTarget,
         replacement_range: Option<Range<usize>>,
         text: &str,
+        caret_after: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_input_history_owner(target, cx);
+        let before = (!ime_target_is_secret(target) && !ime_target_is_read_only(target))
+            .then(|| self.text_for_ime_target(target, cx).map(Zeroizing::new))
+            .flatten();
+        let selection = before.as_ref().and_then(|value| {
+            self.ime_selection_for_navigation(target, value.encode_utf16().count(), cx)
+        });
+        self.replace_ime_target_text_inner(target, replacement_range, text, cx);
+        if let (Some(before), Some(selection), Some(after)) = (
+            before,
+            selection,
+            self.text_for_ime_target(target, cx).map(Zeroizing::new),
+        ) {
+            let after_len = after.encode_utf16().count();
+            let caret = caret_after.unwrap_or(after_len).min(after_len);
+            self.workspace_input.update(cx, |input, _| {
+                input.history.record(
+                    InputSnapshot {
+                        text: before,
+                        selection,
+                    },
+                    InputSnapshot {
+                        text: after,
+                        selection: selection_from_anchor(target, caret, caret),
+                    },
+                )
+            });
+        }
+    }
+
+    fn sync_input_history_owner(&self, target: WorkspaceImeTarget, cx: &mut Context<Self>) {
+        if !matches!(target, WorkspaceImeTarget::NewConnection(_)) {
+            return;
+        }
+        let presence = self.connection_form_state(cx).presence;
+        self.workspace_input.update(cx, |input, _| {
+            if input.connection_form_presence != Some(presence) {
+                // Reopening a connection draft creates new inputs, even when their defaults match.
+                input.history.clear_matching(|target| {
+                    matches!(target, WorkspaceImeTarget::NewConnection(_))
+                });
+                input.connection_form_presence = Some(presence);
+            }
+        });
+    }
+
+    fn replace_ime_target_text_inner(
+        &mut self,
+        target: WorkspaceImeTarget,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
         cx: &mut Context<Self>,
     ) {
         match target {
@@ -3059,11 +3236,6 @@ impl WorkspaceApp {
                 self.shortcuts_modal.scroll_handle = gpui::UniformListScrollHandle::new();
                 self.show_active_input_caret(cx);
                 cx.notify();
-            }
-            WorkspaceImeTarget::Search(pane_id) => {
-                if self.search.replace_query(pane_id, replacement_range, text) {
-                    self.update_search_query_for_pane(pane_id, true, cx);
-                }
             }
             WorkspaceImeTarget::TerminalCommandSenderCompact => {
                 let mut draft = Zeroizing::new(
@@ -3457,6 +3629,8 @@ fn new_connection_field_value(
         NewConnectionField::Name => &form.name,
         NewConnectionField::LocalCwd => &form.local_cwd,
         NewConnectionField::Host => &form.host,
+        NewConnectionField::TunnelTargetHost => &form.tunnel_target_host,
+        NewConnectionField::TunnelTargetPort => &form.tunnel_target_port,
         NewConnectionField::Port => &form.port,
         NewConnectionField::Username => &form.username,
         NewConnectionField::Password => &form.password,
@@ -3560,6 +3734,8 @@ fn connection_field_value_mut(
         NewConnectionField::Name => &mut form.name,
         NewConnectionField::LocalCwd => &mut form.local_cwd,
         NewConnectionField::Host => &mut form.host,
+        NewConnectionField::TunnelTargetHost => &mut form.tunnel_target_host,
+        NewConnectionField::TunnelTargetPort => &mut form.tunnel_target_port,
         NewConnectionField::Port => &mut form.port,
         NewConnectionField::Username => &mut form.username,
         NewConnectionField::Password => super::new_connection::password_draft_mut(form),
@@ -4044,19 +4220,7 @@ fn path_completion_owns_vertical_navigation(
 
 #[cfg(test)]
 mod tests {
-    use oxideterm_workspace::PaneId;
 
-    #[test]
-    fn terminal_search_inputs_have_distinct_pane_selection_and_geometry() {
-        let first = super::WorkspaceImeTarget::Search(PaneId(1));
-        let second = super::WorkspaceImeTarget::Search(PaneId(2));
-        assert_ne!(first, second);
-        assert_ne!(first.anchor_id(), second.anchor_id());
-        assert_ne!(
-            first.anchor_id(),
-            super::WorkspaceImeTarget::CommandPalette.anchor_id()
-        );
-    }
     use gpui::{Keystroke, Modifiers};
     use zeroize::Zeroizing;
 
@@ -4113,6 +4277,60 @@ mod tests {
     }
 
     #[test]
+    fn history_shortcuts_belong_to_ui_inputs_not_terminal_job_control() {
+        let target = Some(WorkspaceImeTarget::CommandPalette);
+        let control_z = key(
+            "z",
+            None,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        );
+        let platform_z = key(
+            "z",
+            None,
+            Modifiers {
+                platform: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(super::input_history_action(&control_z, None), None);
+        assert_eq!(super::input_history_action(&platform_z, None), None);
+        assert_eq!(
+            super::input_history_action(&platform_z, target),
+            Some(false)
+        );
+        assert_eq!(
+            super::input_history_action(&control_z, target),
+            if cfg!(target_os = "macos") {
+                None
+            } else {
+                Some(false)
+            }
+        );
+        let mut redo = platform_z;
+        redo.modifiers.shift = true;
+        assert_eq!(super::input_history_action(&redo, target), Some(true));
+        let control_y = key(
+            "y",
+            None,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(
+            super::input_history_action(&control_y, target),
+            if cfg!(target_os = "macos") {
+                None
+            } else {
+                Some(true)
+            }
+        );
+    }
+
+    #[test]
     fn caret_state_pauses_scrolled_settings_and_resets_when_visible_owner_changes() {
         let now = std::time::Instant::now();
         let visibility = WorkspaceCaretVisibility::default();
@@ -4133,7 +4351,7 @@ mod tests {
         caret.advance_tick(now + std::time::Duration::from_secs(1));
         assert!(!visibility.visible());
 
-        assert!(caret.sync_active_target(Some(WorkspaceImeTarget::Search(PaneId(1)))));
+        assert!(caret.sync_active_target(Some(WorkspaceImeTarget::TerminalCwdSearch)));
         assert!(visibility.visible());
         assert_eq!(
             caret.next_tick_delay(now),
@@ -4260,6 +4478,7 @@ mod tests {
             HostToolsPlainTextImeFrame::new(
                 HostToolsTextInput::TmuxDialog,
                 true,
+                None,
                 None,
                 None,
                 TextInputAnchorStore::default(),
@@ -4403,7 +4622,7 @@ mod tests {
             );
         }
         assert_eq!(
-            ime_text_snapshot(WorkspaceImeTarget::Search(PaneId(1)), secret),
+            ime_text_snapshot(WorkspaceImeTarget::TerminalCwdSearch, secret),
             secret
         );
     }
@@ -4496,7 +4715,7 @@ mod tests {
             ));
         }
         assert!(!path_completion_owns_vertical_navigation(
-            WorkspaceImeTarget::Search(PaneId(1)),
+            WorkspaceImeTarget::TerminalCwdSearch,
             "arrowdown",
             true,
             false,
@@ -4519,7 +4738,7 @@ mod tests {
             CopyShortcutOwner::SelectedRange(2..5)
         );
         assert_eq!(
-            copy_shortcut_owner_for_target(WorkspaceImeTarget::Search(PaneId(1)), Some(&(3..3))),
+            copy_shortcut_owner_for_target(WorkspaceImeTarget::TerminalCwdSearch, Some(&(3..3))),
             CopyShortcutOwner::FocusedEditableInput
         );
         assert_eq!(

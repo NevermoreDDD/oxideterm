@@ -27,6 +27,7 @@ pub(crate) struct TerminalLinkRange {
 pub(crate) enum TerminalLinkKind {
     Url,
     Path,
+    Trigger,
 }
 
 pub(crate) fn link_should_be_styled(
@@ -35,6 +36,13 @@ pub(crate) fn link_should_be_styled(
     row: usize,
     col: usize,
 ) -> bool {
+    if hovered.is_some_and(|link| {
+        link.kind == TerminalLinkKind::Trigger
+            && link.row == row
+            && (link.start_col..link.end_col).contains(&col)
+    }) {
+        return true;
+    }
     ranges
         .iter()
         .find(|range| range.row == row && col >= range.start_col && col < range.end_col)
@@ -256,8 +264,20 @@ fn detect_path_ranges(
             index += 1;
         }
         let start = index;
-        while index < chars.len() && !chars[index].is_whitespace() {
-            index += 1;
+        let quoted_archive_end = chars
+            .get(start)
+            .filter(|ch| matches!(ch, '\'' | '"'))
+            .and_then(|quote| {
+                let end = (start + 1..chars.len()).find(|&i| chars[i] == *quote)?;
+                let path: String = chars[start + 1..end].iter().collect();
+                oxideterm_environment::archive::is_archive_path(&path).then_some(end + 1)
+            });
+        if let Some(end) = quoted_archive_end {
+            index = end;
+        } else {
+            while index < chars.len() && !chars[index].is_whitespace() {
+                index += 1;
+            }
         }
         let end = trim_link_end(&chars, start, index);
         if end <= start {
@@ -296,6 +316,7 @@ pub(crate) fn is_path_like(token: &str) -> bool {
         || token.starts_with("../")
         || token.starts_with("~/")
         || (token.contains('/') && token.contains('.'))
+        || oxideterm_environment::archive::is_archive_path(token)
 }
 
 pub(crate) fn path_link_to_file_url(target: &str, base_dir: &Path) -> Option<String> {
@@ -311,25 +332,12 @@ pub(crate) fn path_link_to_file_url(target: &str, base_dir: &Path) -> Option<Str
         }
     };
 
-    Some(format!("file://{}", percent_encode_path(&path)))
+    // File URLs require platform-aware handling of drive letters and UNC roots.
+    url::Url::from_file_path(path).ok().map(String::from)
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
-}
-
-pub(crate) fn percent_encode_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    let mut encoded = String::with_capacity(path.len());
-    for byte in path.as_bytes() {
-        match *byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(*byte as char)
-            }
-            byte => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
 }
 
 pub(crate) fn is_link_terminator(ch: char) -> bool {

@@ -257,6 +257,21 @@
     "shortcut_count": "raccourcis"
   },
   "plugin": {
+    "connections": {
+      "name": "Nom",
+      "group": "Groupe",
+      "cancel": "Annuler",
+      "save": "Enregistrer",
+      "save_connect": "Enregistrer et connecter",
+      "failed": "L’opération a échoué. Vérifiez les paramètres de connexion et les autorisations de l’extension.",
+      "disconnect": "Déconnecter",
+      "connecting": "Connexion en cours…",
+      "connected": "Connecté",
+      "disconnected": "Déconnecté",
+      "unavailable": "L’extension de connexion est indisponible. Activez-la ou installez-la pour vous connecter.",
+      "password_unchanged": "Laissez vide pour conserver la valeur enregistrée",
+      "clear_credentials": "Effacer les identifiants enregistrés"
+    },
     "install_queued": "En attente · position {{position}}",
     "installing_named": "Installation de {{name}}",
     "install_queue_count": "{{count}} en attente",
@@ -296,6 +311,7 @@
     "native_sidebar_empty_description": "Ouvrez l’onglet plugins pour voir l’état native actuel.",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "Le mot de passe actuel ne correspond pas à celui de cet espace de synchronisation. Saisissez et enregistrez le mot de passe d’origine avant de le modifier. Si vous l’avez oublié, utilisez un nouvel espace de noms et envoyez la configuration de cet appareil.",
         "protocol_upgrade_required": "Mettez à jour votre serveur de synchronisation vers une version compatible avec le nouveau protocole de synchronisation cloud, puis relancez la synchronisation.",
         "password_change_pending": "Un changement de mot de passe est en attente. Réessayez avec le même nouveau mot de passe.",
         "change_password": "Changer le mot de passe de synchronisation",
@@ -484,7 +500,7 @@
         "auto_upload_interval": "Intervalle d'envoi automatique (minutes)",
         "default_conflict_strategy": "Stratégie de conflit par défaut",
         "sync_connections": "Synchroniser les connexions",
-        "sync_forwards": "Synchroniser les redirections enregistrées",
+        "sync_forwards": "Synchroniser les redirections de ports et les tunnels SSH",
         "sync_quick_commands": "Synchroniser les commandes rapides",
         "sync_serial_profiles": "Synchroniser les profils série",
         "sync_telnet_profiles": "Synchroniser les profils Telnet",
@@ -860,6 +876,7 @@
         "redacted": "masqué"
       },
       "diff_fields": {
+        "plugin_configuration": "Paramètres de connexion",
         "name": "Nom",
         "group": "Groupe",
         "host": "Hôte",
@@ -1141,6 +1158,8 @@
     "continue_button": "Continuer vers OxideTerm 2"
   },
   "onboarding": {
+    "more_features": "Découvrir plus de fonctionnalités",
+    "less_features": "Afficher moins de fonctionnalités",
     "step_welcome": "Bienvenue",
     "step_appearance": "Apparence",
     "step_workflow": "Connexions et utilisation",
@@ -1318,8 +1337,8 @@
     "external_import_desc": "Importez des hôtes depuis la configuration SSH et les gestionnaires de terminaux tiers pris en charge, avec aperçu et gestion des doublons."
   },
   "zen_mode": {
-    "hint": "Mode Zen — Appuyez sur ⌘⇧Z pour quitter",
-    "hint_other": "Mode Zen — Appuyez sur Ctrl+Shift+Z pour quitter"
+    "hint": "Mode Zen — Appuyez sur {{shortcut}} pour quitter",
+    "hint_unbound": "Mode Zen — Quittez depuis la palette de commandes"
   },
   "tabbar": {
     "drag_to_dock": "Glisser pour ancrer",

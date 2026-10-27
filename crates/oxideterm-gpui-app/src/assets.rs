@@ -36,6 +36,7 @@ pub(crate) enum LucideIcon {
     Bot,
     Brain,
     Cable,
+    CalendarClock,
     Check,
     CheckCircle,
     CheckSquare,
@@ -49,6 +50,7 @@ pub(crate) enum LucideIcon {
     Copy,
     CornerDownLeft,
     Cpu,
+    Docker,
     Download,
     Eye,
     EyeOff,
@@ -74,6 +76,7 @@ pub(crate) enum LucideIcon {
     FolderOpen,
     Gauge,
     GitFork,
+    Gpu,
     Hash,
     HardDrive,
     HelpCircle,
@@ -88,6 +91,7 @@ pub(crate) enum LucideIcon {
     Layers,
     LayoutList,
     ListChecks,
+    ListFilter,
     ListTree,
     Link2,
     LoaderCircle,
@@ -95,10 +99,13 @@ pub(crate) enum LucideIcon {
     MessageSquare,
     MoreVertical,
     Monitor,
+    Moon,
     MemoryStick,
     Network,
+    Package,
     PanelLeft,
     PanelLeftClose,
+    PanelRight,
     PanelRightClose,
     Pencil,
     Pause,
@@ -116,6 +123,7 @@ pub(crate) enum LucideIcon {
     Search,
     Scissors,
     Server,
+    ServerCog,
     Settings,
     Shield,
     ShieldAlert,
@@ -127,9 +135,11 @@ pub(crate) enum LucideIcon {
     Square,
     Star,
     StopCircle,
+    Sun,
     Terminal,
     Trash2,
     Upload,
+    UserRound,
     Wifi,
     WifiOff,
     Wrench,
@@ -164,6 +174,7 @@ impl LucideIcon {
             "bot" => Self::Bot,
             "brain" => Self::Brain,
             "cable" => Self::Cable,
+            "calendarclock" => Self::CalendarClock,
             "check" => Self::Check,
             "checkcircle" => Self::CheckCircle,
             "checksquare" => Self::CheckSquare,
@@ -177,6 +188,7 @@ impl LucideIcon {
             "copy" => Self::Copy,
             "cornerdownleft" => Self::CornerDownLeft,
             "cpu" => Self::Cpu,
+            "docker" => Self::Docker,
             "download" => Self::Download,
             "eye" => Self::Eye,
             "eyeoff" => Self::EyeOff,
@@ -202,6 +214,7 @@ impl LucideIcon {
             "folderopen" => Self::FolderOpen,
             "gauge" => Self::Gauge,
             "gitfork" => Self::GitFork,
+            "gpu" => Self::Gpu,
             "hash" => Self::Hash,
             "harddrive" => Self::HardDrive,
             "helpcircle" => Self::HelpCircle,
@@ -216,6 +229,7 @@ impl LucideIcon {
             "layers" => Self::Layers,
             "layoutlist" => Self::LayoutList,
             "listchecks" => Self::ListChecks,
+            "listfilter" => Self::ListFilter,
             "listtree" => Self::ListTree,
             "link" | "link2" => Self::Link2,
             "loader" | "loadercircle" => Self::LoaderCircle,
@@ -223,10 +237,13 @@ impl LucideIcon {
             "messagesquare" => Self::MessageSquare,
             "morevertical" => Self::MoreVertical,
             "monitor" => Self::Monitor,
+            "moon" => Self::Moon,
             "memorystick" => Self::MemoryStick,
             "network" => Self::Network,
+            "package" => Self::Package,
             "panelleft" => Self::PanelLeft,
             "panelleftclose" => Self::PanelLeftClose,
+            "panelright" => Self::PanelRight,
             "panelrightclose" => Self::PanelRightClose,
             "pencil" => Self::Pencil,
             "pause" => Self::Pause,
@@ -244,6 +261,7 @@ impl LucideIcon {
             "search" => Self::Search,
             "scissors" => Self::Scissors,
             "server" => Self::Server,
+            "servercog" => Self::ServerCog,
             "settings" => Self::Settings,
             "shield" => Self::Shield,
             "shieldalert" => Self::ShieldAlert,
@@ -254,10 +272,12 @@ impl LucideIcon {
             "splitsquarevertical" | "squaresplitvertical" => Self::SplitSquareVertical,
             "square" => Self::Square,
             "star" => Self::Star,
+            "sun" => Self::Sun,
             "stopcircle" | "circlestop" => Self::StopCircle,
             "terminal" => Self::Terminal,
             "trash" | "trash2" => Self::Trash2,
             "upload" => Self::Upload,
+            "user" | "userround" => Self::UserRound,
             "wifi" => Self::Wifi,
             "wifioff" => Self::WifiOff,
             "wrench" => Self::Wrench,
@@ -287,6 +307,7 @@ impl LucideIcon {
             Self::Bot => "lucide/bot.svg",
             Self::Brain => "lucide/brain.svg",
             Self::Cable => "lucide/cable.svg",
+            Self::CalendarClock => "lucide/calendar-clock.svg",
             Self::Check => "lucide/check.svg",
             Self::CheckCircle => "lucide/check-circle.svg",
             Self::CheckSquare => "lucide/check-square.svg",
@@ -300,6 +321,7 @@ impl LucideIcon {
             Self::Copy => "lucide/copy.svg",
             Self::CornerDownLeft => "lucide/corner-down-left.svg",
             Self::Cpu => "lucide/cpu.svg",
+            Self::Docker => "material-icons/docker.svg",
             Self::Download => "lucide/download.svg",
             Self::Eye => "lucide/eye.svg",
             Self::EyeOff => "lucide/eye-off.svg",
@@ -325,6 +347,7 @@ impl LucideIcon {
             Self::FolderOpen => "lucide/folder-open.svg",
             Self::Gauge => "lucide/gauge.svg",
             Self::GitFork => "lucide/git-fork.svg",
+            Self::Gpu => "lucide/gpu.svg",
             Self::Hash => "lucide/hash.svg",
             Self::HardDrive => "lucide/hard-drive.svg",
             Self::HelpCircle => "lucide/help-circle.svg",
@@ -339,6 +362,7 @@ impl LucideIcon {
             Self::Layers => "lucide/layers.svg",
             Self::LayoutList => "lucide/layout-list.svg",
             Self::ListChecks => "lucide/list-checks.svg",
+            Self::ListFilter => "lucide/list-filter.svg",
             Self::ListTree => "lucide/list-tree.svg",
             Self::Link2 => "lucide/link-2.svg",
             Self::LoaderCircle => "lucide/loader-circle.svg",
@@ -346,10 +370,13 @@ impl LucideIcon {
             Self::MessageSquare => "lucide/message-square.svg",
             Self::MoreVertical => "lucide/more-vertical.svg",
             Self::Monitor => "lucide/monitor.svg",
+            Self::Moon => "lucide/moon.svg",
             Self::MemoryStick => "lucide/memory-stick.svg",
             Self::Network => "lucide/network.svg",
+            Self::Package => "lucide/package.svg",
             Self::PanelLeft => "lucide/panel-left.svg",
             Self::PanelLeftClose => "lucide/panel-left-close.svg",
+            Self::PanelRight => "lucide/panel-right.svg",
             Self::PanelRightClose => "lucide/panel-right-close.svg",
             Self::Pencil => "lucide/pencil.svg",
             Self::Pause => "lucide/pause.svg",
@@ -367,6 +394,7 @@ impl LucideIcon {
             Self::Search => "lucide/search.svg",
             Self::Scissors => "lucide/scissors.svg",
             Self::Server => "lucide/server.svg",
+            Self::ServerCog => "lucide/server-cog.svg",
             Self::Settings => "lucide/settings.svg",
             Self::Shield => "lucide/shield.svg",
             Self::ShieldAlert => "lucide/shield-alert.svg",
@@ -378,9 +406,11 @@ impl LucideIcon {
             Self::Square => "lucide/square.svg",
             Self::Star => "lucide/star.svg",
             Self::StopCircle => "lucide/circle-stop.svg",
+            Self::Sun => "lucide/sun.svg",
             Self::Terminal => "lucide/terminal.svg",
             Self::Trash2 => "lucide/trash-2.svg",
             Self::Upload => "lucide/upload.svg",
+            Self::UserRound => "lucide/user-round.svg",
             Self::Wifi => "lucide/wifi.svg",
             Self::WifiOff => "lucide/wifi-off.svg",
             Self::Wrench => "lucide/wrench.svg",
@@ -481,6 +511,7 @@ impl AssetSource for NativeAssets {
             "lucide/bot.svg" => BOT,
             "lucide/brain.svg" => BRAIN,
             "lucide/cable.svg" => CABLE,
+            "lucide/calendar-clock.svg" => CALENDAR_CLOCK,
             "lucide/check.svg" => CHECK,
             "lucide/check-circle.svg" => CHECK_CIRCLE,
             "lucide/check-square.svg" => CHECK_SQUARE,
@@ -525,6 +556,7 @@ impl AssetSource for NativeAssets {
             "lucide/folder-plus.svg" => FOLDER_PLUS,
             "lucide/gauge.svg" => GAUGE,
             "lucide/git-fork.svg" => GIT_FORK,
+            "lucide/gpu.svg" => GPU,
             "lucide/hash.svg" => HASH,
             "lucide/hard-drive.svg" => HARD_DRIVE,
             "lucide/help-circle.svg" => HELP_CIRCLE,
@@ -545,13 +577,17 @@ impl AssetSource for NativeAssets {
             "lucide/message-square.svg" => MESSAGE_SQUARE,
             "lucide/list-tree.svg" => LIST_TREE,
             "lucide/list-checks.svg" => LIST_CHECKS,
+            "lucide/list-filter.svg" => LIST_FILTER,
             "lucide/more-horizontal.svg" => MORE_HORIZONTAL,
             "lucide/more-vertical.svg" => MORE_VERTICAL,
             "lucide/monitor.svg" => MONITOR,
+            "lucide/moon.svg" => MOON,
             "lucide/memory-stick.svg" => MEMORY_STICK,
             "lucide/network.svg" => NETWORK,
+            "lucide/package.svg" => PACKAGE,
             "lucide/panel-left.svg" => PANEL_LEFT,
             "lucide/panel-left-close.svg" => PANEL_LEFT_CLOSE,
+            "lucide/panel-right.svg" => PANEL_RIGHT,
             "lucide/panel-right-close.svg" => PANEL_RIGHT_CLOSE,
             "lucide/pencil.svg" => PENCIL,
             "lucide/pin.svg" => PIN,
@@ -569,6 +605,7 @@ impl AssetSource for NativeAssets {
             "lucide/search.svg" => SEARCH,
             "lucide/scissors.svg" => SCISSORS,
             "lucide/server.svg" => SERVER,
+            "lucide/server-cog.svg" => SERVER_COG,
             "lucide/settings.svg" => SETTINGS,
             "lucide/shield.svg" => SHIELD,
             "lucide/shield-alert.svg" => SHIELD_ALERT,
@@ -581,9 +618,11 @@ impl AssetSource for NativeAssets {
             "lucide/square.svg" => SQUARE,
             "lucide/star.svg" => STAR,
             "lucide/circle-stop.svg" => CIRCLE_STOP,
+            "lucide/sun.svg" => SUN,
             "lucide/terminal.svg" => TERMINAL,
             "lucide/trash-2.svg" => TRASH_2,
             "lucide/upload.svg" => UPLOAD,
+            "lucide/user-round.svg" => USER_ROUND,
             "lucide/wifi.svg" => WIFI,
             "lucide/wifi-off.svg" => WIFI_OFF,
             "lucide/wrench.svg" => WRENCH,
@@ -681,6 +720,7 @@ impl AssetSource for NativeAssets {
                 "lock.svg",
                 "list-tree.svg",
                 "list-checks.svg",
+                "list-filter.svg",
                 "memory-stick.svg",
                 "message-square.svg",
                 "more-horizontal.svg",
@@ -689,6 +729,7 @@ impl AssetSource for NativeAssets {
                 "network.svg",
                 "panel-left.svg",
                 "panel-left-close.svg",
+                "panel-right.svg",
                 "panel-right-close.svg",
                 "pencil.svg",
                 "pin.svg",
@@ -814,6 +855,24 @@ mod tests {
 
 // Lucide icons are from lucide, licensed ISC. Settings navigation icons match
 // the lucide-react v0.577.0 package used by the Tauri frontend.
+// These four icons come from https://github.com/lucide-icons/lucide/tree/main/icons.
+// ISC License — Copyright (c) 2026 Lucide Icons and Contributors
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+const SERVER_COG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10.852 14.772-.383.923"/><path d="M13.148 14.772a3 3 0 1 0-2.296-5.544l-.383-.923"/><path d="m13.148 9.228.383-.923"/><path d="m13.53 15.696-.382-.924a3 3 0 1 1-2.296-5.544"/><path d="m14.772 10.852.923-.383"/><path d="m14.772 13.148.923.383"/><path d="M4.5 10H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-.5"/><path d="M4.5 14H4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-.5"/><path d="M6 18h.01"/><path d="M6 6h.01"/><path d="m9.228 10.852-.923-.383"/><path d="m9.228 13.148-.923.383"/></svg>"#;
+const CALENDAR_CLOCK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v3"/><path d="M21 7.338V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h2.338"/><path d="M3 9h5.859"/><path d="M8 2v3"/><circle cx="16" cy="16" r="6"/></svg>"#;
+const GPU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 17h18a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2H2"/><path d="M2 21V3"/><path d="M7 17v3a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-3"/><circle cx="16" cy="11" r="2"/><circle cx="8" cy="11" r="2"/></svg>"#;
+const PACKAGE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/></svg>"#;
 const ACTIVITY: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>"#;
 const ALERT_CIRCLE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>"#;
 const ALERT_TRIANGLE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>"#;
@@ -892,12 +951,16 @@ const LOADER_CIRCLE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24
 const LOCK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>"#;
 const LIST_TREE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12h-8"/><path d="M21 6H8"/><path d="M21 18h-8"/><path d="M3 6v4c0 1.1.9 2 2 2h3"/><path d="M3 10v6c0 1.1.9 2 2 2h3"/></svg>"#;
 const LIST_CHECKS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>"#;
+const LIST_FILTER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>"#;
 const MORE_HORIZONTAL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>"#;
 const MONITOR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>"#;
+const MOON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>"#;
+const SUN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>"#;
 const MEMORY_STICK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 19v-3"/><path d="M10 19v-3"/><path d="M14 19v-3"/><path d="M18 19v-3"/><path d="M8 11V9"/><path d="M16 11V9"/><path d="M12 11V9"/><path d="M2 15h20"/><path d="M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z"/></svg>"#;
 const NETWORK: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></svg>"#;
 const PANEL_LEFT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>"#;
 const PANEL_LEFT_CLOSE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>"#;
+const PANEL_RIGHT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></svg>"#;
 const PANEL_RIGHT_CLOSE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/><path d="m8 9 3 3-3 3"/></svg>"#;
 const PENCIL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>"#;
 const PIN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>"#;
@@ -927,6 +990,8 @@ const STAR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height=
 const TERMINAL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>"#;
 const TRASH_2: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>"#;
 const UPLOAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m17 8-5-5-5 5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/></svg>"#;
+const USER_ROUND: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 20a6 6 0 0 0-12 0"/><circle cx="12" cy="10" r="4"/></svg>"#;
+
 const WIFI: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></svg>"#;
 const WIFI_OFF: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/></svg>"#;
 const X: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>"#;

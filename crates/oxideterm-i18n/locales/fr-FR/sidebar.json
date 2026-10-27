@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "Tâches en arrière-plan : {{count}}",
+      "search": "Rechercher une tâche en arrière-plan…",
+      "transferring": "Transfert en cours",
+      "reconnecting": "Reconnexion en cours"
+    },
+    "tab_scope": {
+      "show_all": "Tout afficher",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "Afficher les {{total}} onglets de cette fenêtre.",
+      "filtered_tooltip": "Seuls les onglets de « {{scope}} » sont affichés ({{visible}}/{{total}}). Les autres restent ouverts.",
+      "all": "Tous les onglets",
+      "global": "Pages globales",
+      "local": "Terminaux locaux",
+      "connection": "Connexion",
+      "empty": "Aucun onglet dans ce périmètre",
+      "search": "Rechercher un périmètre d’onglets…",
+      "categories": "Catégories",
+      "connections": "Connexions",
+      "hint": "↑↓ Sélectionner · Entrée Appliquer · Échap Annuler"
+    },
     "search": {
       "title": "Rechercher des sessions",
       "placeholder": "Rechercher des sessions…",
@@ -13,6 +35,7 @@
       "connected_first": "Connectées en premier"
     },
     "actions": {
+      "enter_zen": "Activer le mode Zen",
       "expand": "Développer la barre latérale",
       "collapse": "Réduire la barre latérale",
       "new_local_terminal": "Nouveau terminal local",
@@ -41,6 +64,7 @@
       "import_tooltip": "Importer depuis un fichier .oxide",
       "export_tooltip": "Exporter vers un fichier .oxide",
       "host_tools": "Outils d’hôte",
+      "more_tools": "Autres outils",
       "knowledge": "Base de connaissances",
       "host_monitor": "Surveillance",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "Paquets"
     },
     "tooltips": {
+      "switch_to_light": "Passer au thème clair",
+      "switch_to_dark": "Passer au thème sombre",
       "settings": "Paramètres",
       "ai_hint": "OxideSens",
       "switch_tree": "Vue arborescente",
       "switch_focus": "Vue focus",
+      "switch_host": "Vue par hôte",
       "new_connection": "Nouvelle connexion",
       "lock_app": "Verrouiller OxideTerm",
       "setup_app_lock": "Configurer le verrouillage",

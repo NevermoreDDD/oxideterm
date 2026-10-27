@@ -228,10 +228,10 @@ pub fn terminal_settings_section_count(page: TerminalSettingsPage) -> usize {
         TerminalSettingsPage::Display => 5,
         TerminalSettingsPage::Input => 3,
         // The dedicated keybindings page owns shortcut discovery and editing.
-        TerminalSettingsPage::Local => 4,
+        TerminalSettingsPage::Local => 3,
         TerminalSettingsPage::CommandBar => 3,
         TerminalSettingsPage::Awareness => 3,
-        TerminalSettingsPage::Transfer => 1,
+        TerminalSettingsPage::Transfer => 2,
         TerminalSettingsPage::Logging => 1,
         TerminalSettingsPage::Highlight => 1,
     };
@@ -246,8 +246,8 @@ pub fn ai_settings_section_count(page: AiSettingsPage) -> usize {
         // Context controls, prompt, memory, and model windows are
         // separate cards so each virtual row owns one stable responsibility.
         AiSettingsPage::Context => 4,
-        // Tool policy, conversation agents, skills, and MCP servers have separate scopes.
-        AiSettingsPage::Tools => 4,
+        // Global tool policy, web access, subagents, skills, and MCP have separate cards.
+        AiSettingsPage::Tools => 5,
     };
     // The first section is the subpage picker, matching terminal settings.
     1 + page_cards

@@ -30,6 +30,7 @@ mod color;
 mod command_sender;
 mod data;
 mod editor_integration;
+mod integration_scripts;
 mod local_graphics_event_loop;
 mod local_shell;
 mod local_shell_integration;
@@ -44,7 +45,9 @@ mod remote_shell_integration;
 mod search;
 mod selection;
 mod session;
+mod shell_channel;
 mod shell_completion;
+pub use shell_channel::{ShellChannel, ShellChannelAcquisition};
 mod shell_integration;
 mod tmux;
 
@@ -69,7 +72,7 @@ pub use editor_integration::{
     TerminalEditorClipboardEvent, TerminalEditorClipboardOperation, TerminalEditorIntegrationEvent,
     TerminalEditorMode, TerminalEditorSelection, VIM_FREE_TYPE_INTEGRATION_SOURCE,
 };
-pub use local_shell::{LocalPtyConfig, ShellInfo, default_shell, scan_shells};
+pub use local_shell::{LocalPtyConfig, ShellInfo, default_shell, is_shell_executable, scan_shells};
 pub use local_shell_integration::TerminalCwdIntegrationLaunchState;
 pub use oxideterm_modem_transfer::{
     DetectedModemProtocol, ModemTransferDirection,
@@ -90,13 +93,15 @@ pub use remote_shell_integration::{
     RemoteShellKind, inspect_remote_shell_integration, install_remote_shell_integration,
     remove_remote_shell_integration,
 };
-pub use search::TerminalSearchSource;
+pub use search::{
+    TerminalSearchOptions, TerminalSearchQuery, TerminalSearchResult, TerminalSearchSource,
+};
 pub use selection::TerminalSelectionRange;
 pub use session::{
     MoshConnectionStatus, MoshPredictionDisplay, MoshTerminalConfig, SerialControlLine,
     SerialControlState, SerialDisplayMode, SerialError, SerialErrorCode, SerialFlowControl,
     SerialLineEnding, SerialParity, SerialPortInfo, SerialRuntimeOptions, SerialSendMode,
-    SerialSessionConfig, SshPtySession, SshSessionConfig, TelnetControlCommand,
+    SerialSessionConfig, SshPtySession, SshSessionConfig, TelnetControlCommand, TelnetLineEndings,
     TelnetLoginCredentials, TelnetSessionConfig, TerminalDrainBudget, TerminalDrainReport,
     TerminalMagicKind, TerminalOutputProcessor, TerminalResize, TerminalSession,
     TerminalSessionBackend, TerminalSessionKind, TerminalSessionStatus, serial_list_ports,
@@ -110,7 +115,7 @@ pub use shell_integration::{
     ShellIntegrationEvent, ShellIntegrationEventKind, ShellIntegrationLifecycleState,
     ShellIntegrationSource, ShellIntegrationStatus, TerminalCommandMark,
     TerminalCommandMarkClosedBy, TerminalCommandMarkConfidence, TerminalCommandMarkDetectionSource,
-    TerminalCommandMarkEvent,
+    TerminalCommandMarkEvent, TerminalCommandPosition,
 };
 
 pub use color::TerminalPalette;

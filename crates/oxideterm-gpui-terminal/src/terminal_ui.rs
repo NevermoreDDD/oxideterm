@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use gpui::{
-    Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Pixels, SharedString, TextRun,
-    Window, px, rgb,
+    Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Hsla, Pixels, Rgba, SharedString,
+    TextRun, TextSystem, Window, px, rgb,
 };
 use oxideterm_render_policy::EffectiveRenderPolicy;
 use oxideterm_settings::{
@@ -36,7 +36,6 @@ pub(crate) const TERMINAL_LINE_HEIGHT_RATIO: f32 = 1.2;
 // User padding is applied outside the element; these coordinates are grid-local.
 pub(crate) const TERMINAL_CONTENT_PADDING: f32 = 0.0;
 // Command marks do not reserve additional space before column zero.
-pub(crate) const TERMINAL_COMMAND_MARK_GUTTER_WIDTH: f32 = 0.0;
 const NESTED_SEMANTIC_COLOR_COUNT: u8 = 6;
 const TERMINAL_SEMANTIC_ERROR_LINE_BAND_OPACITY: f32 = 0.11;
 const TERMINAL_SEMANTIC_WARNING_LINE_BAND_OPACITY: f32 = 0.08;
@@ -92,6 +91,7 @@ pub struct TerminalUiPreferences {
     pub right_click_paste: bool,
     pub open_links_with_modifier: bool,
     pub detect_file_paths_as_links: bool,
+    pub timestamp_hover: bool,
     pub semantic_coloring: bool,
     pub selection_highlighting: bool,
     pub semantic_scheme: Arc<CompiledSemanticScheme>,
@@ -104,6 +104,7 @@ pub struct TerminalUiPreferences {
     pub bidi_enabled: bool,
     pub current_directory_awareness_enabled: bool,
     pub command_marks_enabled: bool,
+    pub command_folding_enabled: bool,
     pub command_marks_user_input_observed: bool,
     pub command_marks_heuristic_detection: bool,
     pub command_marks_show_hover_actions: bool,
@@ -117,6 +118,8 @@ pub struct TerminalUiPreferences {
     pub processing_failed_message: String,
     pub reconnect_label: String,
     pub reconnect_hint: String,
+    pub archive_link_hint: String,
+    pub archive_link_modifier_hint: String,
     pub reconnecting_label: String,
     pub paste_labels: TerminalPasteLabels,
     pub kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels,
@@ -135,6 +138,7 @@ pub struct TerminalUiPreferences {
     pub notice_sink: Option<Arc<dyn Fn(TerminalNotice) + Send + Sync + 'static>>,
     pub highlight_rules: Arc<[TerminalHighlightRule]>,
     pub trzsz_policy: Option<TrzszTransferPolicy>,
+    pub xmodem_block_size: oxideterm_settings::XmodemBlockSize,
 }
 
 #[derive(Clone, Default)]
@@ -219,6 +223,7 @@ impl Default for TerminalUiPreferences {
             right_click_paste: TERMINAL_RIGHT_CLICK_PASTE,
             open_links_with_modifier: TERMINAL_OPEN_LINKS_WITH_MODIFIER,
             detect_file_paths_as_links: TERMINAL_DETECT_FILE_PATHS_AS_LINKS,
+            timestamp_hover: true,
             // Match persisted settings so standalone terminal views remain opt-in as well.
             semantic_coloring: false,
             selection_highlighting: false,
@@ -235,6 +240,7 @@ impl Default for TerminalUiPreferences {
             bidi_enabled: TERMINAL_BIDI_ENABLED,
             current_directory_awareness_enabled: false,
             command_marks_enabled: TERMINAL_COMMAND_MARKS_ENABLED,
+            command_folding_enabled: false,
             command_marks_user_input_observed: false,
             command_marks_heuristic_detection: false,
             command_marks_show_hover_actions: TERMINAL_COMMAND_MARKS_SHOW_HOVER_ACTIONS,
@@ -249,6 +255,8 @@ impl Default for TerminalUiPreferences {
                 "Terminal processing stopped. Reconnect this session to continue.".into(),
             reconnect_label: String::new(),
             reconnect_hint: String::new(),
+            archive_link_hint: String::new(),
+            archive_link_modifier_hint: String::new(),
             reconnecting_label: String::new(),
             paste_labels: TerminalPasteLabels::default(),
             kitty_file_transmission_labels: TerminalKittyFileTransmissionLabels::default(),
@@ -267,6 +275,7 @@ impl Default for TerminalUiPreferences {
             notice_sink: None,
             highlight_rules: Arc::from(Vec::<TerminalHighlightRule>::new()),
             trzsz_policy: None,
+            xmodem_block_size: oxideterm_settings::XmodemBlockSize::default(),
         }
     }
 }
@@ -412,6 +421,8 @@ pub struct TerminalCommandSelectionLabels {
     pub copy: String,
     pub copy_title: String,
     pub copy_command: String,
+    pub shell_ide: String,
+    pub shell_ide_preparing: String,
     pub send_to_ai: String,
     pub fill_command_bar: String,
     pub insert_selection_into_command: String,
@@ -419,6 +430,10 @@ pub struct TerminalCommandSelectionLabels {
     pub find: String,
     pub manage_triggers: String,
     pub select_command: String,
+    pub collapse_output: String,
+    pub expand_output: String,
+    pub folded_output: String,
+    pub folded_exit_code: String,
     pub previous_command: String,
     pub next_command: String,
     pub clear_screen: String,
@@ -432,6 +447,8 @@ impl Default for TerminalCommandSelectionLabels {
             copy: "Copy".to_string(),
             copy_title: "Copy command output".to_string(),
             copy_command: "Copy command".to_string(),
+            shell_ide: "Convert to IDE".to_string(),
+            shell_ide_preparing: "Starting IDE file service; terminal input is paused…".into(),
             send_to_ai: "Send to OxideSens".to_string(),
             fill_command_bar: "Fill command bar".to_string(),
             insert_selection_into_command: "Insert selection here".to_string(),
@@ -439,6 +456,10 @@ impl Default for TerminalCommandSelectionLabels {
             find: "Find...".to_string(),
             manage_triggers: "Manage triggers...".to_string(),
             select_command: "Select command".to_string(),
+            collapse_output: "Collapse output".to_string(),
+            expand_output: "Expand output".to_string(),
+            folded_output: "{{count}} output lines collapsed".to_string(),
+            folded_exit_code: "Exit code {{code}}".to_string(),
             previous_command: "Previous command".to_string(),
             next_command: "Next command".to_string(),
             clear_screen: "Clear screen".to_string(),
@@ -890,6 +911,7 @@ pub struct TerminalUiTheme {
     pub(crate) bell_background: u32,
     pub foreground: u32,
     pub(crate) header_foreground: u32,
+    pub(crate) selection_background: Hsla,
 }
 
 impl Default for TerminalUiTheme {
@@ -986,14 +1008,44 @@ pub fn terminal_semantic_line_band(
     }
 }
 
+fn terminal_selection_background(theme: oxideterm_theme::TerminalTheme) -> Hsla {
+    // Parse once with the theme, not while laying out each selected cell.
+    let value = theme.selection_background.trim();
+    let color = Rgba::try_from(value).ok().or_else(|| {
+        let lower = value.to_ascii_lowercase();
+        let (components, has_alpha) = if let Some(value) = lower.strip_prefix("rgba(") {
+            (value.strip_suffix(')')?, true)
+        } else {
+            (lower.strip_prefix("rgb(")?.strip_suffix(')')?, false)
+        };
+        let mut parts = components.split(',').map(|part| {
+            part.trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite())
+        });
+        let r = parts.next()??.round().clamp(0.0, 255.0) / 255.0;
+        let g = parts.next()??.round().clamp(0.0, 255.0) / 255.0;
+        let b = parts.next()??.round().clamp(0.0, 255.0) / 255.0;
+        let a = if has_alpha {
+            parts.next()??.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        parts.next().is_none().then_some(Rgba { r, g, b, a })
+    });
+    color
+        .unwrap_or_else(|| rgb(theme.foreground).alpha(0.2))
+        .into()
+}
+
 impl TerminalUiTheme {
     pub fn new(background: u32, foreground: u32, cursor: u32) -> Self {
         Self {
-            tokens: default_tokens(),
             background,
-            bell_background: 0x17131a,
             foreground,
             header_foreground: cursor,
+            ..Self::default()
         }
     }
 
@@ -1003,6 +1055,7 @@ impl TerminalUiTheme {
             bell_background: 0x17131a,
             foreground: tokens.terminal.foreground,
             header_foreground: tokens.terminal.cursor,
+            selection_background: terminal_selection_background(tokens.terminal),
             tokens,
         }
     }
@@ -1062,12 +1115,14 @@ impl TerminalMetrics {
     ) -> Self {
         let font_size = px(preferences.font_size);
         let line_height = px(preferences.font_size * preferences.line_height);
-        let font = terminal_font_with_family_and_cjk(
+        let font = resolve_terminal_font(
+            window.text_system(),
             &preferences.font_family,
             preferences.cjk_font_family.as_deref(),
             preferences.font_ligatures,
             preferences.font_weight,
-        );
+        )
+        .font;
         let font_id = window.text_system().resolve_font(&font);
         let measured_width = window
             .text_system()
@@ -1122,6 +1177,60 @@ pub(crate) fn fallback_cell_width(window: &mut Window, font: &Font, font_size: P
         .text_system()
         .shape_line(sample, font_size, &[run], None)
         .width
+}
+
+pub struct ResolvedTerminalFont {
+    pub font: Font,
+    pub unavailable_families: Vec<String>,
+}
+
+/// Resolves the primary family before either measuring or shaping terminal cells.
+pub fn resolve_terminal_font(
+    text_system: &TextSystem,
+    family: &str,
+    cjk_family: Option<&str>,
+    font_ligatures: bool,
+    font_weight: f32,
+) -> ResolvedTerminalFont {
+    let mut font =
+        terminal_font_with_family_and_cjk(family, cjk_family, font_ligatures, font_weight);
+    let configured = oxideterm_gpui_ui::css_font_family_stack(family);
+    let available = |family: &str| {
+        // A glyph fallback must not disguise an unavailable configured family.
+        text_system
+            .font_id(&Font {
+                family: terminal_font_family_name(family),
+                fallbacks: None,
+                ..font.clone()
+            })
+            .is_ok()
+    };
+    let mut unavailable_families = Vec::new();
+    for name in configured.iter().map(|name| name.as_ref()) {
+        let name = name.trim();
+        if !name.is_empty() && !available(name) {
+            push_font_fallback(&mut unavailable_families, name);
+        }
+    }
+    let primary = configured
+        .iter()
+        .find(|family| available(family))
+        .map(|family| terminal_font_family_name(family))
+        .unwrap_or_else(|| TERMINAL_FONT.into());
+    // Keep glyph fallbacks intact: CJK and symbol-only fonts need not be usable as a primary.
+    font.family = primary;
+    ResolvedTerminalFont {
+        font,
+        unavailable_families,
+    }
+}
+
+fn terminal_font_family_name(family: &str) -> SharedString {
+    if family.eq_ignore_ascii_case("monospace") || family.eq_ignore_ascii_case("ui-monospace") {
+        TERMINAL_FONT.into()
+    } else {
+        oxideterm_gpui_ui::gpui_font_family_name(family)
+    }
 }
 
 pub(crate) fn terminal_font_with_family_and_cjk(

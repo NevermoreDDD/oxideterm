@@ -46,6 +46,10 @@ pub struct TerminalAutosuggestSettings {
     #[serde(default = "default_terminal_autosuggest_enabled")]
     pub enabled: bool,
     pub local_shell_history: bool,
+    #[serde(default)]
+    pub save_history: bool,
+    #[serde(default = "default_history_retention_days")]
+    pub history_retention_days: u32,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -55,6 +59,8 @@ impl Default for TerminalAutosuggestSettings {
         Self {
             enabled: default_terminal_autosuggest_enabled(),
             local_shell_history: true,
+            save_history: false,
+            history_retention_days: default_history_retention_days(),
             extra: ExtraFields::new(),
         }
     }
@@ -62,6 +68,10 @@ impl Default for TerminalAutosuggestSettings {
 
 fn default_terminal_autosuggest_enabled() -> bool {
     true
+}
+
+fn default_history_retention_days() -> u32 {
+    90
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -98,6 +108,8 @@ pub struct TerminalCommandBarSettings {
     pub quick_commands_enabled: bool,
     #[serde(default)]
     pub quick_bar_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quick_bar_category: Option<String>,
     pub quick_commands_confirm_before_run: bool,
     pub quick_commands_show_toast: bool,
     pub focus_handoff_commands: Vec<String>,
@@ -144,6 +156,7 @@ impl Default for TerminalCommandBarSettings {
             smart_completion: true,
             quick_commands_enabled: true,
             quick_bar_enabled: false,
+            quick_bar_category: None,
             quick_commands_confirm_before_run: false,
             quick_commands_show_toast: true,
             focus_handoff_commands: RECOMMENDED_FOCUS_HANDOFF_COMMANDS
@@ -171,6 +184,8 @@ fn default_command_bar_show_current_directory() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalCommandMarksSettings {
     pub enabled: bool,
+    #[serde(default)]
+    pub folding_enabled: bool,
     pub user_input_observed: bool,
     pub heuristic_detection: bool,
     pub show_hover_actions: bool,
@@ -182,6 +197,7 @@ impl Default for TerminalCommandMarksSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            folding_enabled: false,
             user_input_observed: false,
             heuristic_detection: false,
             show_hover_actions: true,
@@ -201,6 +217,15 @@ pub struct InBandTransferSettings {
     pub max_total_bytes: i64,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum XmodemBlockSize {
+    #[default]
+    #[serde(rename = "128")]
+    Bytes128,
+    #[serde(rename = "1024")]
+    Bytes1024,
 }
 
 impl Default for InBandTransferSettings {
@@ -279,6 +304,10 @@ fn default_open_links_with_modifier() -> bool {
 }
 
 fn default_detect_file_paths_as_links() -> bool {
+    true
+}
+
+fn default_timestamp_hover() -> bool {
     true
 }
 
@@ -424,6 +453,8 @@ pub struct TerminalSettings {
     pub open_links_with_modifier: bool,
     #[serde(default = "default_detect_file_paths_as_links")]
     pub detect_file_paths_as_links: bool,
+    #[serde(default = "default_timestamp_hover")]
+    pub timestamp_hover: bool,
     // Existing installations keep the protective prompt until the user opts out.
     #[serde(default = "default_confirm_before_closing_ssh")]
     pub confirm_before_closing_ssh: bool,
@@ -441,6 +472,8 @@ pub struct TerminalSettings {
     pub triggers: TerminalTriggerSettings,
     #[serde(default)]
     pub remote_shell_integration_mode: RemoteShellIntegrationMode,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remote_shell_integration_deferred: std::collections::BTreeMap<String, u32>,
     pub command_marks: TerminalCommandMarksSettings,
     pub background_enabled: bool,
     pub background_image: Option<String>,
@@ -489,6 +522,8 @@ pub struct TerminalSettings {
     #[serde(default)]
     pub default_highlight_rule_set: Option<String>,
     pub in_band_transfer: InBandTransferSettings,
+    #[serde(default)]
+    pub xmodem_block_size: XmodemBlockSize,
     pub graphics: TerminalGraphicsSettings,
     pub unicode: TerminalUnicodeSettings,
     #[serde(flatten)]
@@ -595,6 +630,7 @@ impl Default for TerminalSettings {
             right_click_paste: false,
             open_links_with_modifier: true,
             detect_file_paths_as_links: true,
+            timestamp_hover: true,
             confirm_before_closing_ssh: true,
             selection_requires_shift: false,
             free_type_mode: false,
@@ -604,6 +640,7 @@ impl Default for TerminalSettings {
             session_log: TerminalSessionLogSettings::default(),
             triggers: TerminalTriggerSettings::default(),
             remote_shell_integration_mode: RemoteShellIntegrationMode::Ask,
+            remote_shell_integration_deferred: Default::default(),
             command_marks: TerminalCommandMarksSettings::default(),
             background_enabled: true,
             background_image: None,
@@ -632,6 +669,7 @@ impl Default for TerminalSettings {
             highlight_rule_sets: Vec::new(),
             default_highlight_rule_set: None,
             in_band_transfer: InBandTransferSettings::default(),
+            xmodem_block_size: XmodemBlockSize::default(),
             graphics: TerminalGraphicsSettings::default(),
             unicode: TerminalUnicodeSettings::default(),
             extra: ExtraFields::new(),
@@ -686,6 +724,7 @@ mod tests {
             "backspaceSequence",
             "deleteSequence",
             "remoteShellIntegrationMode",
+            "xmodemBlockSize",
             "semanticScheme",
         ] {
             value.as_object_mut().unwrap().remove(field);
@@ -715,10 +754,13 @@ mod tests {
         assert!(settings.command_bar.current_directory_awareness);
         assert!(settings.command_bar.project_tasks);
         assert!(!settings.command_bar.quick_bar_enabled);
+        assert_eq!(settings.command_bar.quick_bar_category, None);
         assert!(settings.autosuggest.enabled);
         let disabled: TerminalAutosuggestSettings =
             serde_json::from_str(r#"{"enabled":false,"localShellHistory":true}"#).unwrap();
         assert!(!disabled.enabled);
+        assert!(!disabled.save_history);
+        assert_eq!(disabled.history_retention_days, 90);
         assert_eq!(settings.background_scope, BackgroundScope::Content);
         assert_eq!(
             settings.backspace_sequence,
@@ -730,6 +772,7 @@ mod tests {
             RemoteShellIntegrationMode::Ask
         );
         assert!(!settings.triggers.explicit_shell_enabled);
+        assert_eq!(settings.xmodem_block_size, XmodemBlockSize::Bytes128);
         assert!(settings.broadcast_groups.is_empty());
         assert!(!settings.session_log.automatic);
         assert!(!settings.session_log.include_control_sequences);

@@ -21,7 +21,7 @@ use oxideterm_gpui_ui::{
     surface::{
         color_for_background, color_with_background_scaled_alpha, tauri_glass_surface_shadow,
     },
-    text_input::{TextInputView, text_input},
+    text_input::TextInputView,
 };
 use oxideterm_preview::{
     AudioPreviewBackend, AudioPreviewCommand, AudioPreviewState, PreviewAssetOwner,
@@ -1055,7 +1055,7 @@ pub(super) struct SftpWorkspaceEntity {
     remote_path_by_remote: HashMap<SftpRemoteId, String>,
     remote_home_by_remote: HashMap<SftpRemoteId, String>,
     view_generation: u64,
-    init_error: Option<String>,
+    init_error: Option<SftpViewError>,
     pub(super) focused_input: Option<SftpInput>,
     editing_local_path: bool,
     editing_remote_path: bool,
@@ -1383,6 +1383,17 @@ impl SftpWorkspaceEntity {
 
     pub(in crate::workspace) fn dialog_is_open(&self) -> bool {
         self.dialog.is_some()
+    }
+
+    pub(in crate::workspace) fn preview_text_editor_visible(&self) -> bool {
+        self.preview_editor.is_some()
+            && match self.dialog.as_ref() {
+                Some(SftpDialog::Editor { .. }) => true,
+                Some(SftpDialog::Preview { .. }) => matches!(self.preview_content.as_deref(),
+                Some(PreviewContent::Text { language, mime_type, .. })
+                    if self.preview_markdown_source_mode || !sftp_preview_is_markdown(language.as_deref(), mime_type.as_deref())),
+                _ => false,
+            }
     }
 
     pub(in crate::workspace) fn dialog_phase(&self) -> oxideterm_gpui_ui::motion::ExitPhase {
@@ -1944,6 +1955,12 @@ mod entity_delivery_tests {
 
 // Keep each SFTP responsibility in a real module while preserving this file as the facade.
 mod actions;
+#[derive(Clone)]
+enum SftpViewError {
+    Operation(String),
+    Directory(String),
+}
+
 mod controls;
 mod dialogs;
 mod file_list;

@@ -257,6 +257,21 @@
     "shortcut_count": "個快捷鍵"
   },
   "plugin": {
+    "connections": {
+      "name": "名稱",
+      "group": "群組",
+      "cancel": "取消",
+      "save": "儲存",
+      "save_connect": "儲存並連線",
+      "failed": "操作失敗，請檢查連線設定與外掛權限。",
+      "disconnect": "中斷連線",
+      "connecting": "正在連線…",
+      "connected": "已連線",
+      "disconnected": "已中斷",
+      "unavailable": "連線外掛無法使用，啟用或安裝外掛後即可連線。",
+      "password_unchanged": "留空以保留已儲存的內容",
+      "clear_credentials": "清除已儲存的憑證"
+    },
     "install_queued": "等待中 · 第 {{position}} 項",
     "installing_named": "正在安裝 {{name}}",
     "install_queue_count": "{{count}} 項等待安裝",
@@ -296,6 +311,7 @@
     "native_sidebar_empty_description": "開啟外掛標籤頁查看 native 目前狀態。",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "目前密碼與此同步空間已使用的密碼不一致。請填回原密碼並儲存，再變更同步密碼；若已忘記原密碼，請改用新的命名空間，再上傳本機設定。",
         "protocol_upgrade_required": "請將同步伺服器升級至支援新版雲端同步協定的版本，然後重新同步。",
         "password_change_pending": "上次密碼變更尚未完成，請使用上次的新密碼重試。",
         "change_password": "變更同步密碼",
@@ -484,7 +500,7 @@
         "auto_upload_interval": "自動上傳間隔（分鐘）",
         "default_conflict_strategy": "預設衝突策略",
         "sync_connections": "同步連線",
-        "sync_forwards": "同步已儲存的轉送",
+        "sync_forwards": "同步連接埠轉送與 SSH 通道",
         "sync_quick_commands": "同步快捷命令",
         "sync_serial_profiles": "同步序列埠設定",
         "sync_telnet_profiles": "同步 Telnet 設定",
@@ -860,6 +876,7 @@
         "redacted": "已隱藏"
       },
       "diff_fields": {
+        "plugin_configuration": "連線設定",
         "name": "名稱",
         "group": "分組",
         "host": "主機",
@@ -1141,6 +1158,8 @@
     "continue_button": "進入 OxideTerm 2"
   },
   "onboarding": {
+    "more_features": "查看更多功能",
+    "less_features": "收起更多功能",
     "step_welcome": "歡迎與須知",
     "step_appearance": "外觀",
     "step_workflow": "連線與操作",
@@ -1318,8 +1337,8 @@
     "external_import_desc": "從 SSH 設定和支援的第三方終端管理器匯入主機，並提供預覽與衝突處理。"
   },
   "zen_mode": {
-    "hint": "Zen 模式 — 按 ⌘⇧Z 退出",
-    "hint_other": "Zen 模式 — 按 Ctrl+Shift+Z 退出"
+    "hint": "禪模式 — 按 {{shortcut}} 退出",
+    "hint_unbound": "禪模式 — 可在命令面板中退出"
   },
   "tabbar": {
     "drag_to_dock": "拖曳停靠",

@@ -29,6 +29,19 @@ impl CloudSyncOperationService {
                         .is_none_or(|ids| ids.contains(&connection.id))
             })
             .map(|connection| connection.id.clone())
+            .chain(
+                connections
+                    .plugin_profiles()
+                    .iter()
+                    .filter(|profile| {
+                        scope.sync_connections
+                            && filter
+                                .connection_ids
+                                .as_ref()
+                                .is_none_or(|ids| ids.contains(&profile.id))
+                    })
+                    .map(|profile| profile.id.clone()),
+            )
             .collect::<Vec<_>>();
         let mut options = OxideExportOptions {
             include_passwords: scope.sync_sensitive_credentials,
@@ -145,6 +158,13 @@ impl CloudSyncOperationService {
                         target_port: forward.rule.target_port,
                         description: Some(forward.rule.description),
                         auto_start: forward.auto_start,
+                        tunnel: forward.tunnel.map(|profile| {
+                            oxideterm_connections::oxide_file::OxideTunnelProfile {
+                                name: profile.name,
+                                group: profile.group,
+                                connect_on_startup: profile.connect_on_startup,
+                            }
+                        }),
                     })
                 })
                 .collect();
@@ -196,6 +216,23 @@ mod tests {
             std::env::temp_dir().join(format!("oxide-local-file-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let mut source = ConnectionStore::load(directory.join("source.json")).unwrap();
+        let now = Utc::now();
+        for id in ["plugin-kept", "plugin-excluded"] {
+            source
+                .save_plugin_profile(oxideterm_connections::PluginConnectionProfile {
+                    id: id.into(),
+                    plugin_id: "not.installed".into(),
+                    type_id: "custom".into(),
+                    name: id.into(),
+                    group: None,
+                    config: [("future/options".into(), serde_json::json!({"enabled":true}))].into(),
+                    credential_refs: Default::default(),
+                    created_at: now,
+                    updated_at: now,
+                    last_used_at: None,
+                })
+                .unwrap();
+        }
         let sftp = oxideterm_connections::StandaloneSftpProfile::new(
             "Files",
             "files.test",
@@ -224,6 +261,7 @@ mod tests {
             5900,
         );
         let filter = StructuredUploadItemFilter {
+            connection_ids: Some(["plugin-kept".into()].into()),
             remote_desktop_profile_ids: Some([first.id.clone()].into_iter().collect()),
             ..Default::default()
         };
@@ -280,6 +318,14 @@ mod tests {
                 2 * usize::from(include_connections)
             );
             assert!(!preview.preview.has_app_settings);
+            assert_eq!(
+                preview.metadata.connection_names,
+                if include_connections {
+                    vec!["plugin-kept"]
+                } else {
+                    vec![]
+                }
+            );
             let mut target =
                 ConnectionStore::load(directory.join(format!("target-{include_connections}.json")))
                     .unwrap();
@@ -290,6 +336,24 @@ mod tests {
                 OxideImportOptions::default(),
             )
             .unwrap();
+            assert_eq!(
+                target
+                    .plugin_profiles()
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>(),
+                if include_connections {
+                    vec!["plugin-kept"]
+                } else {
+                    vec![]
+                }
+            );
+            if include_connections {
+                assert_eq!(
+                    target.plugin_profiles()[0].config["future/options"],
+                    serde_json::json!({"enabled":true})
+                );
+            }
             assert_eq!(
                 target
                     .remote_desktop_profiles()

@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "Tác vụ nền: {{count}}",
+      "search": "Tìm tác vụ nền…",
+      "transferring": "Đang truyền",
+      "reconnecting": "Đang kết nối lại"
+    },
+    "tab_scope": {
+      "show_all": "Hiện tất cả",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "Hiển thị tất cả {{total}} thẻ trong cửa sổ này.",
+      "filtered_tooltip": "Chỉ hiển thị các thẻ trong “{{scope}}” ({{visible}}/{{total}}). Các thẻ khác vẫn đang mở.",
+      "all": "Tất cả thẻ",
+      "global": "Trang chung",
+      "local": "Thiết bị đầu cuối cục bộ",
+      "connection": "Kết nối",
+      "empty": "Không có thẻ trong phạm vi này",
+      "search": "Tìm phạm vi thẻ…",
+      "categories": "Danh mục",
+      "connections": "Kết nối",
+      "hint": "↑↓ Chọn · Enter Chuyển · Esc Hủy"
+    },
     "search": {
       "title": "Tìm phiên",
       "placeholder": "Tìm phiên…",
@@ -13,6 +35,7 @@
       "connected_first": "Ưu tiên đã kết nối"
     },
     "actions": {
+      "enter_zen": "Bật chế độ tập trung",
       "expand": "Mở rộng thanh bên",
       "collapse": "Thu gọn thanh bên",
       "new_local_terminal": "Terminal cục bộ mới",
@@ -41,6 +64,7 @@
       "import_tooltip": "Nhập từ file .oxide",
       "export_tooltip": "Xuất sang file .oxide",
       "host_tools": "Công cụ máy chủ",
+      "more_tools": "Công cụ khác",
       "knowledge": "Cơ sở tri thức",
       "host_monitor": "Giám sát",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "Gói"
     },
     "tooltips": {
+      "switch_to_light": "Chuyển sang giao diện sáng",
+      "switch_to_dark": "Chuyển sang giao diện tối",
       "settings": "Cài đặt",
       "ai_hint": "OxideSens",
       "switch_tree": "Chế độ cây",
       "switch_focus": "Chế độ tập trung",
+      "switch_host": "Chế độ máy chủ",
       "new_connection": "Kết nối mới",
       "lock_app": "Khóa OxideTerm",
       "setup_app_lock": "Thiết lập khóa ứng dụng",

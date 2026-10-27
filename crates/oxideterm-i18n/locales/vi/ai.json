@@ -1,5 +1,41 @@
 {
   "ai": {
+    "web": {
+      "sources": "Nguồn",
+      "disabled": "Truy cập web đã tắt.",
+      "configuration": "Chọn cấu hình DeepSeek chính thức trong thiết lập AI.",
+      "authentication": "Khóa DeepSeek bị thiếu hoặc không hợp lệ. Hãy kiểm tra cấu hình đã chọn.",
+      "balance": "Tài khoản DeepSeek không đủ số dư.",
+      "rate_limit": "Dịch vụ tìm kiếm đã đạt giới hạn yêu cầu. Hãy thử lại sau.",
+      "unavailable": "Trang không khả dụng hoặc không thể trích xuất nội dung.",
+      "invalid_arguments": "Dùng URL công khai không chứa thông tin đăng nhập hoặc từ khóa tối đa 128 ký tự.",
+      "request": "Yêu cầu web thất bại hoặc hết thời gian chờ. Hãy kiểm tra kết nối.",
+      "response": "Dịch vụ tìm kiếm trả về dữ liệu không hợp lệ hoặc quá lớn.",
+      "search_done": "Tìm kiếm hoàn tất",
+      "read_done": "Đã đọc trang"
+    },
+    "images": {
+      "tool_invalid": "Công cụ trả về ảnh không đọc được, không được hỗ trợ hoặc vượt quá giới hạn kích thước.",
+      "count": "{{count}} ảnh",
+      "request_limit": "Tổng dung lượng ảnh vượt giới hạn yêu cầu. Hãy bớt ảnh hoặc bắt đầu cuộc trò chuyện mới.",
+      "add": "Thêm ảnh",
+      "loading": "Đang đọc ảnh…",
+      "pasted": "Ảnh đã dán",
+      "remove": "Xóa",
+      "tokens": "Khoảng {{count}} token",
+      "tokens_uncertain": "Khoảng {{count}} token · tạm tính",
+      "auto": "Ảnh: Tự động",
+      "enabled": "Ảnh: Có hỗ trợ",
+      "disabled": "Ảnh: Không hỗ trợ",
+      "model_unavailable": "Mô hình hiện tại không thể nhận ảnh. Hãy chuyển sang mô hình hỗ trợ ảnh.",
+      "history_prompt": "{{model}} không thể đọc ảnh trước đó. Giữ ảnh trong cuộc trò chuyện và chỉ tiếp tục bằng văn bản?",
+      "continue_text": "Chỉ tiếp tục bằng văn bản",
+      "invalid": "Hỗ trợ PNG, JPEG, WebP, tối đa 10 MB và 40 triệu điểm ảnh mỗi ảnh. Cạnh dài được thu nhỏ còn tối đa 2000 px trước khi gửi.",
+      "limit": "Tối đa 8 ảnh mỗi tin nhắn.",
+      "queue_only": "Gửi ảnh trong tin nhắn mới hoặc thêm vào hàng đợi cho lượt tiếp theo.",
+      "missing": "Không thể tải ảnh đã lưu.",
+      "settings": "Cài đặt ảnh"
+    },
     "agents": {
       "parent": "Tác nhân chính",
       "runs": "Lịch sử chạy",
@@ -32,11 +68,7 @@
       "usage_unknown": "Chưa biết lượng token sử dụng",
       "message_not_sent": "Không thể gửi hướng dẫn bổ sung.",
       "supplement": "Hướng dẫn bổ sung",
-      "current_conversation": "Cuộc trò chuyện hiện tại: {{title}}",
-      "scope_hint": "Chỉ cho phép giao việc trong cuộc trò chuyện này. Mặc định tắt.",
-      "model_hint": "Tác vụ mới kế thừa mô hình cha trừ khi chọn một mô hình đã cấu hình.",
-      "no_conversation": "Mở cuộc trò chuyện để cấu hình tác nhân con.",
-      "concurrency_hint": "Số tác vụ chạy đồng thời trong toàn ứng dụng. Tác vụ đang chờ không chiếm suất.",
+      "model_hint": "Tác vụ phụ mới trong mọi cuộc trò chuyện dùng mô hình này hoặc kế thừa mô hình của tác vụ cha.",
       "context": "Bối cảnh và lịch sử tác vụ",
       "loading": "Đang tải chi tiết tác vụ…",
       "load_error": "Không thể tải chi tiết tác vụ."
@@ -253,6 +285,8 @@
       "approve": "Phê duyệt",
       "reject": "Từ chối",
       "tool_names": {
+        "search_web": "Tìm kiếm web",
+        "read_web_page": "Đọc trang web",
         "delegate_task": "Giao tác vụ",
         "send_agent_message": "Gửi tin cho tác nhân con",
         "wait_agents": "Chờ tác nhân con",

@@ -157,10 +157,10 @@ impl AuditState {
 
 impl WorkspaceApp {
     pub(super) fn start_audit_delivery(&mut self, cx: &mut Context<Self>) {
-        let executor = cx.background_executor().clone();
         self.audit.observer = Some(cx.spawn(async move |weak, cx| {
             loop {
-                executor.timer(Duration::from_secs(1)).await;
+                // Keep foreground wakeups on GPUI's scheduler, including its test clock.
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 if weak
                     .update(cx, |this, cx| {
                         let Some(client) = &this.audit.client else {
@@ -1012,23 +1012,24 @@ impl WorkspaceApp {
                             ))
                             .child({
                                 let target = WorkspaceImeTarget::AuditSearch;
-                                let input = oxideterm_gpui_ui::text_input::text_input(
-                                    &self.tokens,
-                                    oxideterm_gpui_ui::text_input::TextInputView {
-                                        value: &self.audit.search,
-                                        placeholder: self.i18n.t("event_log.audit.search"),
-                                        focused: self.active_ime_target(cx) == Some(target),
-                                        caret_visible: self.input_caret.visible(),
-                                        secret: false,
-                                        selected_all: false,
-                                        selected_range: self
-                                            .ime_selected_range_for_target(target, cx),
-                                        marked_text: self.marked_text_for_target(target, cx),
-                                    },
-                                )
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(28.0));
+                                let input = self
+                                    .workspace_text_input(
+                                        target,
+                                        oxideterm_gpui_ui::text_input::TextInputView {
+                                            value: &self.audit.search,
+                                            placeholder: self.i18n.t("event_log.audit.search"),
+                                            focused: self.active_ime_target(cx) == Some(target),
+                                            caret_visible: self.input_caret.visible(),
+                                            secret: false,
+                                            selected_all: false,
+                                            selected_range: self
+                                                .ime_selected_range_for_target(target, cx),
+                                            marked_text: self.marked_text_for_target(target, cx),
+                                        },
+                                    )
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(px(28.0));
                                 self.text_input_with_workspace_ime(
                                     target,
                                     input,

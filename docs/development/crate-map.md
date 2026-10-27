@@ -9,10 +9,11 @@ The workspace is intentionally split by responsibility. Start from the user-visi
 | Terminal protocol and model | `crates/oxideterm-terminal` | `alacritty-terminal`, `vte`, `oxideterm-terminal-model`, `oxideterm-terminal-encoding`, `oxideterm-terminal-graphics`, `oxideterm-terminal-semantic`, `oxideterm-terminal-unicode` | Bytes enter the terminal model before a UI snapshot is rendered |
 | SSH nodes and authentication | `crates/oxideterm-ssh` | `oxideterm-ssh-launch`, `oxideterm-connections`, `oxideterm-topology`, `oxideterm-network-proxy`, `russh` | `SshConnectionRegistry` and `NodeRouter` own shared transport lifetime |
 | SFTP and local files | `crates/oxideterm-sftp`, `crates/oxideterm-local-files`, `crates/oxideterm-gpui-app/src/workspace/sftp.rs` | `russh-sftp`, `oxideterm-preview` | SFTP is a node consumer, not a terminal-pane side effect |
+| Editing and search | `oxideterm-gpui-editor`, `oxideterm-gpui-ide`, `oxideterm-ide-fs` | `oxideterm-editor-*`, shared UI inputs | IDE and SFTP reuse editor/search behavior; the selected file backend owns remote operations |
 | Port forwarding | `crates/oxideterm-forwarding`, `crates/oxideterm-gpui-app/src/workspace/forwards.rs` | `oxideterm-ssh`, `oxideterm-connections` | A forwarding owner retains its listener, bridge tasks, and cancellation path |
 | Settings, secrets, and data | `crates/oxideterm-settings`, `crates/oxideterm-settings-model` | `oxideterm-secret-store`, `oxideterm-atomic-file`, `oxideterm-portable-runtime`, `oxideterm-cloud-sync` | Settings contain safe data; secret storage owns credentials |
 | Internationalization and theme | `crates/oxideterm-i18n/locales`, `crates/oxideterm-theme` | `oxideterm-gpui-ui` | Every user-visible UI key must exist in every locale catalog |
-| Remote desktop and media | `crates/oxideterm-remote-desktop`, `crates/oxideterm-gpui-remote-desktop` | `oxideterm-rdp-helper`, `oxideterm-vnc-helper`, `oxideterm-pcm-audio` | Viewer lifetime is distinct from terminal and SSH-node consumers |
+| Remote desktop and media | `crates/oxideterm-remote-desktop`, `crates/oxideterm-gpui-remote-desktop` | Marketplace `plugins/rdp` and `plugins/vnc` in `oxideterm-plugins`; host audio in `oxideterm-pcm-audio` | Protocol helpers are installed plugins; the host owns profiles and viewer sessions separately from terminal and SSH-node consumers |
 | Plugins, CLI, and automation | `crates/oxideterm-plugin-*`, `crates/oxideterm-cli`, `crates/oxideterm-public-mcp` | `scripts/`, `agent/` | Capability APIs must not bypass the application runtime or secret boundary |
 | Framework and native platform code | `crates/gpui-ce/gpui` | `gpui-pre-apple`, `gpui-pre-windows`, `gpui-pre-macos`, `gpui-pre-linux`, `gpui-pre-wgpu`, `gpui-pre-platform` | Six locally patched packages with registry helpers; see [GPUI maintenance](gpui-ce.md) |
 
@@ -56,6 +57,8 @@ Use `cargo tree -p <crate>` when a dependency boundary is unclear. A crate name 
 - `crates/oxideterm-gpui-app/src/workspace/root/` assembles the root view, modal order, workspace initialization, and window state.
 - `crates/oxideterm-gpui-app/src/workspace/runtime_entity.rs` coordinates node readiness, connection runtime events, reconnection, and registry interactions.
 - `crates/oxideterm-gpui-app/src/workspace/tabs/create.rs` creates terminal consumers and is the normal route for opening terminal tabs.
+- `crates/oxideterm-gpui-app/src/workspace/tabs/` owns page membership, window-local scope selection, visible-tab operations, split layouts, and detached mounts.
+- `crates/oxideterm-gpui-editor/src/surface/search_bar.rs` owns the shared editor search interaction; do not create a separate SFTP search implementation.
 - `crates/oxideterm-gpui-app/src/workspace/sftp/` and `workspace/forwards/` own SFTP and forwarding UI/runtime adaptation.
 - `crates/oxideterm-gpui-terminal/src/app/` owns terminal input, interaction state, and high-level terminal rendering; `terminal_view/` owns viewport layout and paint data.
 - `crates/oxideterm-ssh` owns SSH transport, authentication, channel, registry, and topology behavior.

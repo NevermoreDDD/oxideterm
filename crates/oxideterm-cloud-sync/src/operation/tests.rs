@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn quick_command_category_sync_merges_icon_color_and_theme_reset() {
+    let mut base = oxideterm_quick_commands::default_quick_command_categories();
+    for initial in [None, Some("#112233".to_string())] {
+        base[0].icon_color = initial.clone();
+        let mut local = base.clone();
+        local[0].icon_color = if initial.is_none() {
+            Some("#22d3ee".into())
+        } else {
+            None
+        };
+        let mut remote = base.clone();
+        remote[0].name = "Renamed remotely".into();
+        merge_quick_command_categories(&mut remote, &base, &local, &ConflictStrategy::Merge)
+            .unwrap();
+        assert_eq!(remote[0].name, "Renamed remotely");
+        assert_eq!(
+            remote[0].icon_color.as_deref(),
+            if initial.is_none() {
+                Some("#22d3ee")
+            } else {
+                None
+            }
+        );
+    }
+}
+
+#[test]
 fn ftp_cloud_merge_keeps_independent_local_and_remote_edits() {
     use oxideterm_connections::{FtpProfile, FtpProfilesSyncSnapshot, FtpSecurity};
     let profile = FtpProfile::new(
@@ -133,6 +160,8 @@ fn remote_desktop_apply_preserves_local_credentials_and_valid_gateway_refs() {
         remote_desktop_snapshot(Some("untrusted-remote-keychain-entry"), "remote.test");
     incoming.records[0].ssh_gateway_connection_id = Some("conn-1".to_string());
     let incoming_connections = oxideterm_connections::SavedConnectionsSyncSnapshot {
+        plugin_profiles: Vec::new(),
+        plugin_tombstones: Vec::new(),
         totp_credentials: Vec::new(),
         local_terminal_profiles: Vec::new(),
         local_terminal_tombstones: Vec::new(),
@@ -244,6 +273,8 @@ fn connection_merge_preserves_independent_full_option_changes() {
         vec!["hmac-sha2-512-etm@openssh.com".to_string()];
     let base = SavedConnectionsSyncSnapshot {
         totp_credentials: Vec::new(),
+        plugin_profiles: Vec::new(),
+        plugin_tombstones: Vec::new(),
         local_terminal_profiles: Vec::new(),
         local_terminal_tombstones: Vec::new(),
         revision: "base".to_string(),
@@ -252,6 +283,8 @@ fn connection_merge_preserves_independent_full_option_changes() {
     };
     let local = SavedConnectionsSyncSnapshot {
         totp_credentials: Vec::new(),
+        plugin_profiles: Vec::new(),
+        plugin_tombstones: Vec::new(),
         local_terminal_profiles: Vec::new(),
         local_terminal_tombstones: Vec::new(),
         revision: "local".to_string(),
@@ -260,6 +293,8 @@ fn connection_merge_preserves_independent_full_option_changes() {
     };
     let mut remote = SavedConnectionsSyncSnapshot {
         totp_credentials: Vec::new(),
+        plugin_profiles: Vec::new(),
+        plugin_tombstones: Vec::new(),
         local_terminal_profiles: Vec::new(),
         local_terminal_tombstones: Vec::new(),
         revision: "remote".to_string(),
@@ -531,6 +566,8 @@ fn local_profile_cloud_merge_and_selection_preserve_independent_edits() {
     };
     let base = SavedConnectionsSyncSnapshot {
         revision: "base".into(),
+        plugin_profiles: Vec::new(),
+        plugin_tombstones: Vec::new(),
         totp_credentials: Vec::new(),
         exported_at: now.to_rfc3339(),
         records: vec![],

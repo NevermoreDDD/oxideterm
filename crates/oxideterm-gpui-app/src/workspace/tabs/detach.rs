@@ -92,17 +92,6 @@ fn interpolate_tab_window_handoff_rect(
     }
 }
 
-fn tab_return_visible_insertion_index(pointer_x: f32, tab_widths: &[f32]) -> usize {
-    let mut tab_left = 0.0;
-    for (visible_index, width) in tab_widths.iter().copied().enumerate() {
-        if pointer_x < tab_left + width * 0.5 {
-            return visible_index;
-        }
-        tab_left += width;
-    }
-    tab_widths.len()
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DetachedTabSurfaceRoute {
     Settings,
@@ -150,11 +139,7 @@ impl WorkspaceApp {
         } else {
             self.sidebar_width
         };
-        let right_offset = if self.context_sidebar_visible() {
-            self.ai_entity.read(cx).chat_ui().sidebar_width
-        } else {
-            0.0
-        };
+        let right_offset = self.context_sidebar_occupied_width(cx);
         let width = (f32::from(window_bounds.size.width) - left_offset - right_offset).max(0.0);
         self.main_window_tabbar_drop_bounds = Some(Bounds::new(
             gpui::point(
@@ -248,6 +233,7 @@ impl WorkspaceApp {
         }
         self.register_tab_surface(&tab, cx);
         self.close_tab_context_menu();
+        self.reveal_tab_scope(tab.id, cx);
         self.apply_main_window_active_tab_change(previous, Some(tab.id), cx);
         self.sync_active_tab_surface(cx);
         self.focus_tab_terminal(tab.id, window, cx);
@@ -415,20 +401,21 @@ impl WorkspaceApp {
         let dialog = self.tab_rename_dialog.as_ref()?;
         let target = WorkspaceImeTarget::TabRename;
         let submit_disabled = dialog.draft.trim().is_empty();
-        let input = text_input(
-            &self.tokens,
-            TextInputView {
-                value: dialog.draft.as_str(),
-                placeholder: self.i18n.t("tabbar.rename_tab_placeholder"),
-                focused: true,
-                caret_visible: self.input_caret.visible(),
-                secret: false,
-                selected_all: false,
-                selected_range: self.ime_selected_range_for_target(target, cx),
-                marked_text: self.marked_text_for_target(target, cx),
-            },
-        )
-        .h(px(34.0));
+        let input = self
+            .workspace_text_input(
+                target,
+                TextInputView {
+                    value: dialog.draft.as_str(),
+                    placeholder: self.i18n.t("tabbar.rename_tab_placeholder"),
+                    focused: true,
+                    caret_visible: self.input_caret.visible(),
+                    secret: false,
+                    selected_all: false,
+                    selected_range: self.ime_selected_range_for_target(target, cx),
+                    marked_text: self.marked_text_for_target(target, cx),
+                },
+            )
+            .h(px(34.0));
         let input = self.text_input_with_workspace_ime(
             target,
             input,
@@ -541,6 +528,8 @@ impl WorkspaceApp {
         let Some(tab_index) = self.tab_index_by_id(tab_id, cx) else {
             return;
         };
+        // Capture the rendered width before the tab leaves the main strip.
+        let exiting_visual = self.tab_exit_visual(tab_index, window, cx);
         let Some(tabs::TabDetachTransition {
             mount_id,
             selection,
@@ -553,10 +542,6 @@ impl WorkspaceApp {
         self.apply_main_window_active_tab_change(selection.previous, selection.current, cx);
         let window_registration =
             self.reserve_workspace_window(window_registry::WindowRole::Detached { tab_id });
-        // Capture the source tab before it leaves the live strip. The snapshot
-        // is committed only after native window creation succeeds.
-        let exiting_visual = self.tab_exit_visual(tab_index, cx);
-
         self.sync_active_tab_surface(cx);
         if self
             .window_registry
@@ -714,6 +699,7 @@ impl WorkspaceApp {
         if let Some(transition) = transition {
             // Close the source shell directly; re-entering its handle from its own event fails.
             self.apply_tab_mount_cleanup(transition.cleanup, Some(current_window), cx);
+            self.reveal_tab_scope(tab_id, cx);
             self.apply_main_window_active_tab_change(
                 transition.selection.previous,
                 transition.selection.current,
@@ -856,24 +842,6 @@ impl WorkspaceApp {
         .detach();
     }
 
-    fn detached_tab_return_visible_index(&self, screen_x: f32, cx: &App) -> Option<usize> {
-        let drop_bounds = self.main_window_tabbar_drop_bounds.as_ref()?;
-        let scroll_x = f32::from(-self.main_window_tabs.scroll_handle.offset().x).max(0.0);
-        let pointer_x = screen_x - f32::from(drop_bounds.origin.x) + scroll_x
-            - self.tokens.metrics.tabbar_leading_offset;
-        let outside_main_tabs = self.tab_host.read(cx).outside_main_tab_ids();
-        let visible_widths = self
-            .tabs(cx)
-            .iter()
-            .filter(|tab| !outside_main_tabs.contains(&tab.id))
-            .map(|tab| self.tab_visual_width(tab))
-            .collect::<Vec<_>>();
-        Some(tab_return_visible_insertion_index(
-            pointer_x,
-            &visible_widths,
-        ))
-    }
-
     pub(in crate::workspace) fn start_detached_tab_return_drag(
         &mut self,
         tab_id: TabId,
@@ -926,7 +894,7 @@ impl WorkspaceApp {
             return;
         }
         let was_active = drag.active;
-        let previous_placeholder = self.detached_tab_return_placeholder(cx);
+        let previous_placeholder = self.tab_strip_layout(window, cx).return_index();
         drag.current_screen_x = f32::from(screen_point.x);
         drag.current_screen_y = f32::from(screen_point.y);
         let delta_x = drag.current_screen_x - drag.start_screen_x;
@@ -938,7 +906,7 @@ impl WorkspaceApp {
         if drag.active {
             self.update_detached_split_destination(tab_id, screen_point, cx);
         }
-        let next_placeholder = self.detached_tab_return_placeholder(cx);
+        let next_placeholder = self.tab_strip_layout(window, cx).return_index();
         if drag.active != was_active || previous_placeholder != next_placeholder {
             // Repaint only when the pointer crosses an insertion midpoint or
             // enters/leaves the drop strip, not for every native window move.
@@ -954,6 +922,11 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let screen_point = Self::detached_window_screen_point(window, event.position);
+        if let Some(drag) = self.detached_tab_return_drag.as_mut() {
+            drag.current_screen_x = f32::from(screen_point.x);
+            drag.current_screen_y = f32::from(screen_point.y);
+        }
+        let return_index = self.tab_strip_layout(window, cx).return_index();
         let Some(drag) = self.detached_tab_return_drag.take() else {
             return false;
         };
@@ -974,9 +947,7 @@ impl WorkspaceApp {
             .is_some_and(|bounds| bounds.contains(&screen_point));
         if should_return {
             let handoff_origin = self.detached_tab_return_handoff_origin(screen_point, window);
-            if let Some(visible_index) =
-                self.detached_tab_return_visible_index(f32::from(screen_point.x), cx)
-            {
+            if let Some(visible_index) = return_index {
                 self.move_tab_to_visible_index(tab_id, visible_index, cx);
             }
             self.begin_detached_tab_return_handoff(tab_id, handoff_origin, cx);
@@ -986,28 +957,6 @@ impl WorkspaceApp {
             cx.notify();
             false
         }
-    }
-
-    fn detached_tab_return_drag_screen_point(&self) -> Option<Point<Pixels>> {
-        let drag = self.detached_tab_return_drag?;
-        drag.active
-            .then(|| gpui::point(px(drag.current_screen_x), px(drag.current_screen_y)))
-    }
-
-    pub(super) fn detached_tab_return_placeholder(
-        &self,
-        cx: &App,
-    ) -> Option<DetachedTabReturnPlaceholder> {
-        let drag = self.detached_tab_return_drag?;
-        let screen_point = self.detached_tab_return_drag_screen_point()?;
-        let drop_bounds = self.main_window_tabbar_drop_bounds.as_ref()?;
-        if !drop_bounds.contains(&screen_point) {
-            return None;
-        }
-        Some(DetachedTabReturnPlaceholder {
-            tab_id: drag.tab_id,
-            visible_index: self.detached_tab_return_visible_index(f32::from(screen_point.x), cx)?,
-        })
     }
 
     fn render_tab_window_handoff_surface(
@@ -1043,7 +992,7 @@ impl WorkspaceApp {
             .child(
                 div()
                     .min_w(px(0.0))
-                    .truncate()
+                    .whitespace_nowrap()
                     .text_size(px(self.tokens.metrics.tab_font_size))
                     .text_color(rgb(theme.text))
                     .child(title),
@@ -1056,7 +1005,7 @@ impl WorkspaceApp {
                     &self.tokens,
                     oxideterm_gpui_ui::motion::MotionDuration::Overlay,
                 ))
-                .with_easing(oxideterm_gpui_ui::motion::ease_in_out_cubic),
+                .with_easing(oxideterm_gpui_ui::motion::ease_settle),
                 move |surface, progress| {
                     let surface = surface.opacity(1.0 - progress);
                     if !spatial {
@@ -1085,7 +1034,7 @@ impl WorkspaceApp {
     ) -> Option<AnyElement> {
         let handoff = self.detached_tab_return_handoff?;
         let tab = self.tab_by_id(handoff.tab_id, cx)?;
-        let tab_index = self.tab_index_by_id(handoff.tab_id, cx)?;
+        let tab_bounds = self.tab_strip_layout(window, cx).bounds(handoff.tab_id)?;
         let window_bounds = window.bounds();
         let origin = TabWindowHandoffRect {
             left: handoff.origin.screen_left - f32::from(window_bounds.origin.x),
@@ -1093,23 +1042,14 @@ impl WorkspaceApp {
             width: handoff.origin.width,
             height: handoff.origin.height,
         };
-        let outside_main_tabs = self.tab_host.read(cx).outside_main_tab_ids();
-        let preceding_width = self
-            .tabs(cx)
-            .iter()
-            .take(tab_index)
-            .filter(|candidate| !outside_main_tabs.contains(&candidate.id))
-            .map(|candidate| self.tab_visual_width(candidate))
-            .sum::<f32>();
         let target = TabWindowHandoffRect {
-            left: self.tabbar_left_x() + self.tokens.metrics.tabbar_leading_offset
-                - self.tabbar_effective_scroll_x(window, cx)
-                + preceding_width,
+            left: self.tabbar_left_x() - self.tabbar_effective_scroll_x(window, cx)
+                + tab_bounds.start,
             top: self
                 .main_window_tabbar_drop_bounds
                 .map(|bounds| f32::from(bounds.origin.y - window_bounds.origin.y))
                 .unwrap_or_else(|| self.window_titlebar_height(window)),
-            width: self.tab_visual_width(tab),
+            width: tab_bounds.end - tab_bounds.start,
             height: self.tokens.metrics.tabbar_height,
         };
         Some(self.render_tab_window_handoff_surface(
@@ -1187,7 +1127,6 @@ impl WorkspaceApp {
                     .gap(px(2.0))
                     .child(
                         div()
-                            .truncate()
                             .text_size(px(self.tokens.metrics.tab_font_size))
                             .line_height(px(18.0))
                             .text_color(rgb(theme.text))
@@ -1269,7 +1208,6 @@ impl WorkspaceApp {
                     .gap(px(2.0))
                     .child(
                         div()
-                            .truncate()
                             .text_size(px(self.tokens.metrics.tab_font_size))
                             .line_height(px(18.0))
                             .text_color(rgb(theme.text))
@@ -1331,10 +1269,9 @@ impl WorkspaceApp {
         let can_split_into_active =
             active_tab_id.is_some_and(|target| self.can_combine_tabs(menu.tab_id, target, cx));
         let merge_targets = if active_tab_id == Some(menu.tab_id) {
-            self.tabs(cx)
-                .iter()
-                .filter(|tab| self.can_combine_tabs(menu.tab_id, tab.id, cx))
-                .map(|tab| (tab.id, self.tab_display_title(tab)))
+            self.main_tabs(cx)
+                .filter(|(_, tab)| self.can_combine_tabs(menu.tab_id, tab.id, cx))
+                .map(|(_, tab)| (tab.id, self.tab_display_title(tab)))
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -1749,7 +1686,7 @@ impl WorkspaceApp {
         let theme = self.tokens.ui;
         let button_layout = sidebar::client_titlebar_button_layout(cx);
         let supported_controls = window.window_controls();
-        let show_window_controls = self.window_titlebar_visible(window);
+        let show_window_controls = self.window_titlebar_controls_visible(window);
         div()
             .h(px(self.tokens.metrics.titlebar_height))
             .flex_none()
@@ -2003,16 +1940,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn return_insertion_index_follows_the_pointer_between_tab_midpoints() {
-        let widths = [100.0, 160.0, 120.0];
-
-        assert_eq!(tab_return_visible_insertion_index(0.0, &widths), 0);
-        assert_eq!(tab_return_visible_insertion_index(80.0, &widths), 1);
-        assert_eq!(tab_return_visible_insertion_index(200.0, &widths), 2);
-        assert_eq!(tab_return_visible_insertion_index(500.0, &widths), 3);
     }
 
     #[test]

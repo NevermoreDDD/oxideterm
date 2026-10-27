@@ -1,5 +1,41 @@
 {
   "ai": {
+    "web": {
+      "sources": "Sources",
+      "disabled": "L’accès au web est désactivé.",
+      "configuration": "Choisissez une configuration DeepSeek officielle dans les réglages IA.",
+      "authentication": "La clé DeepSeek est absente ou invalide. Vérifiez la configuration choisie.",
+      "balance": "Le solde du compte DeepSeek est insuffisant.",
+      "rate_limit": "Le service de recherche reçoit trop de requêtes. Réessayez plus tard.",
+      "unavailable": "La page est indisponible ou son texte n’a pas pu être extrait.",
+      "invalid_arguments": "Utilisez une URL publique sans identifiants ou une recherche de 128 caractères maximum.",
+      "request": "La requête web a échoué ou a expiré. Vérifiez votre connexion.",
+      "response": "Le service a renvoyé des données invalides ou trop volumineuses.",
+      "search_done": "Recherche terminée",
+      "read_done": "Page récupérée"
+    },
+    "images": {
+      "tool_invalid": "L’outil a renvoyé une image illisible, non prise en charge ou trop volumineuse.",
+      "count": "{{count}} images",
+      "request_limit": "Les images dépassent la taille maximale de la requête. Retirez-en ou démarrez une nouvelle conversation.",
+      "add": "Ajouter des images",
+      "loading": "Lecture des images…",
+      "pasted": "Image collée",
+      "remove": "Retirer",
+      "tokens": "≈{{count}} jetons",
+      "tokens_uncertain": "≈{{count}} jetons · provisoire",
+      "auto": "Images : Automatique",
+      "enabled": "Images : Compatible",
+      "disabled": "Images : Non compatible",
+      "model_unavailable": "Ce modèle ne peut pas recevoir d’images. Choisissez un modèle qui les prend en charge.",
+      "history_prompt": "{{model}} ne peut pas lire les images précédentes. Les conserver dans la conversation et continuer avec le texte uniquement ?",
+      "continue_text": "Continuer sans images",
+      "invalid": "PNG, JPEG ou WebP, jusqu’à 10 Mo et 40 mégapixels. Le côté le plus long est réduit à 2000 px avant l’envoi.",
+      "limit": "8 images maximum par message.",
+      "queue_only": "Envoyez les images dans un nouveau message ou ajoutez-les à la file du prochain tour.",
+      "missing": "Impossible de charger l’image enregistrée.",
+      "settings": "Réglages des images"
+    },
     "agents": {
       "parent": "Agent principal",
       "runs": "Historique des exécutions",
@@ -32,11 +68,7 @@
       "usage_unknown": "Utilisation des tokens inconnue",
       "message_not_sent": "Impossible d’envoyer les instructions supplémentaires.",
       "supplement": "Instructions supplémentaires",
-      "current_conversation": "Conversation actuelle : {{title}}",
-      "scope_hint": "Autoriser la délégation uniquement dans cette conversation. Désactivée par défaut.",
-      "model_hint": "Les nouvelles tâches héritent du modèle parent, sauf si un modèle configuré est sélectionné.",
-      "no_conversation": "Ouvrez une conversation pour configurer ses sous-agents.",
-      "concurrency_hint": "Tâches simultanées dans toute l’application. Les tâches en attente libèrent leur place.",
+      "model_hint": "Les nouvelles sous-tâches de toutes les conversations utilisent ce modèle ou héritent de celui de leur tâche parente.",
       "context": "Contexte et historique de la tâche",
       "loading": "Chargement des détails de la tâche…",
       "load_error": "Impossible de charger les détails de la tâche."
@@ -253,6 +285,8 @@
       "approve": "Approuver",
       "reject": "Rejeter",
       "tool_names": {
+        "search_web": "Rechercher sur le web",
+        "read_web_page": "Lire une page web",
         "delegate_task": "Déléguer une tâche",
         "send_agent_message": "Envoyer un message au sous-agent",
         "wait_agents": "Attendre les sous-agents",

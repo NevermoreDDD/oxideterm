@@ -257,6 +257,21 @@
     "shortcut_count": "Tastaturkürzel"
   },
   "plugin": {
+    "connections": {
+      "name": "Name",
+      "group": "Gruppe",
+      "cancel": "Abbrechen",
+      "save": "Speichern",
+      "save_connect": "Speichern und verbinden",
+      "failed": "Der Vorgang ist fehlgeschlagen. Prüfen Sie die Verbindungseinstellungen und Plugin-Berechtigungen.",
+      "disconnect": "Trennen",
+      "connecting": "Verbindung wird hergestellt…",
+      "connected": "Verbunden",
+      "disconnected": "Getrennt",
+      "unavailable": "Das Verbindungs-Plugin ist nicht verfügbar. Aktivieren oder installieren Sie es, um eine Verbindung herzustellen.",
+      "password_unchanged": "Leer lassen, um den gespeicherten Wert beizubehalten",
+      "clear_credentials": "Gespeicherte Zugangsdaten löschen"
+    },
     "install_queued": "Wartet · Position {{position}}",
     "installing_named": "{{name}} wird installiert",
     "install_queue_count": "{{count}} warten",
@@ -296,6 +311,7 @@
     "native_sidebar_empty_description": "Öffne den Plugin-Tab für den aktuellen native-Status.",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "Das aktuelle Passwort stimmt nicht mit dem Passwort dieses Synchronisierungsbereichs überein. Geben Sie das ursprüngliche Passwort ein und speichern Sie es, bevor Sie es ändern. Falls Sie es vergessen haben, verwenden Sie einen neuen Namensraum und laden Sie die Konfiguration dieses Geräts hoch.",
         "protocol_upgrade_required": "Aktualisieren Sie Ihren Synchronisierungsserver auf eine Version, die das neue Cloud-Synchronisierungsprotokoll unterstützt, und synchronisieren Sie erneut.",
         "password_change_pending": "Eine Passwortänderung ist noch offen. Versuchen Sie es mit demselben neuen Passwort erneut.",
         "change_password": "Synchronisierungspasswort ändern",
@@ -484,7 +500,7 @@
         "auto_upload_interval": "Intervall für automatisches Hochladen (Minuten)",
         "default_conflict_strategy": "Standard-Konfliktstrategie",
         "sync_connections": "Verbindungen synchronisieren",
-        "sync_forwards": "Gespeicherte Weiterleitungen synchronisieren",
+        "sync_forwards": "Portweiterleitungen und SSH-Tunnel synchronisieren",
         "sync_quick_commands": "Schnellbefehle synchronisieren",
         "sync_serial_profiles": "Serielle Profile synchronisieren",
         "sync_telnet_profiles": "Telnet-Profile synchronisieren",
@@ -860,6 +876,7 @@
         "redacted": "ausgeblendet"
       },
       "diff_fields": {
+        "plugin_configuration": "Verbindungseinstellungen",
         "name": "Name",
         "group": "Gruppe",
         "host": "Host",
@@ -1141,6 +1158,8 @@
     "continue_button": "Weiter zu OxideTerm 2"
   },
   "onboarding": {
+    "more_features": "Weitere Funktionen entdecken",
+    "less_features": "Weniger Funktionen anzeigen",
     "step_welcome": "Willkommen",
     "step_appearance": "Darstellung",
     "step_workflow": "Verbindungen & Bedienung",
@@ -1318,8 +1337,8 @@
     "external_import_desc": "Importieren Sie Hosts aus SSH-Konfigurationen und unterstützten Terminal-Managern mit Vorschau und Duplikatbehandlung."
   },
   "zen_mode": {
-    "hint": "Zen-Modus — Drücken Sie ⌘⇧Z zum Beenden",
-    "hint_other": "Zen-Modus — Drücken Sie Ctrl+Shift+Z zum Beenden"
+    "hint": "Zen-Modus — Zum Beenden {{shortcut}} drücken",
+    "hint_unbound": "Zen-Modus — Über die Befehlspalette beenden"
   },
   "tabbar": {
     "drag_to_dock": "Zum Andocken ziehen",

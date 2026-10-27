@@ -5,6 +5,7 @@ use super::super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::workspace) enum ActiveTabWindowModalKind {
+    Ide,
     SettingsNavigationEditor,
     AiMcpServer,
     KnowledgeLeaveConfirmation,
@@ -62,6 +63,9 @@ pub(in crate::workspace) enum ActiveWindowModalOwner {
     SettingsReset {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
+    CommandHistoryClear {
+        phase: oxideterm_gpui_ui::motion::ExitPhase,
+    },
     SettingsDataDirectory {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
@@ -99,6 +103,8 @@ pub(in crate::workspace) enum ActiveWindowModalOwner {
         phase: oxideterm_gpui_ui::motion::ExitPhase,
     },
     TabRename,
+    ArchiveCommand,
+    SshTunnel,
     ActiveTabWindowModal {
         kind: ActiveTabWindowModalKind,
         phase: oxideterm_gpui_ui::motion::ExitPhase,
@@ -151,6 +157,7 @@ impl ActiveWindowModalOwner {
             Self::AiClearAll { .. } => 10,
             Self::AiDeleteMessage { .. } => 11,
             Self::SettingsReset { .. } => 12,
+            Self::CommandHistoryClear { .. } => 50,
             Self::SettingsDataDirectory { .. } => 13,
             Self::RemoteShellIntegration => 14,
             Self::TerminalTriggerQuickCommand => 15,
@@ -168,23 +175,25 @@ impl ActiveWindowModalOwner {
             Self::HostScheduleLogs => 27,
             Self::NativePluginConfirm { .. } => 28,
             Self::TabRename => 29,
-            Self::ActiveTabWindowModal { .. } => 30,
-            Self::TerminalCastPlayer => 31,
-            Self::ThemeEditor { .. } => 32,
-            Self::SettingsSshConfigImport { .. } => 33,
-            Self::TerminalCommandSpecsEditor => 34,
-            Self::QuickCommandsManager => 35,
-            Self::AiTextEditor => 36,
-            Self::OxideImport { .. } => 37,
-            Self::OxideExport { .. } => 38,
-            Self::CommandPalette => 39,
-            Self::VersionMigration => 40,
-            Self::Onboarding => 41,
-            Self::LegalNotice { .. } => 42,
-            Self::NativeUpdateReleaseNotes { .. } => 43,
-            Self::Shortcuts => 44,
-            Self::AppLockDialog => 45,
-            Self::MermaidZoom => 46,
+            Self::ArchiveCommand => 30,
+            Self::SshTunnel => 1,
+            Self::ActiveTabWindowModal { .. } => 31,
+            Self::TerminalCastPlayer => 32,
+            Self::ThemeEditor { .. } => 33,
+            Self::SettingsSshConfigImport { .. } => 34,
+            Self::TerminalCommandSpecsEditor => 35,
+            Self::QuickCommandsManager => 36,
+            Self::AiTextEditor => 37,
+            Self::OxideImport { .. } => 38,
+            Self::OxideExport { .. } => 39,
+            Self::CommandPalette => 40,
+            Self::VersionMigration => 41,
+            Self::Onboarding => 42,
+            Self::LegalNotice { .. } => 43,
+            Self::NativeUpdateReleaseNotes { .. } => 44,
+            Self::Shortcuts => 45,
+            Self::AppLockDialog => 46,
+            Self::MermaidZoom => 47,
         }
     }
 
@@ -198,6 +207,7 @@ impl ActiveWindowModalOwner {
             | Self::AiClearAll { phase }
             | Self::AiDeleteMessage { phase }
             | Self::SettingsReset { phase }
+            | Self::CommandHistoryClear { phase }
             | Self::SettingsDataDirectory { phase }
             | Self::CloudSync { phase }
             | Self::NodeDisconnect { phase }
@@ -227,6 +237,8 @@ impl ActiveWindowModalOwner {
             | Self::HostTmuxInput
             | Self::HostScheduleLogs
             | Self::TabRename
+            | Self::ArchiveCommand
+            | Self::SshTunnel
             | Self::TerminalCastPlayer
             | Self::TerminalCommandSpecsEditor
             | Self::QuickCommandsManager
@@ -258,6 +270,8 @@ impl ActiveWindowModalOwner {
                 | Self::TerminalCommandSpecsEditor
                 | Self::QuickCommandsManager
                 | Self::AiTextEditor
+                | Self::ArchiveCommand
+                | Self::SshTunnel
                 | Self::OxideImport { .. }
                 | Self::OxideExport { .. }
                 | Self::CommandPalette
@@ -269,7 +283,7 @@ impl ActiveWindowModalOwner {
     fn key_route(self, key: &str) -> ActiveWindowModalKeyRoute {
         let visible = self.phase() == oxideterm_gpui_ui::motion::ExitPhase::Visible;
         let focused_child_owns_key = visible
-            && (self == Self::AiTextEditor
+            && (matches!(self, Self::AiTextEditor | Self::ArchiveCommand)
                 || matches!(
                     self,
                     Self::ActiveTabWindowModal {
@@ -325,6 +339,8 @@ pub(in crate::workspace) struct ActiveWindowModalProjection {
         Option<connection_monitor::HostToolsWindowModalSnapshot>,
     pub(in crate::workspace) native_plugin_phase: Option<oxideterm_gpui_ui::motion::ExitPhase>,
     pub(in crate::workspace) tab_rename_open: bool,
+    pub(in crate::workspace) archive_command_open: bool,
+    pub(in crate::workspace) ssh_tunnel_open: bool,
     pub(in crate::workspace) active_tab_modal: Option<ActiveTabWindowModalSnapshot>,
     pub(in crate::workspace) terminal_cast_player_open: bool,
     pub(in crate::workspace) theme_editor_phase: Option<oxideterm_gpui_ui::motion::ExitPhase>,
@@ -387,6 +403,11 @@ impl ActiveWindowModalProjection {
             }
         });
         let overlay_owner = self.overlay_confirm.map(|snapshot| match snapshot.kind {
+            overlay::WorkspaceOverlayConfirmOwnerKind::CommandHistoryClear => {
+                ActiveWindowModalOwner::CommandHistoryClear {
+                    phase: snapshot.phase,
+                }
+            }
             overlay::WorkspaceOverlayConfirmOwnerKind::SettingsReset => {
                 ActiveWindowModalOwner::SettingsReset {
                     phase: snapshot.phase,
@@ -458,6 +479,12 @@ impl ActiveWindowModalProjection {
         let tab_rename_owner = self
             .tab_rename_open
             .then_some(ActiveWindowModalOwner::TabRename);
+        let archive_command_owner = self
+            .archive_command_open
+            .then_some(ActiveWindowModalOwner::ArchiveCommand);
+        let ssh_tunnel_owner = self
+            .ssh_tunnel_open
+            .then_some(ActiveWindowModalOwner::SshTunnel);
         let active_tab_owner =
             self.active_tab_modal
                 .map(|snapshot| ActiveWindowModalOwner::ActiveTabWindowModal {
@@ -532,6 +559,8 @@ impl ActiveWindowModalProjection {
             host_tools_owner,
             native_plugin_owner,
             tab_rename_owner,
+            archive_command_owner,
+            ssh_tunnel_owner,
             active_tab_owner,
             terminal_cast_owner,
             theme_editor_owner,
@@ -555,20 +584,14 @@ impl ActiveWindowModalProjection {
 }
 
 impl WorkspaceApp {
-    pub(in crate::workspace) fn active_sftp_editor_owns_key(&self, key: &str, cx: &App) -> bool {
-        // This mirrors the modal route so later pane-level capture cannot
-        // reclaim document keys after the SFTP editor has been selected.
-        self.active_window_modal_owner(cx)
-            .filter(|owner| {
-                matches!(
-                    owner,
-                    ActiveWindowModalOwner::ActiveTabWindowModal {
-                        kind: ActiveTabWindowModalKind::SftpEditor,
-                        ..
-                    }
-                )
+    pub(in crate::workspace) fn ide_modal_owns_input(&self, cx: &App) -> bool {
+        matches!(
+            self.active_window_modal_owner(cx),
+            Some(ActiveWindowModalOwner::ActiveTabWindowModal {
+                kind: ActiveTabWindowModalKind::Ide,
+                ..
             })
-            .is_some_and(|owner| !owner.key_route(key).consumes_key())
+        )
     }
 
     pub(in crate::workspace) fn active_window_modal_owner(
@@ -576,7 +599,8 @@ impl WorkspaceApp {
         cx: &App,
     ) -> Option<ActiveWindowModalOwner> {
         let connection_form = self.connection_form_state(cx);
-        let new_connection_open = connection_form.form.is_some();
+        let new_connection_open = connection_form.form.is_some()
+            || self.plugin_entity.read(cx).connections.form.is_some();
         let jump_server_open = connection_form
             .form
             .as_ref()
@@ -686,6 +710,8 @@ impl WorkspaceApp {
             host_tools_modal: self.host_tools.read(cx).window_modal_snapshot(),
             native_plugin_phase,
             tab_rename_open: self.tab_rename_dialog.is_some(),
+            archive_command_open: self.archive_command.is_some(),
+            ssh_tunnel_open: self.ssh_tunnels.form.is_some(),
             active_tab_modal: self.active_tab_window_modal_owner(cx),
             terminal_cast_player_open: self.terminal.read(cx).cast_player_open(),
             theme_editor_phase,
@@ -719,15 +745,24 @@ impl WorkspaceApp {
             && self.effective_sidebar_panel_section() == SidebarSection::Sessions
             && self.embedded_sftp_node_id.is_some()
             && self.sftp_view.read(cx).current_surface_id == Some(sftp::SftpSurfaceId::Sidebar)
-            && let Some(dialog) = self.sftp_view.read(cx).dialog()
+            && self.sftp_view.read(cx).dialog_is_open()
         {
             return Some(ActiveTabWindowModalSnapshot {
-                kind: if matches!(dialog, crate::workspace::sftp::SftpDialog::Editor { .. }) {
+                kind: if self.sftp_view.read(cx).preview_text_editor_visible() {
                     ActiveTabWindowModalKind::SftpEditor
                 } else {
                     ActiveTabWindowModalKind::SftpDialog
                 },
                 phase: self.sftp_view.read(cx).dialog_phase(),
+            });
+        }
+        if self
+            .active_ide_surface(cx)
+            .is_some_and(|surface| surface.read(cx).has_modal())
+        {
+            return Some(ActiveTabWindowModalSnapshot {
+                kind: ActiveTabWindowModalKind::Ide,
+                phase: visible,
             });
         }
         let active_tab = self.active_content_tab(cx)?;
@@ -860,10 +895,7 @@ impl WorkspaceApp {
                 let _scope = self.enter_sftp_surface(sftp::SftpSurfaceId::Tab(active_tab.id));
                 let sftp = self.sftp_view().read(cx);
                 sftp.dialog_is_open().then(|| ActiveTabWindowModalSnapshot {
-                    kind: if matches!(
-                        sftp.dialog(),
-                        Some(crate::workspace::sftp::SftpDialog::Editor { .. })
-                    ) {
+                    kind: if sftp.preview_text_editor_visible() {
                         ActiveTabWindowModalKind::SftpEditor
                     } else {
                         ActiveTabWindowModalKind::SftpDialog
@@ -892,6 +924,30 @@ impl WorkspaceApp {
         let Some(owner) = self.active_window_modal_owner(cx) else {
             return false;
         };
+        if matches!(
+            owner,
+            ActiveWindowModalOwner::ActiveTabWindowModal {
+                kind: ActiveTabWindowModalKind::SftpEditor,
+                ..
+            }
+        ) && owner.phase() == oxideterm_gpui_ui::motion::ExitPhase::Visible
+            && self.handle_sftp_editor_search_key(event, window, cx)
+        {
+            return true;
+        }
+        if matches!(
+            owner,
+            ActiveWindowModalOwner::ActiveTabWindowModal {
+                kind: ActiveTabWindowModalKind::Ide,
+                ..
+            }
+        ) {
+            return self.active_ide_surface(cx).is_some_and(|surface| {
+                surface.update(cx, |surface, cx| {
+                    surface.handle_modal_key(event, window, cx)
+                })
+            });
+        }
         // Exiting search dialogs still own input until their backdrop is removed.
         // Route only their reopen shortcut; do not start a new IME composition.
         if owner == ActiveWindowModalOwner::CommandPalette
@@ -913,11 +969,21 @@ impl WorkspaceApp {
         {
             return false;
         }
+        if owner == ActiveWindowModalOwner::NewConnection
+            && self.plugin_entity.read(cx).connections.form.is_some()
+            && event.keystroke.key != "escape"
+            && self
+                .plugin_ui_state(cx)
+                .focused_text_area_context(window, cx)
+                .is_some_and(|context| context.surface_kind == "connectionForm")
+        {
+            return false;
+        }
         let route = owner.key_route(event.keystroke.key.as_str());
         if route.dispatch_owner.is_some() && owner.allows_modal_ime() {
             if self.defer_active_ime_key(&event.keystroke, window, cx) {
-                // The root capture handler immediately repeats this check and
-                // yields to the platform pipeline for the top modal input.
+                // The root keeps background routing blocked while the top modal
+                // receives committed text through the platform input pipeline.
                 return false;
             }
             if self.handle_active_text_input_edit_shortcut(&event.keystroke, cx)
@@ -936,7 +1002,13 @@ impl WorkspaceApp {
         };
         match owner {
             ActiveWindowModalOwner::NewConnection | ActiveWindowModalOwner::JumpServer => {
-                let _ = self.handle_new_connection_key(event, window, cx);
+                if self.plugin_entity.read(cx).connections.form.is_some() {
+                    if event.keystroke.key == "escape" {
+                        self.close_plugin_connection_form(cx);
+                    }
+                } else {
+                    let _ = self.handle_new_connection_key(event, window, cx);
+                }
             }
             ActiveWindowModalOwner::LocalShellLauncher => {
                 let _ = self.handle_local_shell_launcher_key(event, window, cx);
@@ -964,7 +1036,8 @@ impl WorkspaceApp {
             | ActiveWindowModalOwner::AiDeleteMessage { .. } => {
                 let _ = self.handle_ai_chat_confirm_key(event, cx);
             }
-            ActiveWindowModalOwner::SettingsReset { .. } => {
+            ActiveWindowModalOwner::SettingsReset { .. }
+            | ActiveWindowModalOwner::CommandHistoryClear { .. } => {
                 let _ = self.handle_settings_reset_confirm_key(event, cx);
             }
             ActiveWindowModalOwner::SettingsDataDirectory { .. } => {
@@ -972,6 +1045,14 @@ impl WorkspaceApp {
             }
             ActiveWindowModalOwner::RemoteShellIntegration => {
                 let _ = self.handle_remote_shell_integration_confirm_key(event, cx);
+            }
+            ActiveWindowModalOwner::ArchiveCommand => {
+                if event.keystroke.key == "escape" {
+                    self.close_archive_command(window, cx);
+                }
+            }
+            ActiveWindowModalOwner::SshTunnel => {
+                let _ = self.handle_new_connection_key(event, window, cx);
             }
             ActiveWindowModalOwner::TerminalTriggerQuickCommand => {
                 let _ = self.handle_terminal_trigger_quick_command_key(event, cx);
@@ -1157,6 +1238,11 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> bool {
         match kind {
+            ActiveTabWindowModalKind::Ide => self.active_ide_surface(cx).is_some_and(|surface| {
+                surface.update(cx, |surface, cx| {
+                    surface.handle_modal_key(event, window, cx)
+                })
+            }),
             ActiveTabWindowModalKind::KnowledgeRename => {
                 self.handle_knowledge_input_key(event, window, cx)
             }

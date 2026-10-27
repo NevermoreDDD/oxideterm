@@ -1,4 +1,18 @@
 {
+  "ssh_tunnel": {
+    "description": "Redirigez des ports via un hôte SSH enregistré.",
+    "title": "Tunnel SSH",
+    "name": "Nom du tunnel",
+    "group": "Groupe",
+    "group_invalid": "Le chemin du groupe ne peut pas contenir de segments vides.",
+    "host": "Hôte SSH",
+    "choose_host": "Choisir un hôte SSH enregistré",
+    "startup": "Se connecter au démarrage de l’application",
+    "missing_host": "L’hôte SSH enregistré est indisponible.",
+    "name_required": "Saisissez un nom de tunnel. Le nom et le groupe doivent tenir sur une seule ligne.",
+    "address_required": "Saisissez des adresses d’écoute et de destination valides.",
+    "save_failed": "Impossible de mettre à jour le tunnel SSH."
+  },
   "copy_address": "Copier l'adresse",
   "copied": "Copié !",
   "forwards": {
@@ -9,13 +23,13 @@
       "vscode": "VS Code (8080)"
     },
     "table": {
-      "title": "Transferts actifs",
+      "title": "Redirection de ports",
       "type": "Type",
       "local_address": "Adresse locale",
       "remote_address": "Adresse distante",
       "status": "Statut",
       "actions": "Actions",
-      "no_forwards": "Aucun transfert de port actif"
+      "no_forwards": "Aucune règle de redirection de ports"
     },
     "type": {
       "local": "local",
@@ -50,6 +64,7 @@
       "cancel": "Annuler",
       "type": "Type",
       "create_forward": "Créer le transfert",
+      "save_and_start": "Enregistrer et démarrer",
       "creating": "Création en cours...",
       "save_changes": "Enregistrer les modifications",
       "saving": "Enregistrement...",
@@ -101,7 +116,7 @@
       "alreadyForwarded": "Transféré"
     },
     "messages": {
-      "node_not_ready": "Ouvrez un terminal SSH actif pour ce nœud avant de gérer les transferts.",
+      "node_not_ready": "Impossible de démarrer la connexion SSH. Connectez-vous à ce serveur et réessayez.",
       "connection_not_ready": "La connexion SSH n’est pas encore prête.",
       "created": "Transfert créé",
       "updated": "Transfert mis à jour",

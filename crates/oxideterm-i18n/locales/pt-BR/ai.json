@@ -1,5 +1,41 @@
 {
   "ai": {
+    "web": {
+      "sources": "Fontes",
+      "disabled": "O acesso à web está desativado.",
+      "configuration": "Selecione uma configuração oficial do DeepSeek nas configurações de IA.",
+      "authentication": "A chave DeepSeek está ausente ou é inválida. Verifique a configuração selecionada.",
+      "balance": "A conta DeepSeek não tem saldo suficiente.",
+      "rate_limit": "O limite de solicitações do serviço foi atingido. Tente novamente mais tarde.",
+      "unavailable": "A página está indisponível ou não foi possível extrair seu texto.",
+      "invalid_arguments": "Use uma URL pública sem credenciais ou uma consulta de até 128 caracteres.",
+      "request": "A solicitação falhou ou expirou. Verifique sua conexão.",
+      "response": "O serviço retornou dados inválidos ou grandes demais.",
+      "search_done": "Pesquisa concluída",
+      "read_done": "Página obtida"
+    },
+    "images": {
+      "tool_invalid": "A ferramenta retornou uma imagem ilegível, não compatível ou grande demais.",
+      "count": "{{count}} imagens",
+      "request_limit": "As imagens excedem o limite da solicitação. Remova algumas ou inicie uma nova conversa.",
+      "add": "Adicionar imagens",
+      "loading": "Lendo imagens…",
+      "pasted": "Imagem colada",
+      "remove": "Remover",
+      "tokens": "≈{{count}} tokens",
+      "tokens_uncertain": "≈{{count}} tokens · provisório",
+      "auto": "Imagens: Automático",
+      "enabled": "Imagens: Compatível",
+      "disabled": "Imagens: Incompatível",
+      "model_unavailable": "Este modelo não pode receber imagens. Mude para um modelo que aceite imagens.",
+      "history_prompt": "{{model}} não consegue ler as imagens anteriores. Mantê-las na conversa e continuar apenas com texto?",
+      "continue_text": "Continuar apenas com texto",
+      "invalid": "PNG, JPEG ou WebP, até 10 MB e 40 megapixels. O lado maior é reduzido a 2000 px antes do envio.",
+      "limit": "Até 8 imagens por mensagem.",
+      "queue_only": "Envie as imagens em uma nova mensagem ou adicione-as à fila do próximo turno.",
+      "missing": "Não foi possível carregar a imagem salva.",
+      "settings": "Configurações de imagens"
+    },
     "agents": {
       "parent": "Agente principal",
       "runs": "Histórico de execuções",
@@ -32,11 +68,7 @@
       "usage_unknown": "Uso de tokens desconhecido",
       "message_not_sent": "Não foi possível enviar as instruções adicionais.",
       "supplement": "Instruções adicionais",
-      "current_conversation": "Conversa atual: {{title}}",
-      "scope_hint": "Permitir delegação apenas nesta conversa. Desativada por padrão.",
-      "model_hint": "Novas tarefas herdam o modelo principal, salvo se um modelo configurado for selecionado.",
-      "no_conversation": "Abra uma conversa para configurar seus subagentes.",
-      "concurrency_hint": "Tarefas simultâneas em todo o aplicativo. Tarefas em espera liberam sua vaga.",
+      "model_hint": "As novas subtarefas de todas as conversas usam este modelo ou herdam o modelo da tarefa principal.",
       "context": "Contexto e histórico da tarefa",
       "loading": "Carregando detalhes da tarefa…",
       "load_error": "Não foi possível carregar os detalhes da tarefa."
@@ -253,6 +285,8 @@
       "approve": "Aprovar",
       "reject": "Rejeitar",
       "tool_names": {
+        "search_web": "Pesquisar na web",
+        "read_web_page": "Ler página web",
         "delegate_task": "Delegar tarefa",
         "send_agent_message": "Enviar mensagem ao subagente",
         "wait_agents": "Aguardar subagentes",

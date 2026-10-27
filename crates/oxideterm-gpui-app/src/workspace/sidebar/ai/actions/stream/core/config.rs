@@ -1,6 +1,7 @@
 pub(in crate::workspace) fn ai_stream_tool_definitions(
     tool_use_enabled: bool,
     skills_enabled: bool,
+    web_enabled: bool,
     tool_policy: &oxideterm_ai::AiToolUsePolicy,
     mcp_registry: &oxideterm_ai::McpRegistry,
 ) -> Vec<oxideterm_ai::AiToolDefinition> {
@@ -8,6 +9,9 @@ pub(in crate::workspace) fn ai_stream_tool_definitions(
         return Vec::new();
     }
     let mut tools = oxideterm_ai::orchestrator_tool_definitions();
+    if !web_enabled {
+        tools.retain(|tool| !oxideterm_ai::web::is_web_tool(&tool.name));
+    }
     if !skills_enabled {
         // The global Skills switch controls capability exposure, not only
         // whether a guessed tool call succeeds at execution time.
@@ -28,6 +32,7 @@ pub(in crate::workspace) fn ai_stream_tool_definitions(
 pub(in crate::workspace) fn ai_active_tool_count(
     tool_use_enabled: bool,
     skills_enabled: bool,
+    web_enabled: bool,
     tool_policy: &oxideterm_ai::AiToolUsePolicy,
     mcp_registry: &oxideterm_ai::McpRegistry,
 ) -> usize {
@@ -36,6 +41,7 @@ pub(in crate::workspace) fn ai_active_tool_count(
     ai_stream_tool_definitions(
         tool_use_enabled,
         skills_enabled,
+        web_enabled,
         tool_policy,
         mcp_registry,
     )
@@ -242,11 +248,14 @@ impl WorkspaceApp {
             let tools = ai_stream_tool_definitions(
                 tool_policy.enabled,
                 settings.ai.skills.enabled,
+                self.ai_web_provider_id().is_ok(),
                 &tool_policy,
                 self.ai_entity.read(cx).mcp_registry(),
             );
             return Ok(AiChatStreamConfig {
                 api_protocol: oxideterm_ai::AiApiProtocol::default(),
+                image_input: Default::default(),
+                omit_history_images: false,
                 execution_backend: AiExecutionBackend::Acp,
                 provider_id: None,
                 acp_agent_id: Some(acp_agent_id),
@@ -307,11 +316,17 @@ impl WorkspaceApp {
         let tools = ai_stream_tool_definitions(
             tool_policy.enabled,
             settings.ai.skills.enabled,
+            self.ai_web_provider_id().is_ok(),
             &tool_policy,
             self.ai_entity.read(cx).mcp_registry(),
         );
+        let image_input = self.ai_image_model_setting(&provider.id, &provider.base_url, &model);
+        let omit_history_images = self.ai_image_text_only(&provider.id, &provider.base_url, &model, cx)
+            && oxideterm_ai::model_image_input(&provider.provider_type, &model, image_input) != Some(true);
         Ok(AiChatStreamConfig {
             api_protocol: provider.api_protocol,
+            image_input,
+            omit_history_images,
             execution_backend: AiExecutionBackend::Provider,
             provider_id: Some(provider.id),
             acp_agent_id: None,
@@ -375,8 +390,13 @@ impl WorkspaceApp {
         )
         .as_str()
         .to_string();
+        let image_input = self.ai_image_model_setting(&provider.id, &provider.base_url, &model);
+        let omit_history_images = self.ai_image_text_only(&provider.id, &provider.base_url, &model, cx)
+            && oxideterm_ai::model_image_input(&provider.provider_type, &model, image_input) != Some(true);
         Ok(AiChatStreamConfig {
             api_protocol: provider.api_protocol,
+            image_input,
+            omit_history_images,
             execution_backend: AiExecutionBackend::Provider,
             provider_id: Some(provider.id),
             acp_agent_id: None,
@@ -486,6 +506,7 @@ impl WorkspaceApp {
         rag_system_prompt: Option<&str>,
     ) -> Vec<AiChatMessage> {
         apply_chat_request_overrides(&mut history, request_content, None);
+        oxideterm_ai::prepare_image_history(&mut history, config);
         oxideterm_ai::scope_responses_history(&mut history, config);
         normalize_ai_stream_history_for_provider(&mut history);
         let base_system_prompt = self.build_ai_base_system_prompt(

@@ -214,6 +214,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> plugin_runtime::PluginResponse {
         let config = TelnetSessionConfig {
+            line_endings: Default::default(),
             host: host.clone(),
             port,
         };
@@ -1289,6 +1290,9 @@ impl WorkspaceApp {
             .update(cx, |plugins, _cx| plugins.take_runtime_intents());
         for intent in intents {
             match intent {
+                plugin_entity::PluginRuntimeIntent::PreparePush { resolver } => {
+                    let _ = resolver.send(self.native_plugin_host_api_resolver(cx));
+                }
                 plugin_entity::PluginRuntimeIntent::ApplyEffects {
                     plugin_id,
                     audit_context,
@@ -1310,8 +1314,11 @@ impl WorkspaceApp {
                             },
                         );
                     }
-                    self.refresh_native_plugin_event_polling(cx);
+                    if refresh != plugin_entity::PluginRuntimeAdapterRefresh::None {
+                        self.refresh_native_plugin_event_polling(cx);
+                    }
                     match refresh {
+                        plugin_entity::PluginRuntimeAdapterRefresh::None => {}
                         plugin_entity::PluginRuntimeAdapterRefresh::TerminalHooks => {
                             self.refresh_native_plugin_terminal_hooks(cx)
                         }
@@ -1327,6 +1334,7 @@ impl WorkspaceApp {
                 plugin_entity::PluginRuntimeIntent::StateChanged => {}
             }
         }
+        self.start_pending_plugin_connections(cx);
         cx.notify();
     }
 

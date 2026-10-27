@@ -188,6 +188,53 @@ fn deselection_does_not_delete_and_concurrent_delete_edit_remains_pending() {
 }
 
 #[test]
+fn preparing_sync_does_not_lock_password_and_old_unused_bindings_can_be_replaced() {
+    let path = std::env::temp_dir().join(format!("oxideterm-password-{}", Uuid::new_v4()));
+    let mut secrets = Secrets::default();
+    let store = ReplicaStore::open(&path, &mut secrets).unwrap();
+    let mut record = LocalReplica::new();
+    store
+        .bind_sync_password(&mut record, "first-password")
+        .unwrap();
+    assert!(
+        store.load().unwrap().is_none(),
+        "preparation must not persist a binding"
+    );
+
+    // Released builds saved the binding even when preparation failed or was cancelled.
+    record.effective = values("Local host", "local note");
+    store.save(&record).unwrap();
+    drop(store);
+    let store = ReplicaStore::open(&path, &mut secrets).unwrap();
+    let mut record = store.load().unwrap().unwrap();
+    store
+        .bind_sync_password(&mut record, "replacement-password")
+        .unwrap();
+    store.save(&record).unwrap();
+    let mut reloaded = store.load().unwrap().unwrap();
+    assert_eq!(reloaded.effective, values("Local host", "local note"));
+    store
+        .bind_sync_password(&mut reloaded, "replacement-password")
+        .unwrap();
+
+    for downloaded in [false, true] {
+        let mut imported = reloaded.clone();
+        if downloaded {
+            imported.accept_download();
+        } else {
+            imported.legacy_imported = true;
+        }
+        assert!(
+            store
+                .bind_sync_password(&mut imported, "another-password")
+                .is_err()
+        );
+    }
+    drop(store);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn encrypted_replica_reopens_and_retries_the_exact_pending_publication() {
     use oxideterm_connections::oxide_file::{
         OxideBatchDecryptionContext, OxideBatchEncryptionContext, OxideDocumentKind,
@@ -210,14 +257,13 @@ fn encrypted_replica_reopens_and_retries_the_exact_pending_publication() {
     store
         .bind_sync_password(&mut record, "synthetic-sync-password")
         .unwrap();
+    let context = OxideBatchEncryptionContext::new("synthetic-sync-password").unwrap();
+    store.stage_publication(&mut record, &context).unwrap();
     assert!(
         store
             .bind_sync_password(&mut record, "changed-password")
             .is_err()
     );
-    assert_eq!(store.load().unwrap().unwrap().next_sequence, 1);
-    let context = OxideBatchEncryptionContext::new("synthetic-sync-password").unwrap();
-    store.stage_publication(&mut record, &context).unwrap();
     let pending = record.pending.clone().unwrap();
     let id = PublicationId::parse(&pending.path).unwrap();
     assert_eq!(id.sequence, 1);
@@ -265,11 +311,248 @@ fn encrypted_replica_reopens_and_retries_the_exact_pending_publication() {
         .unwrap();
     assert!(store.load().unwrap().unwrap().pending.is_none());
     assert!(!reloaded.needs_publication());
+    assert!(
+        store
+            .bind_sync_password(&mut reloaded, "changed-password")
+            .is_err()
+    );
+    store
+        .bind_sync_password(&mut reloaded, "synthetic-sync-password")
+        .unwrap();
     drop(store);
     secrets.0.clear();
     assert!(ReplicaStore::open(&path, &mut secrets).is_err());
     assert!(path.join("replica.oxide").exists());
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn plugin_connections_sync_without_provider_registry_and_keep_unknown_configuration() {
+    use oxideterm_connections::{ConnectionStore, ConnectionStoreData, PluginConnectionProfile};
+    use oxideterm_forwarding::{ForwardingRegistry, SavedForwardStore};
+    use oxideterm_settings::SettingsStore;
+    let directory = std::env::temp_dir().join(format!("oxide-plugin-sync-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("connections.json");
+    let now = chrono::Utc::now();
+    let mut data = ConnectionStoreData::default();
+    for id in ["dynamic", "excluded"] {
+        data.plugin_profiles.push(PluginConnectionProfile {
+            id: id.into(),
+            plugin_id: "not.installed".into(),
+            type_id: "arbitrary-type".into(),
+            name: id.into(),
+            group: None,
+            config: [(
+                "future/options".into(),
+                serde_json::json!({"opaque":[true,42]}),
+            )]
+            .into(),
+            credential_refs: [("auth/token".into(), None)].into(),
+            created_at: now,
+            updated_at: now,
+            last_used_at: None,
+        });
+    }
+    std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+    let mut connections = ConnectionStore::load(&path).unwrap();
+    let forwards = ForwardingRegistry::new_with_store(
+        SavedForwardStore::load(directory.join("forwards.json")).unwrap(),
+    );
+    let settings = SettingsStore::load_from_path(directory.join("settings.json")).unwrap();
+    let scope = crate::SyncScope::default();
+    let view = ConfigurationView::collect(&connections, &forwards, &settings, &scope).unwrap();
+    let resource = SyncResource {
+        kind: ResourceKind::PluginConnection,
+        id: "dynamic".into(),
+    };
+    let selected = view.selected(
+        std::iter::empty(),
+        &scope,
+        &crate::operation::StructuredUploadItemFilter {
+            connection_ids: Some(["dynamic".into()].into()),
+            ..Default::default()
+        },
+    );
+    assert!(selected.contains(&resource));
+    assert!(!selected.contains(&SyncResource {
+        kind: ResourceKind::PluginConnection,
+        id: "excluded".into()
+    }));
+    let configuration = SyncField {
+        resource: resource.clone(),
+        group: "configuration".into(),
+    };
+    let name = SyncField {
+        resource: resource.clone(),
+        group: "name".into(),
+    };
+    let portable = view.values[&configuration]
+        .decode::<serde_json::Value>()
+        .unwrap();
+    assert_eq!(
+        portable["credential_refs"],
+        serde_json::json!({"auth/token":null})
+    );
+    assert_eq!(portable["plugin_id"], "not.installed");
+    let mut left = SyncReplica::new(Uuid::from_u128(1));
+    left.capture_local(&SyncValues::new(), &view.values, &selected)
+        .unwrap();
+    let mut right = SyncReplica::load(left.snapshot(), Uuid::from_u128(2)).unwrap();
+    let mut local = view.values.clone();
+    local.insert(name, FieldValue::encode(&"Renamed locally").unwrap());
+    let mut remote = view.values.clone();
+    let mut config = portable;
+    config["config"]["root/host"] = serde_json::json!("remote.device");
+    remote.insert(configuration, FieldValue::encode(&config).unwrap());
+    left.capture_local(&view.values, &local, &selected).unwrap();
+    right
+        .capture_local(&view.values, &remote, &selected)
+        .unwrap();
+    left.merge(right.snapshot()).unwrap();
+    let merged = left.materialize(&local, &selected).unwrap();
+    let resolved = view.resolved_connections(&merged).unwrap();
+    let profile = resolved
+        .connections
+        .plugin_profiles
+        .iter()
+        .find(|p| p.id == "dynamic")
+        .unwrap();
+    assert_eq!(profile.name, "Renamed locally");
+    assert_eq!(
+        profile.config,
+        [
+            (
+                "future/options".into(),
+                serde_json::json!({"opaque":[true,42]})
+            ),
+            ("root/host".into(), serde_json::json!("remote.device"))
+        ]
+        .into()
+    );
+    let prepared = connections
+        .prepare_resolved_configuration(resolved)
+        .unwrap();
+    let mut cleanup = connections
+        .commit_prepared_saved_connections_snapshot(prepared)
+        .unwrap();
+    connections
+        .finalize_saved_connections_sync_cleanup(&mut cleanup)
+        .unwrap();
+    assert_eq!(
+        ConnectionStore::load(&path)
+            .unwrap()
+            .plugin_profiles()
+            .iter()
+            .find(|p| p.id == "dynamic")
+            .unwrap()
+            .name,
+        "Renamed locally"
+    );
+
+    let remaining: SyncValues = merged
+        .iter()
+        .filter(|(field, _)| field.resource != resource)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    left.capture_local(&merged, &remaining, &selected).unwrap();
+    let deleted = left.materialize(&merged, &selected).unwrap();
+    let prepared = connections
+        .prepare_resolved_configuration(view.resolved_connections(&deleted).unwrap())
+        .unwrap();
+    let mut cleanup = connections
+        .commit_prepared_saved_connections_snapshot(prepared)
+        .unwrap();
+    connections
+        .finalize_saved_connections_sync_cleanup(&mut cleanup)
+        .unwrap();
+    assert_eq!(
+        connections
+            .plugin_profiles()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["excluded"]
+    );
+    assert_eq!(
+        connections
+            .export_saved_connections_snapshot()
+            .unwrap()
+            .plugin_tombstones[0]
+            .id,
+        "dynamic"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn ssh_tunnel_policy_survives_cloud_field_mapping_and_forward_scope_filtering() {
+    use oxideterm_connections::ConnectionStore;
+    use oxideterm_forwarding::{
+        ForwardRule, ForwardingRegistry, PersistedForward, SavedForwardStore, SshTunnelProfile,
+    };
+    use oxideterm_settings::SettingsStore;
+    let directory = std::env::temp_dir().join(format!("oxide-tunnel-sync-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let connections = ConnectionStore::load(directory.join("connections.json")).unwrap();
+    let store = SavedForwardStore::load(directory.join("forwards.json")).unwrap();
+    let rule = ForwardRule::local("127.0.0.1", 15432, "localhost", 5432);
+    let id = rule.id.clone();
+    let mut saved = PersistedForward::new(
+        id.clone(),
+        "node:local".into(),
+        Some("host-1".into()),
+        rule.forward_type,
+        rule,
+        false,
+    );
+    saved.tunnel = Some(SshTunnelProfile {
+        name: "Database".into(),
+        group: Some("Work/Production".into()),
+        connect_on_startup: true,
+    });
+    store.persist_forward(saved).unwrap();
+    let forwards = ForwardingRegistry::new_with_store(store);
+    let settings = SettingsStore::load_from_path(directory.join("settings.json")).unwrap();
+    let mut scope = crate::SyncScope::default();
+    let view = ConfigurationView::collect(&connections, &forwards, &settings, &scope).unwrap();
+    let decoded = view.resolved_forwards(&view.values).unwrap();
+    let saved = decoded.iter().find(|rule| rule.id == id).unwrap();
+    let tunnel = saved.tunnel.as_ref().unwrap();
+    assert_eq!(
+        (
+            &*tunnel.name,
+            tunnel.group.as_deref(),
+            tunnel.connect_on_startup
+        ),
+        ("Database", Some("Work/Production"), true)
+    );
+    assert_eq!(
+        (
+            saved.owner_connection_id.as_deref(),
+            saved.bind_port,
+            saved.target_port,
+            saved.auto_start
+        ),
+        (Some("host-1"), 15432, 5432, false)
+    );
+    let resource = SyncResource {
+        kind: ResourceKind::Forward,
+        id,
+    };
+    let filter = crate::operation::StructuredUploadItemFilter::default();
+    scope.sync_forwards = true;
+    assert!(
+        view.selected(std::iter::empty(), &scope, &filter)
+            .contains(&resource)
+    );
+    scope.sync_forwards = false;
+    assert!(
+        !view
+            .selected(std::iter::empty(), &scope, &filter)
+            .contains(&resource)
+    );
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

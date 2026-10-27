@@ -448,6 +448,7 @@ impl CloudSyncPageRenderer {
             use oxideterm_connections::CredentialOwner;
             let fallback = match &owner {
                 CredentialOwner::Totp(id)
+                | CredentialOwner::PluginConnection(id)
                 | CredentialOwner::Connection(id)
                 | CredentialOwner::StandaloneSftp(id)
                 | CredentialOwner::Mosh(id)
@@ -458,6 +459,11 @@ impl CloudSyncPageRenderer {
             };
             let name = if let CloudSyncPendingPreview::Structured(preview) = preview {
                 match &owner {
+                    CredentialOwner::PluginConnection(id) => preview
+                        .connections_snapshot
+                        .as_ref()
+                        .and_then(|s| s.plugin_profiles.iter().find(|p| &p.id == id))
+                        .map(|p| p.name.clone()),
                     CredentialOwner::Totp(id) => preview
                         .connections_snapshot
                         .as_ref()
@@ -736,7 +742,7 @@ impl WorkspaceApp {
             true,
             portable_secret_count,
         );
-        Some(self.i18n_replace(
+        let summary = self.i18n_replace(
             "plugin.cloud_sync.preview.sensitive_upload_summary",
             &[
                 (
@@ -754,7 +760,26 @@ impl WorkspaceApp {
                     preflight.portable_secret_count.to_string(),
                 ),
             ],
-        ))
+        );
+        let common_count = if selection.sync_connections
+            && selection.selected_connection_ids.is_none()
+        {
+            self.connection_store
+                .list_privilege_credentials(oxideterm_connections::SSH_COMMON_PRIVILEGE_SCOPE_ID)
+                .map(|credentials| credentials.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        Some(if common_count > 0 {
+            format!(
+                "{summary}\n{}: {common_count}",
+                self.i18n
+                    .t("settings_view.privilege_credentials.ssh_common_scope")
+            )
+        } else {
+            summary
+        })
     }
 }
 

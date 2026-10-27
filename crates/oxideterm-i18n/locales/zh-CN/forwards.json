@@ -1,4 +1,18 @@
 {
+  "ssh_tunnel": {
+    "description": "通过已保存的 SSH 主机转发端口。",
+    "title": "SSH 隧道",
+    "name": "隧道名称",
+    "group": "分组",
+    "group_invalid": "分组路径不能包含空的层级。",
+    "host": "SSH 主机",
+    "choose_host": "选择已保存的 SSH 主机",
+    "startup": "应用启动时连接",
+    "missing_host": "找不到关联的 SSH 主机。",
+    "name_required": "请填写隧道名称，名称和分组不能包含换行。",
+    "address_required": "请填写有效的监听地址和目标地址。",
+    "save_failed": "无法更新 SSH 隧道。"
+  },
   "copy_address": "复制地址",
   "copied": "已复制",
   "forwards": {
@@ -9,13 +23,13 @@
       "vscode": "VS Code (8080)"
     },
     "table": {
-      "title": "活动转发",
+      "title": "端口转发",
       "type": "类型",
       "local_address": "本地地址",
       "remote_address": "远程地址",
       "status": "状态",
       "actions": "操作",
-      "no_forwards": "无活动端口转发"
+      "no_forwards": "暂无端口转发规则"
     },
     "type": {
       "local": "本地",
@@ -50,6 +64,7 @@
       "cancel": "取消",
       "type": "类型",
       "create_forward": "创建转发",
+      "save_and_start": "保存并启动",
       "creating": "创建中...",
       "save_changes": "保存更改",
       "saving": "保存中...",
@@ -101,7 +116,7 @@
       "alreadyForwarded": "已转发"
     },
     "messages": {
-      "node_not_ready": "请先为此节点打开一个活动 SSH 终端，再管理端口转发。",
+      "node_not_ready": "无法启动 SSH 连接，请连接此服务器后重试。",
       "connection_not_ready": "SSH 连接尚未就绪。",
       "created": "转发已创建",
       "updated": "转发已更新",

@@ -19,6 +19,14 @@ If a connection or surface is stale, try reconnecting from the app before changi
 
 ## Common Recovery Steps
 
+**Missing tabs:** check the top-bar scope and select **All tabs**. A filtered-out tab is still running; opening another connection is not required.
+
+**Theme toggle does not switch:** configure both light and dark application/terminal schemes in Appearance. The icon indicates the current mode, while its hint describes the action.
+
+**Wrong terminal font:** inspect the configured font stack and availability notice. Choose a known available monospace font and check its preview; an installed bitmap font is not proof that the application can render that format.
+
+**Remote desktop is cropped:** record the host and plugin versions, display mode, active monitors and scale, and the resolution menu's remote size. Compare with a screenshot captured inside the remote desktop. If that screenshot includes the missing area, investigate viewer sizing or monitor topology rather than resetting the remote desktop panel.
+
 For settings issues, reopen Settings and check the section that was changed most recently. If the app reports invalid settings, revert the smallest visible change first.
 
 For connection issues, edit the saved connection and retry it from Sessions. Avoid creating duplicates until you know the original profile is wrong.
@@ -27,7 +35,7 @@ For SFTP or forwarding issues, check the owning SSH node in Connection Monitor. 
 
 For Host Tools issues, refresh the tool page first. If the sampler or action still fails, reconnect the owning node and retry the smallest action. Avoid using Host Tools for hidden cleanup or recursive disk scans.
 
-For graphics/VNC issues, check the saved profile/provider or owning node, reconnect the viewer, then restart the helper or graphics session if its backing process stopped. Viewer state is separate from terminal output and saved connection data.
+For RDP/VNC issues, first check that the corresponding plugin is installed, enabled, and compatible with the app in Plugin Manager. Then check the saved profile, remote service, and optional SSH gateway before reconnecting. Windows WSL Graphics has a separate built-in viewer; check its distribution and graphics-session status instead.
 
 For terminal background issues, reopen Settings and confirm the background image is enabled for the current tab type. Native currently treats the background as a selected image slot; adding a new image replaces the current selection.
 

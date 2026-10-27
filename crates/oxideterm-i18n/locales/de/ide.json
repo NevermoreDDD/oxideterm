@@ -1,5 +1,6 @@
 {
   "ide": {
+    "file_binary": "Diese Datei ist eine Binärdatei und kann nicht im Texteditor geöffnet werden.",
     "file_too_large": "Die Datei überschreitet das IDE-Bearbeitungslimit von 100 MiB.",
     "file_encoding": "Dateikodierung",
     "file_line_ending": "Zeilenenden",
@@ -43,6 +44,7 @@
     "search_truncated": "Ergebnisse wurden abgeschnitten. Verfeinern Sie Ihre Suche für genauere Treffer.",
     "search_results_count": "{{count}} Ergebnisse in {{files}} Dateien",
     "find_placeholder": "Suchen",
+    "insert_newline": "Zeilenumbruch einfügen",
     "replace_placeholder": "Ersetzen",
     "find_next": "Nächste Übereinstimmung (Enter)",
     "find_previous": "Vorherige Übereinstimmung (Shift+Enter)",

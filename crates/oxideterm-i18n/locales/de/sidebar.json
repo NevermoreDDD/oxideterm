@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "Hintergrundaufgaben: {{count}}",
+      "search": "Hintergrundaufgaben suchen…",
+      "transferring": "Übertragung läuft",
+      "reconnecting": "Verbindung wird wiederhergestellt"
+    },
+    "tab_scope": {
+      "show_all": "Alle anzeigen",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "Alle {{total}} Tabs in diesem Fenster anzeigen.",
+      "filtered_tooltip": "Nur Tabs in „{{scope}}“ werden angezeigt ({{visible}}/{{total}}). Andere Tabs bleiben geöffnet.",
+      "all": "Alle Tabs",
+      "global": "Globale Seiten",
+      "local": "Lokale Terminals",
+      "connection": "Verbindung",
+      "empty": "Keine Tabs in diesem Bereich",
+      "search": "Tab-Bereiche suchen…",
+      "categories": "Kategorien",
+      "connections": "Verbindungen",
+      "hint": "↑↓ Auswählen · Enter Wechseln · Esc Abbrechen"
+    },
     "search": {
       "title": "Sitzungen suchen",
       "placeholder": "Sitzungen suchen…",
@@ -13,6 +35,7 @@
       "connected_first": "Verbundene zuerst"
     },
     "actions": {
+      "enter_zen": "Zen-Modus aktivieren",
       "expand": "Seitenleiste erweitern",
       "collapse": "Seitenleiste einklappen",
       "new_local_terminal": "Neues lokales Terminal",
@@ -41,6 +64,7 @@
       "import_tooltip": "Aus .oxide-Datei importieren",
       "export_tooltip": "In .oxide-Datei exportieren",
       "host_tools": "Host-Werkzeuge",
+      "more_tools": "Weitere Werkzeuge",
       "knowledge": "Wissensdatenbank",
       "host_monitor": "Überwachung",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "Pakete"
     },
     "tooltips": {
+      "switch_to_light": "Zum hellen Design wechseln",
+      "switch_to_dark": "Zum dunklen Design wechseln",
       "settings": "Einstellungen",
       "ai_hint": "OxideSens",
       "switch_tree": "Baumansicht",
       "switch_focus": "Fokusansicht",
+      "switch_host": "Hostansicht",
       "new_connection": "Neue Verbindung",
       "lock_app": "OxideTerm sperren",
       "setup_app_lock": "Anwendungssperre einrichten",

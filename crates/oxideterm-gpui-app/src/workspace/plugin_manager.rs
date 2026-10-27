@@ -3,7 +3,7 @@ use gpui::Div;
 use oxideterm_gpui_ui::{
     ActionSlotRowOptions, StatusTone, SurfaceKind, SurfaceOptions, SurfacePadding, action_slot_row,
     semantic_surface,
-    text_input::{TextInputContentAlign, TextInputView, text_input_with_content_align},
+    text_input::{TextInputContentAlign, TextInputView},
 };
 use std::process::Command;
 use zeroize::Zeroizing;
@@ -27,9 +27,8 @@ const PLUGIN_MANAGER_TW_ALPHA_20: u32 = 0x33;
 const PLUGIN_MANAGER_TW_ALPHA_30: u32 = 0x4d;
 const PLUGIN_MANAGER_TW_ALPHA_40: u32 = 0x66;
 const PLUGIN_MANAGER_TW_ALPHA_50: u32 = 0x80;
-// When Tauri's background image is active, theme cards keep Tailwind-like
-// translucent surfaces so the plugin page does not become an opaque block.
-const PLUGIN_MANAGER_BG_ACTIVE_THEME_ALPHA: u32 = 0x66;
+// Keep legacy panel fills aligned with the shared light-theme card strength.
+const PLUGIN_MANAGER_BG_ACTIVE_THEME_ALPHA: u32 = 0x99;
 const PLUGIN_MANAGER_BG_ACTIVE_BORDER_HALF_ALPHA: u32 = 0x60;
 const OFFICIAL_PLUGIN_MARKETPLACE_HOME: &str =
     "https://github.com/AnalyseDeCircuit/oxideterm-plugins";
@@ -2503,8 +2502,8 @@ impl WorkspaceApp {
         // with the other native form fields.
         self.text_input_with_workspace_ime(
             target,
-            text_input_with_content_align(
-                &self.tokens,
+            self.workspace_text_input_with_align(
+                target,
                 TextInputView {
                     value: &display_value,
                     placeholder,

@@ -56,6 +56,9 @@ impl WorkspaceApp {
         active_tab_id: Option<TabId>,
         cx: &mut App,
     ) {
+        if let Some(tab) = active_tab_id {
+            self.reveal_tab_scope(tab, cx);
+        }
         let previous_active_tab_id = self
             .tab_host
             .update(cx, |tab_host, _| tab_host.select_main_tab(active_tab_id));
@@ -76,6 +79,18 @@ impl WorkspaceApp {
         cx: &mut App,
     ) {
         if previous_active_tab_id != active_tab_id {
+            let mut previous_panes = Vec::new();
+            if let Some(root) = previous_active_tab_id
+                .and_then(|id| self.tab_by_id(id, cx))
+                .and_then(|tab| tab.root_pane.as_ref())
+            {
+                root.collect_pane_ids(&mut previous_panes);
+            }
+            for pane_id in previous_panes {
+                if let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id).cloned() {
+                    pane.update(cx, |pane, cx| pane.clear_terminal_interactions(cx));
+                }
+            }
             if let Some(tab_id) = previous_active_tab_id {
                 self.sync_ide_surface_mount(tab_id, cx);
                 self.sync_remote_desktop_frame_visibility(tab_id, cx);
@@ -98,6 +113,13 @@ impl WorkspaceApp {
 
     pub(in crate::workspace) fn tabs<'a>(&self, cx: &'a App) -> &'a [Tab] {
         self.tab_host.read(cx).tabs()
+    }
+
+    pub(in crate::workspace) fn main_tabs<'a>(
+        &self,
+        cx: &'a App,
+    ) -> impl DoubleEndedIterator<Item = (usize, &'a Tab)> + use<'a> {
+        self.tab_host.read(cx).main_tabs()
     }
 
     pub(in crate::workspace) fn active_tab_id(&self, cx: &App) -> Option<TabId> {
@@ -261,14 +283,17 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let host = self.tab_host.read(cx);
-        let Some(pane) = host
-            .tab_by_id(tab_id)
-            .and_then(|tab| tab.active_pane_id)
-            .and_then(|id| host.panes().get(&id))
-            .cloned()
-        else {
+        let Some(pane_id) = host.tab_by_id(tab_id).and_then(|tab| tab.active_pane_id) else {
             return;
         };
+        let Some(pane) = host.panes().get(&pane_id).cloned() else {
+            return;
+        };
+        let surface = self
+            .ide_workspace
+            .read(cx)
+            .shell_surface_for_pane(pane_id)
+            .map(|(_, surface)| surface);
         let Some(handle) = host.detached_window_handle(tab_id).or_else(|| {
             self.window_registry
                 .handle_for_role(window_registry::WindowRole::Main)
@@ -276,10 +301,18 @@ impl WorkspaceApp {
             return;
         };
         if handle.window_id() == window.window_handle().window_id() {
-            pane.update(cx, |pane, cx| pane.focus(window, cx));
+            if let Some(surface) = surface {
+                window.focus(&surface.read(cx).focus_handle(cx), cx);
+            } else {
+                pane.update(cx, |pane, cx| pane.focus(window, cx));
+            }
         } else {
             let _ = handle.update(cx, |_, window, cx| {
-                pane.update(cx, |pane, cx| pane.focus(window, cx));
+                if let Some(surface) = surface {
+                    window.focus(&surface.read(cx).focus_handle(cx), cx);
+                } else {
+                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                }
             });
         }
     }

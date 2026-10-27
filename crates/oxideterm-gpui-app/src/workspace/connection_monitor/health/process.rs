@@ -547,6 +547,11 @@ impl HostToolsEntity {
         });
 
         div()
+            .id(host_tools_row_id(
+                "host-process-row",
+                connection_id,
+                process.pid.clone(),
+            ))
             .w_full()
             .min_w_0()
             .border_b_1()
@@ -724,39 +729,40 @@ impl HostToolsEntity {
     ) -> AnyElement {
         let input = ime.input();
         let anchor_frame = ime.clone();
-        let input_control = text_input(
-            tokens,
-            TextInputView {
-                value,
-                placeholder,
-                focused: self.ui.input_is_focused(input),
-                caret_visible: ime.caret_visible(),
-                secret: false,
-                selected_all: false,
-                selected_range: ime.selected_range(),
-                marked_text: ime.marked_text(),
-            },
-        )
-        .h(height)
-        .cursor(CursorStyle::IBeam)
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |host_tools, event: &MouseDownEvent, window, cx| {
-                host_tools.ui.focus_input(input);
-                // The event moves through a one-shot action so the root can
-                // coordinate the shared window IME without being retained.
-                window.dispatch_action(
-                    Box::new(HostToolsWindowRequest::new(
-                        HostToolsWindowIntent::BeginPlainTextImeSelection {
-                            input,
-                            event: event.clone(),
-                        },
-                    )),
-                    cx,
-                );
-                cx.stop_propagation();
-            }),
-        );
+        let input_control = ime
+            .text_input(
+                tokens,
+                TextInputView {
+                    value,
+                    placeholder,
+                    focused: self.ui.input_is_focused(input),
+                    caret_visible: ime.caret_visible(),
+                    secret: false,
+                    selected_all: false,
+                    selected_range: ime.selected_range(),
+                    marked_text: ime.marked_text(),
+                },
+            )
+            .h(height)
+            .cursor(CursorStyle::IBeam)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |host_tools, event: &MouseDownEvent, window, cx| {
+                    host_tools.ui.focus_input(input);
+                    // The event moves through a one-shot action so the root can
+                    // coordinate the shared window IME without being retained.
+                    window.dispatch_action(
+                        Box::new(HostToolsWindowRequest::new(
+                            HostToolsWindowIntent::BeginPlainTextImeSelection {
+                                input,
+                                event: event.clone(),
+                            },
+                        )),
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            );
         text_input_anchor_probe(
             ime.anchor_id(),
             if let Some(width) = width {
@@ -1414,9 +1420,7 @@ impl HostToolsEntity {
                 succeeded: delivery.result.unwrap_or(false),
             },
         ));
-        // Force the next workspace integration call to rebuild the sampler
-        // instead of treating the existing configuration as already running.
-        self.profiler_registry.stop(&delivery.request.connection_id);
+        // Keep history while sampling the result of the remote action.
         self.request_profiler_refresh(delivery.request.connection_id, cx);
         cx.notify();
     }

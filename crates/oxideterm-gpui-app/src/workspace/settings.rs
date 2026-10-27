@@ -83,9 +83,9 @@ use oxideterm_ai::{
 use oxideterm_connections::{
     ConnectionImportApplyRequest, ConnectionImportDuplicateStrategy, ConnectionImportPreview,
     ConnectionImportSource, ImportedConnectionAuthType, LOCAL_SHELL_PRIVILEGE_CONNECTION_ID,
-    ManagedSshKeyInfo, ManagedSshKeyOrigin, ManagedSshKeyUsage, SavePrivilegeCredentialRequest,
-    SecretString, SshConfigHost, apply_connection_import, list_available_ssh_keys,
-    list_ssh_config_hosts, preview_connection_import,
+    ManagedSshKeyInfo, ManagedSshKeyOrigin, ManagedSshKeyUsage, SSH_COMMON_PRIVILEGE_SCOPE_ID,
+    SavePrivilegeCredentialRequest, SecretString, SshConfigHost, apply_connection_import,
+    list_available_ssh_keys, list_ssh_config_hosts, preview_connection_import,
 };
 use oxideterm_gpui_platform::vibrancy::{NativeVibrancyMode, VibrancySupport, available_modes};
 use oxideterm_gpui_settings_view::*;
@@ -112,8 +112,8 @@ use oxideterm_gpui_ui::{
     separator::{SeparatorOrientation, separator},
     slider::{SliderView, slider, slider_pointer_percent},
     text_input::{
-        TextInputContentAlign, TextInputView, text_caret, text_input, text_input_anchor_probe,
-        text_input_value_segments, text_input_with_content_align,
+        TextInputContentAlign, TextInputView, text_caret, text_input_anchor_probe,
+        text_input_value_segments,
     },
 };
 use oxideterm_i18n::I18n;

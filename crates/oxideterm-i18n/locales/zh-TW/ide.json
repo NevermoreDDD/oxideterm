@@ -1,5 +1,6 @@
 {
   "ide": {
+    "file_binary": "此檔案是二進位檔案，無法在文字編輯器中開啟。",
     "file_too_large": "檔案超過 IDE 的 100 MiB 編輯上限。",
     "file_encoding": "檔案編碼",
     "file_line_ending": "換行格式",
@@ -43,6 +44,7 @@
     "search_truncated": "結果已截斷。請優化搜尋條件以獲得更精確的匹配。",
     "search_results_count": "在 {{files}} 個檔案中找到 {{count}} 個結果",
     "find_placeholder": "尋找",
+    "insert_newline": "插入換行",
     "replace_placeholder": "取代",
     "find_next": "尋找下一個 (Enter)",
     "find_previous": "尋找上一個 (Shift+Enter)",

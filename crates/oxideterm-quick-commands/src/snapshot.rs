@@ -50,6 +50,7 @@ fn migrate_v1(snapshot: QuickCommandsSnapshotV1) -> QuickCommandsSnapshot {
             id: category.id,
             name: category.name,
             icon: category.icon,
+            icon_color: None,
             sort_order: migration_sort_order(index),
         })
         .collect();
@@ -65,6 +66,7 @@ fn migrate_v1(snapshot: QuickCommandsSnapshotV1) -> QuickCommandsSnapshot {
             description: command.description,
             parameters: Vec::new(),
             availability: QuickCommandAvailability {
+                match_field: Default::default(),
                 protocols: Vec::new(),
                 host_patterns: command.host_pattern.into_iter().collect(),
             },
@@ -108,11 +110,42 @@ mod tests {
 
         assert_eq!(snapshot.version, QUICK_COMMANDS_SCHEMA_VERSION);
         assert_eq!(snapshot.categories[0].id, "ops");
+        assert_eq!(snapshot.categories[0].icon_color, None);
         assert_eq!(snapshot.commands[0].command, "uptime");
         assert_eq!(
             snapshot.commands[0].availability.host_patterns,
             ["*.example.com"]
         );
         assert_eq!(snapshot.commands[0].created_at, 7);
+        assert_eq!(
+            snapshot.commands[0].availability.match_field,
+            crate::QuickCommandMatchField::All
+        );
+    }
+
+    #[test]
+    fn v2_match_field_preserves_old_rules_and_serializes_explicit_selection() {
+        let mut snapshot = decode_snapshot_json(
+            r#"{
+            "version":2,"collections":[{"id":"custom","name":"Custom","icon":"zap","sortOrder":0}],"commands":[{
+                "id":"device","name":"Device","body":"uptime","collectionId":"custom",
+                "availability":{"hostPatterns":["prod-*"]},"sortOrder":0,"createdAt":1,"updatedAt":1
+            }],"updatedAt":1
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(snapshot.categories[0].icon_color, None);
+        assert_eq!(
+            snapshot.commands[0].availability.match_field,
+            crate::QuickCommandMatchField::All
+        );
+        snapshot.commands[0].availability.match_field =
+            crate::QuickCommandMatchField::ConnectionName;
+        let json: serde_json::Value =
+            serde_json::from_str(&encode_snapshot_json(&snapshot).unwrap()).unwrap();
+        assert_eq!(
+            json["commands"][0]["availability"]["matchField"],
+            "connection_name"
+        );
     }
 }

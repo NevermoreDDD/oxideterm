@@ -1,6 +1,6 @@
 use super::super::password_prompt::SavedPasswordLoadError;
 use super::*;
-use gpui::{Animation, AnimationExt, App, CursorStyle};
+use gpui::{App, CursorStyle};
 use oxideterm_connections::{ConnectionTerminalSessionLogPolicy, SavedAuth, SshChannelStrategy};
 use oxideterm_remote_desktop::RemoteDesktopRdpNetworkProfile;
 use oxideterm_settings_model::parse_rgb24_hex;
@@ -525,6 +525,7 @@ impl WorkspaceApp {
             NewConnectionSelect::Totp => SelectAnchorId::NewConnectionTotp,
             NewConnectionSelect::JumpTotp => SelectAnchorId::NewConnectionJumpTotp,
             NewConnectionSelect::Group => SelectAnchorId::NewConnectionGroup,
+            NewConnectionSelect::TunnelHost => SelectAnchorId::NewConnectionTunnelHost,
             NewConnectionSelect::KeyAuthSource => SelectAnchorId::NewConnectionKeyAuthSource,
             NewConnectionSelect::ManagedKey => SelectAnchorId::NewConnectionManagedKey,
             NewConnectionSelect::StandaloneSftpSecondaryKeyAuthSource => {
@@ -575,6 +576,12 @@ impl WorkspaceApp {
             }
             NewConnectionSelect::TerminalDeleteSequence => {
                 SelectAnchorId::NewConnectionTerminalDeleteSequence
+            }
+            NewConnectionSelect::TelnetInputLineEnding => {
+                SelectAnchorId::NewConnectionTelnetInputLineEnding
+            }
+            NewConnectionSelect::TelnetOutputLineEnding => {
+                SelectAnchorId::NewConnectionTelnetOutputLineEnding
             }
             NewConnectionSelect::TerminalSemanticScheme => {
                 SelectAnchorId::NewConnectionTerminalSemanticScheme
@@ -655,7 +662,7 @@ impl WorkspaceApp {
         self.update_connection_form_state(cx, ConnectionFormState::close_select);
     }
 
-    pub(super) fn clear_new_connection_select_anchor(&mut self, cx: &App) {
+    pub(in crate::workspace) fn clear_new_connection_select_anchor(&mut self, cx: &App) {
         // Every entry in this store belongs to the moving form viewport, so a
         // scroll can invalidate the entire set without enumerating anchor IDs.
         self.connection_flow.read(cx).select_anchor_store().clear();
@@ -741,7 +748,7 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
-    pub(super) fn render_connection_field(
+    pub(in crate::workspace) fn render_connection_field(
         &self,
         label: String,
         value: &str,
@@ -939,8 +946,8 @@ impl WorkspaceApp {
                 _ => false,
             };
             if use_empty {
-                let input = text_input(
-                    &self.tokens,
+                let input = self.workspace_text_input(
+                    target,
                     TextInputView {
                         value: "",
                         placeholder,
@@ -958,8 +965,8 @@ impl WorkspaceApp {
             let secret_visible = connection_secret_field_visible(form, field);
             let focused = form.field_focused && form.focused_field == field;
             let selected_all = connection_field_is_selected(form, field);
-            let input = text_input(
-                &self.tokens,
+            let input = self.workspace_text_input(
+                target,
                 TextInputView {
                     value,
                     placeholder,
@@ -1184,7 +1191,7 @@ impl WorkspaceApp {
         )
     }
 
-    pub(super) fn render_connection_group_select(
+    pub(in crate::workspace) fn render_connection_group_select(
         &self,
         label: String,
         value: &str,
@@ -1455,6 +1462,57 @@ impl WorkspaceApp {
         .into_any_element()
     }
 
+    pub(in crate::workspace) fn render_tunnel_host_select(
+        &self,
+        selected_id: Option<&str>,
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = selected_id
+            .and_then(|id| self.connection_store.get(id))
+            .map(|host| {
+                format!(
+                    "{} · {}@{}:{}",
+                    host.name, host.username, host.host, host.port
+                )
+            })
+            .unwrap_or_else(|| self.i18n.t("ssh_tunnel.choose_host"));
+        let trigger = self
+            .new_connection_select_trigger(
+                NewConnectionSelect::TunnelHost,
+                label,
+                selected_id.is_none(),
+                disabled,
+                cx,
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if !disabled {
+                        this.update_connection_form_state(cx, |state| {
+                            if let Some(form) = state.form.as_mut() {
+                                form.field_focused = false;
+                                clear_connection_selection(form);
+                            }
+                        });
+                        this.ime_marked_text = None;
+                        this.open_new_connection_select_from_pointer(
+                            NewConnectionSelect::TunnelHost,
+                            cx,
+                        );
+                        window.focus(&this.focus_handle, cx);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            );
+        form_field(
+            &self.tokens,
+            self.i18n.t("ssh_tunnel.host"),
+            self.track_new_connection_select_anchor(NewConnectionSelect::TunnelHost, trigger, cx),
+        )
+    }
+
     pub(super) fn render_remote_desktop_ssh_gateway_select(
         &self,
         selected_id: Option<&str>,
@@ -1558,6 +1616,7 @@ impl WorkspaceApp {
                     | NewConnectionSelect::KeyAuthSource
                     | NewConnectionSelect::StandaloneSftpSecondaryKeyAuthSource
                     | NewConnectionSelect::JumpSavedConnection
+                    | NewConnectionSelect::TunnelHost
                     | NewConnectionSelect::RemoteDesktopSshGateway
                     | NewConnectionSelect::JumpKeyAuthSource
                     | NewConnectionSelect::UpstreamProxyPolicy
@@ -1575,6 +1634,8 @@ impl WorkspaceApp {
                     | NewConnectionSelect::TerminalEncoding
                     | NewConnectionSelect::TerminalBackspaceSequence
                     | NewConnectionSelect::TerminalDeleteSequence
+                    | NewConnectionSelect::TelnetInputLineEnding
+                    | NewConnectionSelect::TelnetOutputLineEnding
                     | NewConnectionSelect::TerminalSemanticScheme
                     | NewConnectionSelect::TerminalHighlightRuleSet
                     | NewConnectionSelect::TerminalSessionLogPolicy => return,
@@ -1758,8 +1819,8 @@ impl WorkspaceApp {
             .as_ref()
             .is_some_and(|form| connection_field_is_selected(form, field));
         let target = WorkspaceImeTarget::NewConnection(field);
-        let input = text_input(
-            &self.tokens,
+        let input = self.workspace_text_input(
+            target,
             TextInputView {
                 value,
                 placeholder,
@@ -1871,42 +1932,14 @@ impl WorkspaceApp {
             .w(gpui::relative(item_width))
             .rounded(px(self.tokens.radii.xs))
             .bg(rgb(self.tokens.ui.bg));
-        let indicator = match (
-            transition_generation,
-            oxideterm_gpui_ui::segmented_control_motion(&self.tokens),
-        ) {
-            (Some(generation), Some(motion)) if motion.spatial => indicator
-                .with_animation(
-                    (
-                        gpui::ElementId::from(control_id),
-                        format!("selection-{generation}"),
-                    ),
-                    Animation::new(motion.duration)
-                        .with_easing(oxideterm_gpui_ui::motion::ease_in_out_cubic),
-                    move |indicator, progress| {
-                        indicator.left(gpui::relative(oxideterm_gpui_ui::motion::lerp(
-                            previous_left,
-                            active_left,
-                            progress,
-                        )))
-                    },
-                )
-                .into_any_element(),
-            (Some(generation), Some(motion)) => indicator
-                .left(gpui::relative(active_left))
-                .with_animation(
-                    (
-                        gpui::ElementId::from(control_id),
-                        format!("selection-{generation}"),
-                    ),
-                    Animation::new(motion.duration),
-                    |indicator, progress| indicator.opacity(progress),
-                )
-                .into_any_element(),
-            _ => indicator
-                .left(gpui::relative(active_left))
-                .into_any_element(),
-        };
+        let indicator = oxideterm_gpui_ui::segmented_control::selection_indicator(
+            &self.tokens,
+            control_id,
+            indicator,
+            previous_left,
+            active_left,
+            transition_generation.is_some(),
+        );
         let mut inner = div().relative().w_full().flex().flex_row().child(indicator);
         for item in items {
             inner = inner.child(item);
@@ -2773,8 +2806,12 @@ impl WorkspaceApp {
         )
     }
 
-    pub(super) fn render_transport_selector(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::workspace) fn render_transport_selector(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = self.tokens.ui;
+        let tunnel_active = self.ssh_tunnels.form.is_some();
         let (active_transport, advanced_connections_expanded) = self
             .connection_form_state(cx)
             .form
@@ -2858,6 +2895,8 @@ impl WorkspaceApp {
             LucideIcon::FolderSync,
             true,
         ));
+        let plugin_types = self.plugin_connection_types(cx);
+        let has_plugin_types = !plugin_types.is_empty();
         let mut sidebar = div()
             .w(px(NEW_CONNECTION_TYPE_SIDEBAR_WIDTH))
             .h_full()
@@ -2917,7 +2956,7 @@ impl WorkspaceApp {
             if advanced && !advanced_connections_expanded {
                 continue;
             }
-            let active = active_transport == transport;
+            let active = !tunnel_active && active_transport == transport;
             let transport_index = new_connection_transport_index(transport);
             let row_text = if active {
                 theme.text_heading
@@ -2929,12 +2968,6 @@ impl WorkspaceApp {
             } else {
                 theme.text_muted
             };
-            let selection_transition = active.then_some(()).and_then(|()| {
-                self.segmented_control_user_transition(
-                    crate::workspace::selection_motion::NEW_CONNECTION_TRANSPORT_SELECTOR_ID,
-                    transport_index,
-                )
-            });
             let selection_surface = active.then(|| {
                 let surface = div()
                     .absolute()
@@ -2945,49 +2978,11 @@ impl WorkspaceApp {
                     .bg(self.settings_panel_background(theme.bg_panel));
                 let surface = oxideterm_gpui_ui::theme_card_surface_shadow(surface, &self.tokens);
 
-                let Some((generation, vertical_offset_y)) = selection_transition else {
-                    return surface.into_any_element();
-                };
-                let Some(motion) = oxideterm_gpui_ui::segmented_control_motion(&self.tokens) else {
-                    return surface.into_any_element();
-                };
-                let animation_id = (
-                    gpui::ElementId::from(
-                        crate::workspace::selection_motion::NEW_CONNECTION_TRANSPORT_SELECTOR_ID,
-                    ),
-                    format!("selection-{generation}"),
-                );
-
-                if motion.spatial
-                    && let Some(vertical_offset_y) = vertical_offset_y
-                {
-                    return surface
-                        .with_animation(
-                            animation_id,
-                            Animation::new(motion.duration)
-                                .with_easing(oxideterm_gpui_ui::motion::ease_in_out_cubic),
-                            move |surface, progress| {
-                                let offset = oxideterm_gpui_ui::motion::lerp(
-                                    vertical_offset_y,
-                                    0.0,
-                                    progress,
-                                );
-                                // Move both edges so the highlight keeps its
-                                // fixed row height during vertical travel.
-                                surface.top(px(offset)).bottom(px(-offset))
-                            },
-                        )
-                        .into_any_element();
-                }
-
-                surface
-                    .with_animation(
-                        animation_id,
-                        Animation::new(motion.duration)
-                            .with_easing(oxideterm_gpui_ui::motion::ease_out_cubic),
-                        |surface, progress| surface.opacity(progress),
-                    )
-                    .into_any_element()
+                self.render_vertical_selection_surface(
+                    crate::workspace::selection_motion::NEW_CONNECTION_TRANSPORT_SELECTOR_ID,
+                    transport_index,
+                    surface,
+                )
             });
             let row = div()
                 .w_full()
@@ -3009,7 +3004,15 @@ impl WorkspaceApp {
                 .child(div().min_w(px(0.0)).truncate().child(label))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _event, _window, cx| {
+                    cx.listener(move |this, _event, window, cx| {
+                        if this.ssh_tunnels.form.take().is_some() {
+                            this.open_new_connection_form(window, cx);
+                            this.update_connection_form_state(cx, |state| {
+                                if let Some(form) = state.form.as_mut() {
+                                    form.advanced_connections_expanded = true;
+                                }
+                            });
+                        }
                         let mut should_refresh_ports = false;
                         let mut selection_offset = None;
                         this.update_connection_form_state(cx, |state| {     if let Some(form) = state.form.as_mut() {
@@ -3062,7 +3065,98 @@ impl WorkspaceApp {
                 );
             sidebar = sidebar.child(row);
         }
-        sidebar.into_any_element()
+        if advanced_connections_expanded {
+            sidebar = sidebar.child(
+                div()
+                    .w_full()
+                    .h(px(NEW_CONNECTION_TRANSPORT_ROW_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .cursor_pointer()
+                    .text_size(px(self.tokens.metrics.ui_text_sm))
+                    .text_color(rgb(if tunnel_active {
+                        theme.text_heading
+                    } else {
+                        theme.text
+                    }))
+                    .when(tunnel_active, |row| {
+                        oxideterm_gpui_ui::theme_card_surface_shadow(
+                            row.rounded(px(self.tokens.radii.md))
+                                .border_1()
+                                .border_color(rgb(theme.border))
+                                .bg(self.settings_panel_background(theme.bg_panel)),
+                            &self.tokens,
+                        )
+                    })
+                    .when(!tunnel_active, |row| {
+                        row.hover(|row| row.bg(rgba((theme.bg_hover << 8) | 0x80)))
+                    })
+                    .child(Self::render_lucide_icon(
+                        LucideIcon::Network,
+                        14.0,
+                        rgb(if tunnel_active {
+                            theme.accent
+                        } else {
+                            theme.text_muted
+                        }),
+                    ))
+                    .child(self.i18n.t("ssh_tunnel.title"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            if this.ssh_tunnels.form.is_none() {
+                                this.open_ssh_tunnel_form(None, window, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    ),
+            );
+        }
+        for (plugin, definition) in plugin_types {
+            sidebar = sidebar.child(
+                div()
+                    .w_full()
+                    .h(px(NEW_CONNECTION_TRANSPORT_ROW_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .cursor_pointer()
+                    .text_size(px(self.tokens.metrics.ui_text_sm))
+                    .text_color(rgb(theme.text))
+                    .hover(|row| row.bg(rgba((theme.bg_hover << 8) | 0x80)))
+                    .child(Self::render_lucide_icon(
+                        LucideIcon::from_plugin_name(&definition.icon),
+                        14.0,
+                        rgb(theme.text_muted),
+                    ))
+                    .child(definition.title)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            this.ssh_tunnels.form = None;
+                            this.close_new_connection_select(cx);
+                            this.open_plugin_connection_form(
+                                &plugin,
+                                &definition.id,
+                                None,
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    ),
+            );
+        }
+        if has_plugin_types {
+            sidebar.overflow_y_scrollbar().into_any_element()
+        } else {
+            sidebar.into_any_element()
+        }
     }
 
     pub(super) fn render_local_terminal_form_branch(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4411,6 +4505,17 @@ impl WorkspaceApp {
         else {
             return div().into_any_element();
         };
+        let telnet_line_endings = self
+            .connection_form_state(cx)
+            .form
+            .as_ref()
+            .filter(|form| form.transport == NewConnectionTransport::Telnet)
+            .map(|form| {
+                (
+                    form.telnet_input_line_ending,
+                    form.telnet_output_line_ending,
+                )
+            });
         let application_defaults = &self.settings_store.settings().terminal;
         let default_encoding = terminal_encoding_label(application_defaults.terminal_encoding);
         let default_backspace =
@@ -4556,6 +4661,39 @@ impl WorkspaceApp {
                                 ),
                             )),
                     )
+                    .when_some(telnet_line_endings, |row, (input, output)| {
+                        row.children(
+                            [
+                                (
+                                    NewConnectionSelect::TelnetInputLineEnding,
+                                    "terminal.serial_control.line_ending",
+                                    input,
+                                ),
+                                (
+                                    NewConnectionSelect::TelnetOutputLineEnding,
+                                    "terminal.serial_control.output_line_ending",
+                                    output,
+                                ),
+                            ]
+                            .into_iter()
+                            .map(|(select, label, value)| {
+                                div()
+                                    .flex_1()
+                                    .min_w(px(CONNECTION_TERMINAL_CONTROL_MIN_WIDTH))
+                                    .child(form_field(
+                                        &self.tokens,
+                                        self.i18n.t(label),
+                                        self.render_new_connection_select_control(
+                                            select,
+                                            self.connection_line_ending_label(value),
+                                            false,
+                                            false,
+                                            cx,
+                                        ),
+                                    ))
+                            }),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -4764,6 +4902,14 @@ impl WorkspaceApp {
                 cx,
             ))
             .when(
+                cfg!(target_os = "windows") && x11_forwarding.enabled,
+                |content| {
+                    content.child(
+                        self.render_connection_hint(self.i18n.t("ssh.x11.windows_requirement")),
+                    )
+                },
+            )
+            .when(
                 x11_forwarding.enabled && !ssh_channel_strategy.requires_dedicated_consumers(),
                 |content| {
                     content.child(form_field(
@@ -4877,6 +5023,19 @@ impl WorkspaceApp {
             ))
             .child(self.render_connection_hint(self.i18n.t("ssh.form.connect_timeout_hint")))
             .into_any_element()
+    }
+
+    pub(super) fn connection_line_ending_label(
+        &self,
+        value: oxideterm_connections::SerialLineEnding,
+    ) -> String {
+        use oxideterm_connections::SerialLineEnding;
+        self.i18n.t(match value {
+            SerialLineEnding::None => "terminal.serial_control.line_ending_none",
+            SerialLineEnding::Lf => "terminal.serial_control.line_ending_lf",
+            SerialLineEnding::CrLf => "terminal.serial_control.line_ending_crlf",
+            SerialLineEnding::Cr => "terminal.serial_control.line_ending_cr",
+        })
     }
 
     pub(super) fn set_new_connection_terminal_encoding(

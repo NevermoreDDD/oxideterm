@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "后台任务：{{count}}",
+      "search": "搜索后台任务…",
+      "transferring": "传输中",
+      "reconnecting": "正在重连"
+    },
+    "tab_scope": {
+      "show_all": "显示全部",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "显示当前窗口的全部 {{total}} 个标签。",
+      "filtered_tooltip": "仅显示“{{scope}}”的标签（{{visible}}/{{total}}）。其他标签仍保持打开。",
+      "all": "全部标签",
+      "global": "全局页面",
+      "local": "本地终端",
+      "connection": "连接",
+      "empty": "此范围内暂无标签",
+      "search": "搜索标签范围…",
+      "categories": "分类",
+      "connections": "连接",
+      "hint": "↑↓ 选择 · Enter 切换 · Esc 取消"
+    },
     "search": {
       "title": "搜索会话",
       "placeholder": "搜索会话…",
@@ -13,6 +35,7 @@
       "connected_first": "已连接优先"
     },
     "actions": {
+      "enter_zen": "进入禅模式",
       "expand": "展开侧边栏",
       "collapse": "折叠侧边栏",
       "new_local_terminal": "新建本地终端",
@@ -41,6 +64,7 @@
       "import_tooltip": "从 .oxide 文件导入",
       "export_tooltip": "导出到 .oxide 文件",
       "host_tools": "主机工具",
+      "more_tools": "更多工具",
       "knowledge": "知识库",
       "host_monitor": "监控",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "包管理"
     },
     "tooltips": {
+      "switch_to_light": "切换为浅色主题",
+      "switch_to_dark": "切换为深色主题",
       "settings": "设置",
       "ai_hint": "OxideSens",
       "switch_tree": "切换到树形视图",
       "switch_focus": "切换到聚焦视图",
+      "switch_host": "切换到主机视图",
       "new_connection": "新建连接",
       "lock_app": "锁定 OxideTerm",
       "setup_app_lock": "设置应用锁",

@@ -5,7 +5,6 @@ use oxideterm_terminal_triggers::{
     TerminalTriggerScope,
 };
 
-pub(in crate::workspace) const SETTINGS_ROW_LABEL_MIN_WIDTH: f32 = 180.0; // Keep localized labels readable before controls wrap.
 const KNOWLEDGE_SCOPE_SELECT_MAX_HEIGHT: f32 = 320.0;
 
 enum ThemeSelectEntry {
@@ -796,7 +795,7 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Ide, SettingsSelect::IdeAgentMode) => {
+            (SettingsTab::Ai, SettingsSelect::IdeAgentMode) => {
                 let mut popup = select_overlay_popup(&self.tokens, width);
                 for mode in [
                     IdeAgentMode::Ask,
@@ -814,6 +813,32 @@ impl WorkspaceApp {
                         cx.listener(move |this, _event, _window, cx| {
                             this.close_settings_select();
                             this.edit_settings(|settings| settings.ide.agent_mode = mode, cx);
+                            cx.stop_propagation();
+                        }),
+                    ));
+                }
+                Some(popup)
+            }
+            (SettingsTab::Terminal, SettingsSelect::XmodemBlockSize) => {
+                let mut popup = select_overlay_popup(&self.tokens, width);
+                for size in [
+                    oxideterm_settings::XmodemBlockSize::Bytes128,
+                    oxideterm_settings::XmodemBlockSize::Bytes1024,
+                ] {
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            xmodem_block_size_label(size, &self.i18n),
+                            size == settings.terminal.xmodem_block_size,
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.close_settings_select();
+                            this.edit_settings(
+                                |settings| settings.terminal.xmodem_block_size = size,
+                                cx,
+                            );
                             cx.stop_propagation();
                         }),
                     ));
@@ -876,19 +901,40 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Terminal, SettingsSelect::TerminalTriggerAction) => {
+            (
+                SettingsTab::Terminal,
+                SettingsSelect::TerminalTriggerAction | SettingsSelect::TerminalTriggerClickAction,
+            ) => {
                 let draft = self.terminal_trigger_draft()?;
-                let current = match &draft.action {
+                let nested = open_select == SettingsSelect::TerminalTriggerClickAction;
+                let action = if nested {
+                    self.terminal_trigger_draft_action()?
+                } else {
+                    &draft.action
+                };
+                let current = match action {
                     TerminalTriggerAction::SendText { .. } => 0,
                     TerminalTriggerAction::RunQuickCommand { .. } => 1,
                     TerminalTriggerAction::LaunchLocalProcess { .. } => 2,
+                    TerminalTriggerAction::OpenUrl { .. } => 3,
+                    TerminalTriggerAction::CustomLink { .. } => 4,
+                    TerminalTriggerAction::CustomMenu { .. } => 5,
+                    TerminalTriggerAction::ShowTooltip { .. } => 6,
                 };
                 let mut popup = select_overlay_popup(&self.tokens, width);
-                for action_index in 0..3 {
+                for action_index in if nested {
+                    vec![0, 1, 2, 3]
+                } else {
+                    vec![0, 1, 2, 4, 5, 6]
+                } {
                     let label_key = match action_index {
                         0 => "settings_view.terminal.triggers.action_send_text",
                         1 => "settings_view.terminal.triggers.action_quick_command",
-                        _ => "settings_view.terminal.triggers.action_local_process",
+                        2 => "settings_view.terminal.triggers.action_local_process",
+                        3 => "settings_view.terminal.triggers.open_url",
+                        4 => "settings_view.terminal.triggers.custom_link",
+                        5 => "settings_view.terminal.triggers.custom_menu",
+                        _ => "settings_view.terminal.triggers.show_tooltip",
                     };
                     popup = popup.child(select_option_action(
                         select_option(
@@ -917,15 +963,38 @@ impl WorkspaceApp {
                                         .unwrap_or_default();
                                     TerminalTriggerAction::RunQuickCommand { quick_command_id }
                                 }
-                                _ => TerminalTriggerAction::LaunchLocalProcess {
+                                2 => TerminalTriggerAction::LaunchLocalProcess {
                                     process: LocalProcessSpec::DirectProgram {
                                         executable: String::new(),
                                         arguments: Vec::new(),
                                         working_directory: None,
                                     },
                                 },
+                                3 => TerminalTriggerAction::OpenUrl { url: String::new() },
+                                4 => TerminalTriggerAction::CustomLink {
+                                    action: Box::new(TerminalTriggerAction::OpenUrl {
+                                        url: String::new(),
+                                    }),
+                                },
+                                5 => TerminalTriggerAction::CustomMenu {
+                                    items: vec![
+                                        oxideterm_terminal_triggers::TerminalTriggerMenuItem {
+                                            label: String::new(),
+                                            action: TerminalTriggerAction::OpenUrl {
+                                                url: String::new(),
+                                            },
+                                        },
+                                    ],
+                                },
+                                _ => TerminalTriggerAction::ShowTooltip {
+                                    text: String::new(),
+                                },
                             };
-                            this.select_terminal_trigger_action(action);
+                            if nested {
+                                this.select_terminal_trigger_click_action(action);
+                            } else {
+                                this.select_terminal_trigger_action(action);
+                            }
                             cx.stop_propagation();
                             cx.notify();
                         }),
@@ -934,9 +1003,9 @@ impl WorkspaceApp {
                 Some(popup)
             }
             (SettingsTab::Terminal, SettingsSelect::TerminalTriggerProcessMode) => {
-                let draft = self.terminal_trigger_draft()?;
+                let action = self.terminal_trigger_draft_action()?;
                 let current_shell = matches!(
-                    &draft.action,
+                    action,
                     TerminalTriggerAction::LaunchLocalProcess {
                         process: LocalProcessSpec::ExplicitShell { .. }
                     }
@@ -966,8 +1035,7 @@ impl WorkspaceApp {
                 Some(popup)
             }
             (SettingsTab::Terminal, SettingsSelect::TerminalTriggerQuickCommand) => {
-                let draft = self.terminal_trigger_draft()?;
-                let current = match &draft.action {
+                let current = match self.terminal_trigger_draft_action()? {
                     TerminalTriggerAction::RunQuickCommand { quick_command_id } => {
                         quick_command_id.clone()
                     }
@@ -1341,6 +1409,7 @@ impl WorkspaceApp {
                         false,
                         cx.listener(move |this, _event, _window, cx| {
                             this.close_settings_select();
+                            this.blur_text_inputs(cx);
                             this.edit_settings(
                                 |settings| {
                                     settings.local_terminal.default_shell_id =
@@ -1460,26 +1529,108 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
-            (SettingsTab::Privilege, SettingsSelect::LocalPrivilegeKind) => {
+            (SettingsTab::Privilege, SettingsSelect::LocalPrivilegePromptType) => {
                 let mut popup = select_overlay_popup(&self.tokens, width);
-                let current_kind = self.settings_workspace.read(cx).privilege_kind();
-                for kind in [
-                    PrivilegeCredentialKind::SudoPassword,
-                    PrivilegeCredentialKind::SuPassword,
-                    PrivilegeCredentialKind::CustomPrompt,
+                let current = self.settings_workspace.read(cx).privilege_prompt_type();
+                for prompt_type in [
+                    PrivilegePromptType::Sudo,
+                    PrivilegePromptType::Su,
+                    PrivilegePromptType::Custom,
                 ] {
                     popup = popup.child(select_option_action(
                         select_option(
                             &self.tokens,
-                            self.settings_privilege_kind_label(kind),
-                            current_kind == kind,
+                            self.settings_privilege_prompt_type_label(prompt_type),
+                            current == prompt_type,
                         ),
                         false,
                         false,
                         cx.listener(move |this, _event, _window, cx| {
                             this.close_settings_select();
                             this.settings_workspace.update(cx, |settings, cx| {
-                                settings.set_privilege_kind(kind, cx);
+                                settings.set_privilege_prompt_type(prompt_type, cx);
+                            });
+                            cx.stop_propagation();
+                        }),
+                    ));
+                }
+                Some(popup)
+            }
+            (SettingsTab::Privilege, SettingsSelect::LocalPrivilegeResponseMode) => {
+                let mut popup = select_overlay_popup(&self.tokens, width);
+                let current = self.settings_workspace.read(cx).privilege_response_mode();
+                for response_mode in [
+                    PrivilegeResponseMode::PasswordOnly,
+                    PrivilegeResponseMode::PasswordThenTotp,
+                    PrivilegeResponseMode::PasswordWithTotp,
+                ] {
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            self.settings_privilege_response_mode_label(response_mode),
+                            current == response_mode,
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.close_settings_select();
+                            this.settings_workspace.update(cx, |settings, cx| {
+                                settings.set_privilege_response_mode(response_mode, cx);
+                            });
+                            cx.stop_propagation();
+                        }),
+                    ));
+                }
+                Some(popup)
+            }
+            (SettingsTab::Privilege, SettingsSelect::LocalPrivilegeTotpCredential) => {
+                let mut popup = select_overlay_popup(&self.tokens, width);
+                let selected = self
+                    .settings_workspace
+                    .read(cx)
+                    .privilege_snapshot()
+                    .totp_credential_id;
+                popup = popup.child(select_option_action(
+                    select_option(
+                        &self.tokens,
+                        self.i18n
+                            .t("sessionManager.privilege_credentials.totp_none"),
+                        selected.is_none(),
+                    ),
+                    false,
+                    false,
+                    cx.listener(|this, _event, _window, cx| {
+                        this.close_settings_select();
+                        this.settings_workspace.update(cx, |settings, cx| {
+                            settings.set_privilege_totp_credential(None, cx);
+                        });
+                        cx.stop_propagation();
+                    }),
+                ));
+                for credential in self.connection_store.totp_credentials() {
+                    let credential_id = credential.id.clone();
+                    let label = if credential.enabled {
+                        credential.name.clone()
+                    } else {
+                        format!(
+                            "{} ({})",
+                            credential.name,
+                            self.i18n.t("settings_view.privilege_credentials.disabled")
+                        )
+                    };
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            label,
+                            selected.as_deref() == Some(credential_id.as_str()),
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _event, _window, cx| {
+                            this.close_settings_select();
+                            let credential_id = credential_id.clone();
+                            this.settings_workspace.update(cx, |settings, cx| {
+                                settings.set_privilege_totp_credential(Some(credential_id), cx);
                             });
                             cx.stop_propagation();
                         }),
@@ -1927,6 +2078,40 @@ impl WorkspaceApp {
                 }
                 Some(popup)
             }
+            (SettingsTab::Ai, SettingsSelect::AiWebSearchProvider) => {
+                let current = settings.ai.web_search.provider_id.clone();
+                let mut popup = select_panel_overlay_popup_with_max_height(
+                    &self.tokens,
+                    width.max(AI_PROVIDER_SELECT_W),
+                    320.0,
+                );
+                let options =
+                    std::iter::once((None, self.i18n.t("settings_view.ai.web_provider_none")))
+                        .chain(
+                            ai_provider_views(settings)
+                                .into_iter()
+                                .filter(oxideterm_ai::web::official_deepseek_provider)
+                                .map(|provider| (Some(provider.id), provider.name)),
+                        );
+                for (provider_id, label) in options {
+                    let selected = current == provider_id;
+                    popup = popup.child(select_option_action(
+                        select_option(&self.tokens, label, selected),
+                        false,
+                        false,
+                        cx.listener(move |this, _event, _window, cx| {
+                            let provider_id = provider_id.clone();
+                            this.close_settings_select();
+                            this.edit_settings(
+                                move |settings| settings.ai.web_search.provider_id = provider_id,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    ));
+                }
+                Some(popup)
+            }
             (SettingsTab::Ai, SettingsSelect::AiMcpTransport) => {
                 let current = self
                     .ai_entity
@@ -2332,53 +2517,23 @@ impl WorkspaceApp {
         control: AnyElement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = self.i18n.t(label_key);
-        let hint = self.i18n.t(hint_key);
-        div()
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap(px(self.tokens.metrics.settings_row_gap))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(SETTINGS_ROW_LABEL_MIN_WIDTH))
-                    .flex_basis(px(SETTINGS_ROW_LABEL_MIN_WIDTH))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(self.tokens.metrics.ui_text_sm))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(self.tokens.ui.text))
-                            .child(self.render_selectable_text_scoped(
-                                "settings-row-label",
-                                label_key,
-                                label,
-                                self.tokens.ui.text,
-                                cx,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(self.tokens.metrics.ui_text_xs))
-                            .text_color(rgb(self.tokens.ui.text_muted))
-                            .child(self.render_selectable_text_scoped(
-                                "settings-row-hint",
-                                hint_key,
-                                hint,
-                                self.tokens.ui.text_muted,
-                                cx,
-                            )),
-                    ),
+        let label = self.render_selectable_text_scoped(
+            "settings-row-label",
+            label_key,
+            self.i18n.t(label_key),
+            self.tokens.ui.text,
+            cx,
+        );
+        let hint = (!hint_key.is_empty()).then(|| {
+            self.render_selectable_text_scoped(
+                "settings-row-hint",
+                hint_key,
+                self.i18n.t(hint_key),
+                self.tokens.ui.text_muted,
+                cx,
             )
-            .child(control)
-            .into_any_element()
+        });
+        settings_row(&self.tokens, label, hint, control)
     }
 }
 

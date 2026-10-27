@@ -3,6 +3,8 @@ use std::{collections::HashMap, fs, path::Path};
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use crate::integration_scripts::normalize_integration_script;
+
 use crate::{
     EMACS_FREE_TYPE_INTEGRATION_SOURCE, LocalPtyConfig, ShellInfo,
     VIM_FREE_TYPE_INTEGRATION_SOURCE, local_shell::shell_args_for_profile,
@@ -124,8 +126,14 @@ fn prepare_editor_integration(env: &mut HashMap<String, String>) -> Result<Local
         .context("create temporary editor integration directory")?;
     let vim_path = directory.path().join("oxideterm-free-type.vim");
     let emacs_path = directory.path().join("oxideterm-free-type.el");
-    write_private_file(&vim_path, VIM_FREE_TYPE_INTEGRATION_SOURCE)?;
-    write_private_file(&emacs_path, EMACS_FREE_TYPE_INTEGRATION_SOURCE)?;
+    write_private_file(
+        &vim_path,
+        &normalize_integration_script(VIM_FREE_TYPE_INTEGRATION_SOURCE),
+    )?;
+    write_private_file(
+        &emacs_path,
+        &normalize_integration_script(EMACS_FREE_TYPE_INTEGRATION_SOURCE),
+    )?;
     env.insert(
         VIM_FREE_TYPE_INTEGRATION_ENV.to_string(),
         vim_path.display().to_string(),
@@ -145,7 +153,16 @@ fn prepare_known_shell(
     env: &mut HashMap<String, String>,
     default_args: &[String],
 ) -> Result<Option<(Vec<String>, LocalShellIntegration)>> {
-    if shell.id.starts_with("wsl") || matches!(shell.id.as_str(), "git-bash" | "cmd") {
+    if shell.id.starts_with("wsl") {
+        if default_args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--exec" | "-e" | "--"))
+        {
+            return Ok(None);
+        }
+        return prepare_wsl(config, env, default_args).map(Some);
+    }
+    if shell.id == "cmd" {
         return Ok(None);
     }
 
@@ -154,7 +171,7 @@ fn prepare_known_shell(
         .tempdir()
         .context("create temporary shell integration directory")?;
     let args = match shell.id.as_str() {
-        "bash" => prepare_bash(config, directory.path())?,
+        "bash" | "git-bash" => prepare_bash(config, directory.path())?,
         "zsh" => prepare_zsh(config, directory.path(), env)?,
         "fish" => prepare_fish(config, directory.path())?,
         "nu" | "nu.exe" => prepare_nushell(config, directory.path())?,
@@ -184,12 +201,16 @@ fi"#
     };
     write_private_file(
         &init_path,
-        &format!("{profile_loader}\n{}", posix_prompt_hook()),
+        &format!(
+            "{profile_loader}\n{}\n{}",
+            posix_prompt_hook(),
+            normalize_integration_script(include_str!("shell_integration/bash.sh")),
+        ),
     )?;
     Ok(vec![
         "--noprofile".to_string(),
         "--rcfile".to_string(),
-        init_path.display().to_string(),
+        init_path.to_string_lossy().replace('\\', "/"),
         "-i".to_string(),
     ])
 }
@@ -214,7 +235,7 @@ fn prepare_zsh(
             "typeset -g __oxideterm_user_zdotdir={}\ntypeset -g __oxideterm_integration_zdotdir={}\n{}\nsetopt RCS",
             user_zdotdir,
             posix_quote(&directory.display().to_string()),
-            zsh_source_user_file(".zshenv", directory, false),
+            zsh_source_user_file(".zshenv", false),
         )
     } else {
         format!(
@@ -226,12 +247,13 @@ fn prepare_zsh(
     write_private_file(
         &directory.join(".zshrc"),
         &format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             config
                 .load_profile
-                .then(|| zsh_source_user_file(".zshrc", directory, true))
+                .then(|| zsh_source_user_file(".zshrc", true))
                 .unwrap_or_default(),
-            zsh_prompt_hook(config.load_profile)
+            zsh_prompt_hook(config.load_profile),
+            normalize_integration_script(include_str!("shell_integration/zsh.zsh")),
         ),
     )?;
     env.insert("ZDOTDIR".to_string(), directory.display().to_string());
@@ -242,7 +264,14 @@ fn prepare_zsh(
 
 fn prepare_fish(config: &LocalPtyConfig, directory: &Path) -> Result<Vec<String>> {
     let init_path = directory.join("fish.fish");
-    write_private_file(&init_path, &fish_prompt_hook())?;
+    write_private_file(
+        &init_path,
+        &format!(
+            "{}\n{}",
+            fish_prompt_hook(),
+            normalize_integration_script(include_str!("shell_integration/fish.fish"))
+        ),
+    )?;
     let mut args =
         shell_args_for_profile(&ShellInfo::new("fish", "Fish", "fish"), config.load_profile);
     args.push("--init-command".to_string());
@@ -273,7 +302,14 @@ fn prepare_nushell(config: &LocalPtyConfig, directory: &Path) -> Result<Vec<Stri
 
 fn prepare_powershell(directory: &Path, default_args: &[String]) -> Result<Vec<String>> {
     let init_path = directory.join("profile.ps1");
-    write_private_file(&init_path, &powershell_prompt_hook())?;
+    write_private_file(
+        &init_path,
+        &format!(
+            "{}\n{}",
+            powershell_prompt_hook(),
+            normalize_integration_script(include_str!("shell_integration/powershell.ps1"))
+        ),
+    )?;
     let mut args = default_args.to_vec();
     let source = format!(
         ". '{}';",
@@ -293,6 +329,80 @@ fn prepare_powershell(directory: &Path, default_args: &[String]) -> Result<Vec<S
     Ok(args)
 }
 
+fn prepare_wsl(
+    config: &LocalPtyConfig,
+    env: &mut HashMap<String, String>,
+    default_args: &[String],
+) -> Result<(Vec<String>, LocalShellIntegration)> {
+    let directory = tempfile::Builder::new()
+        .prefix("oxideterm-wsl-")
+        .tempdir()
+        .context("create temporary WSL integration directory")?;
+    let path = directory.path();
+    prepare_bash(config, path)?;
+    prepare_fish(config, path)?;
+    prepare_powershell(path, &[])?;
+    write_private_file(
+        &path.join("nushell.nu"),
+        &normalize_integration_script(include_str!("shell_integration/nushell.nu")),
+    )?;
+    write_private_file(
+        &path.join("oxideterm-free-type.vim"),
+        &normalize_integration_script(VIM_FREE_TYPE_INTEGRATION_SOURCE),
+    )?;
+    write_private_file(
+        &path.join("oxideterm-free-type.el"),
+        &normalize_integration_script(EMACS_FREE_TYPE_INTEGRATION_SOURCE),
+    )?;
+    let zshenv = if config.load_profile {
+        format!(
+            "typeset -g __oxideterm_user_zdotdir=\"$OXIDETERM_USER_ZDOTDIR\"\n\
+             typeset -g __oxideterm_integration_zdotdir=\"$ZDOTDIR\"\n\
+             unset OXIDETERM_USER_ZDOTDIR\n{}\nsetopt RCS",
+            zsh_source_user_file(".zshenv", false),
+        )
+    } else {
+        "unsetopt GLOBAL_RCS\nsetopt RCS".to_string()
+    };
+    write_private_file(&path.join(".zshenv"), &zshenv)?;
+    write_private_file(
+        &path.join(".zshrc"),
+        &format!(
+            "{}\n{}\n{}",
+            config
+                .load_profile
+                .then(|| zsh_source_user_file(".zshrc", true))
+                .unwrap_or_default(),
+            zsh_prompt_hook(config.load_profile),
+            normalize_integration_script(include_str!("shell_integration/zsh.zsh")),
+        ),
+    )?;
+    env.insert(
+        "OXIDETERM_SHELL_DIR".to_string(),
+        path.display().to_string(),
+    );
+    let wslenv = env.entry("WSLENV".to_string()).or_default();
+    if !wslenv.is_empty() {
+        wslenv.push(':');
+    }
+    wslenv.push_str("OXIDETERM_SHELL_DIR/p");
+    let mut args = default_args.to_vec();
+    args.extend([
+        "--exec".to_string(),
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        normalize_integration_script(include_str!("shell_integration/wsl.sh")).into_owned(),
+        "oxideterm".to_string(),
+        if config.load_profile { "1" } else { "0" }.to_string(),
+    ]);
+    Ok((
+        args,
+        LocalShellIntegration {
+            _directories: vec![directory],
+        },
+    ))
+}
+
 fn write_private_file(path: &Path, content: &str) -> Result<()> {
     fs::write(path, content).with_context(|| format!("write {}", path.display()))?;
     #[cfg(unix)]
@@ -304,7 +414,7 @@ fn write_private_file(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn zsh_source_user_file(name: &str, integration_directory: &Path, final_user_file: bool) -> String {
+fn zsh_source_user_file(name: &str, final_user_file: bool) -> String {
     // Global startup files may derive HISTFILE from the temporary ZDOTDIR before user files run.
     let source = format!(
         "export ZDOTDIR=\"$__oxideterm_user_zdotdir\"\nif [[ -n \"${{HISTFILE:-}}\" && \"$HISTFILE\" == \"$__oxideterm_integration_zdotdir/\"* ]]; then\n    HISTFILE=\"$ZDOTDIR/${{HISTFILE#\"$__oxideterm_integration_zdotdir\"/}}\"\nfi\nif [[ -r \"$ZDOTDIR/{name}\" ]]; then source \"$ZDOTDIR/{name}\"; fi\n__oxideterm_user_zdotdir=\"${{ZDOTDIR:-$HOME}}\""
@@ -316,23 +426,27 @@ fn zsh_source_user_file(name: &str, integration_directory: &Path, final_user_fil
         )
     } else {
         // Route the next startup stage back through the temporary integration directory.
-        format!(
-            "{source}\nexport ZDOTDIR={}",
-            posix_quote(&integration_directory.display().to_string())
-        )
+        format!("{source}\nexport ZDOTDIR=\"$__oxideterm_integration_zdotdir\"")
     }
 }
 
 fn posix_prompt_hook() -> String {
-    r#"__oxideterm_pct_path() {
+    r#"if [[ ${__oxideterm_cwd_hooks:-0} != 1 ]]; then
+__oxideterm_pct_path() {
     command printf '%s' "$1" | command od -An -tx1 -v | command tr -d ' \n' | command sed 's/../%&/g; s|%2f|/|g'
 }
 __oxideterm_emit_cwd() {
     __oxideterm_cwd=$(pwd -P 2>/dev/null || pwd 2>/dev/null) || return
     command printf '\033]7;file://%s\007' "$(__oxideterm_pct_path "$__oxideterm_cwd")"
 }
-PROMPT_COMMAND="__oxideterm_emit_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-__oxideterm_emit_cwd"#.to_string()
+if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a '* ]]; then
+    PROMPT_COMMAND=(__oxideterm_emit_cwd "${PROMPT_COMMAND[@]}")
+else
+    PROMPT_COMMAND="__oxideterm_emit_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+fi
+__oxideterm_cwd_hooks=1
+__oxideterm_emit_cwd
+fi"#.to_string()
 }
 
 fn zsh_prompt_hook(import_history: bool) -> String {
@@ -373,15 +487,7 @@ __oxideterm_emit_cwd"#
 }
 
 fn nushell_prompt_hook() -> String {
-    r#"def __oxideterm_pct_path [value: string] {
-    ^printf '%s' $value | ^od -An -tx1 -v | ^tr -d ' \n' | ^sed 's/../%&/g; s|%2f|/|g'
-}
-def __oxideterm_emit_cwd [] {
-    print --no-newline $"\u{1b}]7;file://(__oxideterm_pct_path (pwd))\u{07}"
-}
-$env.config = ($env.config | upsert hooks.pre_prompt (($env.config.hooks.pre_prompt? | default []) | append {|| __oxideterm_emit_cwd }))
-__oxideterm_emit_cwd"#
-        .to_string()
+    normalize_integration_script(include_str!("shell_integration/nushell.nu")).into_owned()
 }
 
 fn powershell_prompt_hook() -> String {
@@ -399,9 +505,11 @@ function global:__oxideterm_emit_cwd {
     [Console]::Out.Write("$([char]27)]7;$(__oxideterm_pct_path $cwd)$([char]7)")
 }
 function global:prompt {
+    $lastSucceeded = $?
     __oxideterm_emit_cwd
     if ($script:__oxideterm_original_prompt) {
-        & $script:__oxideterm_original_prompt
+        if (-not $lastSucceeded) { Write-Error 'Command failed.' -ErrorAction Ignore }
+        $script:__oxideterm_original_prompt.Invoke()
     } else {
         "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) "
     }
@@ -462,7 +570,7 @@ mod tests {
         let launch =
             prepare_local_shell_launch(&config, &shell, HashMap::new(), shell.args.clone());
         assert_eq!(
-            launch.args,
+            launch.args[..4],
             [
                 "-d",
                 "Ubuntu",
@@ -470,6 +578,49 @@ mod tests {
                 "/home/user/project with spaces;echo ignored"
             ]
         );
+    }
+
+    #[test]
+    fn local_integration_scripts_use_lf() {
+        for (shell_id, startup_name) in [
+            ("bash", "bashrc"),
+            ("zsh", ".zshrc"),
+            ("fish", "fish.fish"),
+            ("nu", "config.nu"),
+            ("pwsh", "profile.ps1"),
+            ("wsl-ubuntu", "bashrc"),
+        ] {
+            let (mut config, shell) = config_for(shell_id);
+            config.load_profile = false;
+            let launch = prepare_local_shell_launch(&config, &shell, HashMap::new(), Vec::new());
+            let integration = launch
+                .integration
+                .as_ref()
+                .expect("owned integration files");
+            let mut names = Vec::new();
+            for directory in &integration._directories {
+                for entry in fs::read_dir(directory.path()).unwrap() {
+                    let path = entry.unwrap().path();
+                    names.push(path.file_name().unwrap().to_string_lossy().into_owned());
+                    assert!(
+                        !fs::read(&path).unwrap().contains(&b'\r'),
+                        "{shell_id}: {} contains a carriage return",
+                        path.file_name().unwrap().display()
+                    );
+                }
+            }
+            assert!(
+                names.iter().any(|name| name == startup_name),
+                "{shell_id} startup file was not generated"
+            );
+            if shell_id.starts_with("wsl") {
+                let command_index = launch.args.iter().position(|arg| arg == "-c").unwrap();
+                assert!(
+                    !launch.args[command_index + 1].contains('\r'),
+                    "WSL launch command contains a carriage return"
+                );
+            }
+        }
     }
 
     #[test]
@@ -538,11 +689,11 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(&vim_path).expect("read Vim adapter"),
-            VIM_FREE_TYPE_INTEGRATION_SOURCE
+            normalize_integration_script(VIM_FREE_TYPE_INTEGRATION_SOURCE)
         );
         assert_eq!(
             fs::read_to_string(&emacs_path).expect("read Emacs adapter"),
-            EMACS_FREE_TYPE_INTEGRATION_SOURCE
+            normalize_integration_script(EMACS_FREE_TYPE_INTEGRATION_SOURCE)
         );
 
         drop(launch);

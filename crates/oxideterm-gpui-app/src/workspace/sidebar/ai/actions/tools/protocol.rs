@@ -23,6 +23,7 @@ pub(in crate::workspace) fn rejected_ai_tool_result(
         }
     });
     AiExecutedToolResult {
+        images: Vec::new(),
         tool_call_id,
         tool_name,
         success: false,
@@ -69,6 +70,7 @@ pub(in crate::workspace) fn pre_execution_rejected_ai_tool_result(
         }
     });
     AiExecutedToolResult {
+        images: Vec::new(),
         tool_call_id,
         tool_name,
         success: false,
@@ -549,6 +551,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn web_search_sources_survive_model_output_truncation() {
+        let snapshot = AiOrchestratorRuntimeSnapshot::background_result_projection();
+        let sources = serde_json::json!([
+            {"title":"Rust releases", "url":"https://blog.rust-lang.org/releases/?page=2#stable"},
+            {"title":"Rust installation", "url":"https://www.rust-lang.org/tools/install"}
+        ]);
+        let result = snapshot.to_executed_tool_result(
+            "search-1".into(),
+            "search_web".into(),
+            snapshot.ok(
+                "Web request completed.",
+                "article text ".repeat(2000),
+                serde_json::json!({"sources":sources,"truncated":false}),
+                "read",
+            ),
+            0,
+        );
+        assert_eq!(result.envelope["sources"], sources);
+        let model: serde_json::Value =
+            serde_json::from_str(&oxideterm_ai::ai_tool_result_model_content(&result)).unwrap();
+        assert_eq!(model["sources"], sources);
+        assert_eq!(model["truncated"], true);
+    }
+
+    #[test]
     fn terminal_input_state_reaches_model_without_false_secret_waits() {
         let snapshot = AiOrchestratorRuntimeSnapshot::background_result_projection();
         for (buffer, known_secret, alternate, expected_reason, expected_tui) in [
@@ -583,6 +610,7 @@ mod tests {
 
     pub(in crate::workspace) fn sample_result() -> AiExecutedToolResult {
         AiExecutedToolResult {
+            images: Vec::new(),
             tool_call_id: "tool-1".to_string(),
             tool_name: "run_command".to_string(),
             success: true,
@@ -599,6 +627,29 @@ mod tests {
                 },
             }),
         }
+    }
+
+    #[test]
+    fn tool_images_remain_attachments_when_building_model_messages() {
+        let image = oxideterm_ai::AiImageAttachment::new(
+            "screen.png".into(),
+            "image/png".into(),
+            32,
+            32,
+            b"pixel",
+            b"thumb",
+        )
+        .unwrap();
+        let mut result = sample_result();
+        result.images.push(image.clone());
+        let message = ai_tool_result_message(result);
+        assert_eq!(message.tool_call_id.as_deref(), Some("tool-1"));
+        assert_eq!(oxideterm_ai::message_images(&message), &[image]);
+        assert!(!message.content.contains("cGl4ZWw="));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&message.content).unwrap()["output"],
+            "ok"
+        );
     }
 
     pub(in crate::workspace) fn sample_target() -> AiOrchestratorTarget {

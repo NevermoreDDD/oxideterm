@@ -22,7 +22,6 @@ const AI_CONTEXT_USER_OVERRIDE_BG_ALPHA: u32 = 0x0d;
 const AI_CONTEXT_SOURCE_BADGE_TEXT_SIZE: f32 = 9.0;
 const AI_CONTEXT_SOURCE_BADGE_PX: f32 = 6.0;
 const AI_CONTEXT_SOURCE_BADGE_PY: f32 = 2.0;
-const AI_CONTEXT_RESET_SLOT_W: f32 = 16.0;
 const AI_CONTEXT_SOURCE_USER_COLOR: u32 = 0x60a5fa;
 const AI_CONTEXT_SOURCE_API_COLOR: u32 = 0x34d399;
 const AI_CONTEXT_SOURCE_NAME_COLOR: u32 = 0x22d3ee;
@@ -69,7 +68,7 @@ pub fn settings_ai_context_controls_section(
 
 pub fn settings_ai_editor_summary_section(
     tokens: &ThemeTokens,
-    title: AnyElement,
+    title: String,
     description: String,
     option_row: Option<AnyElement>,
     status: String,
@@ -82,33 +81,22 @@ pub fn settings_ai_editor_summary_section(
         .min_w(px(0.0))
         .flex()
         .flex_col()
-        .gap(px(16.0))
-        .child(title)
-        .child(
-            div()
-                .text_size(px(tokens.metrics.ui_text_xs))
-                .text_color(rgb(tokens.ui.text_muted))
-                .child(description),
-        )
+        .gap(px(tokens.metrics.settings_row_gap))
+        .child(crate::settings_row(
+            tokens,
+            div().child(title).into_any_element(),
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(description)
+                    .child(status)
+                    .into_any_element(),
+            ),
+            edit_action,
+        ))
         .children(option_row)
-        .child(
-            div()
-                .w_full()
-                .min_w(px(0.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .flex_1()
-                        .text_size(px(tokens.metrics.ui_text_xs))
-                        .text_color(rgb(tokens.ui.text_muted))
-                        .child(status),
-                )
-                .child(edit_action),
-        )
         .into_any_element()
 }
 
@@ -125,10 +113,10 @@ pub fn settings_ai_icon_heading(icon: AnyElement, title: AnyElement) -> AnyEleme
 }
 
 pub fn settings_ai_tool_use_section(
-    _max_width: f32,
     heading: AnyElement,
+    controls: AnyElement,
+    policy_heading: AnyElement,
     expand_button: AnyElement,
-    enabled_row: AnyElement,
     collapsed_summary: Option<AnyElement>,
     expanded_body: Option<AnyElement>,
 ) -> AnyElement {
@@ -140,16 +128,18 @@ pub fn settings_ai_tool_use_section(
         .flex()
         .flex_col()
         .gap(px(16.0))
+        .child(heading)
+        .child(controls)
         .child(
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
                 .gap(px(12.0))
-                .child(heading)
+                .child(policy_heading)
                 .child(expand_button),
         )
-        .child(enabled_row)
         .children(collapsed_summary)
         .children(expanded_body)
         .into_any_element()
@@ -190,29 +180,13 @@ pub fn settings_ai_context_source_row(
     div()
         .w_full()
         .min_w(px(0.0))
-        .flex()
-        .items_center()
-        .gap(px(12.0))
         .cursor_pointer()
-        .child(checkbox)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(tokens.metrics.ui_text_sm))
-                        .text_color(rgb(tokens.ui.text))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(tokens.metrics.ui_text_xs))
-                        .text_color(rgb(tokens.ui.text_muted))
-                        .child(hint),
-                ),
-        )
+        .child(crate::settings_row(
+            tokens,
+            div().child(label).into_any_element(),
+            Some(div().child(hint).into_any_element()),
+            checkbox,
+        ))
 }
 
 pub fn settings_ai_textarea_surface(
@@ -486,15 +460,11 @@ pub fn settings_ai_model_provider_header(
         .justify_between()
         .gap(px(12.0))
         .cursor_pointer()
-        .text_size(px(10.0))
-        .font_weight(gpui::FontWeight::BOLD)
+        .flex_wrap()
+        .text_size(px(tokens.metrics.ui_text_xs))
+        .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(rgb(tokens.ui.text_muted))
-        .child(
-            div()
-                .min_w(px(0.0))
-                .flex_1()
-                .child(provider_name.to_uppercase()),
-        )
+        .child(div().min_w(px(0.0)).flex_1().child(provider_name))
         .child(
             div()
                 .flex()
@@ -569,6 +539,7 @@ pub fn settings_ai_context_window_row(
         .w_full()
         .min_w(px(0.0))
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(px(8.0))
         .px(px(12.0))
@@ -586,22 +557,22 @@ pub fn settings_ai_context_window_row(
         .child(
             div()
                 .flex_1()
-                .min_w(px(0.0))
+                .min_w(px(160.0))
+                .flex_basis(px(160.0))
                 .text_size(px(tokens.metrics.ui_text_xs))
                 .font_family(mono_font_family)
                 .text_color(rgb(tokens.ui.text_muted))
                 .truncate()
                 .child(model),
         )
-        .child(div().flex_none().child(source_badge))
-        .child(div().flex_none().child(input))
         .child(
             div()
-                .w(px(AI_CONTEXT_RESET_SLOT_W))
-                .flex_none()
                 .flex()
+                .flex_wrap()
                 .items_center()
-                .justify_center()
+                .gap(px(8.0))
+                .child(div().flex_none().child(source_badge))
+                .child(div().flex_none().child(input))
                 .children(reset),
         )
         .into_any_element()
@@ -663,12 +634,9 @@ fn settings_ai_context_source_badge_colors(
 }
 
 pub fn settings_ai_tool_collapsed_summary(tokens: &ThemeTokens, summary: String) -> AnyElement {
-    // Collapsed policy copy mirrors Tauri's left-rule nested summary.
     div()
-        .ml(px(16.0))
-        .pl(px(16.0))
-        .border_l_1()
-        .border_color(rgba((tokens.ui.border << 8) | 0x4d))
+        .w_full()
+        .min_w_0()
         .text_size(px(tokens.metrics.ui_text_xs))
         .text_color(rgb(tokens.ui.text_muted))
         .child(summary)
@@ -680,16 +648,13 @@ pub fn settings_ai_tool_expanded_body(
     enabled: bool,
     children: Vec<AnyElement>,
 ) -> AnyElement {
-    // Expanded policy content is visually nested under the enable switch. The
-    // disabled opacity is display-only; app state still controls interaction.
+    // The disabled opacity is display-only; app state still controls interaction.
     div()
-        .ml(px(16.0))
-        .pl(px(16.0))
-        .border_l_1()
-        .border_color(rgba((tokens.ui.border << 8) | 0x4d))
+        .w_full()
+        .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(20.0))
+        .gap(px(tokens.metrics.settings_card_gap))
         .opacity(if enabled { 1.0 } else { 0.4 })
         .children(children)
         .into_any_element()
@@ -786,6 +751,8 @@ pub fn settings_ai_tool_policy_group(
 pub fn settings_ai_disabled_tools_notice(
     tokens: &ThemeTokens,
     label: String,
+    description: String,
+    tools: AnyElement,
     action: AnyElement,
 ) -> AnyElement {
     // The restore action is caller-provided so the app can clear disabled tools
@@ -796,17 +763,34 @@ pub fn settings_ai_disabled_tools_notice(
         .border_color(rgba((tokens.ui.warning << 8) | 0x33))
         .bg(rgba((tokens.ui.warning << 8) | 0x1a))
         .p(px(12.0))
+        .w_full()
+        .min_w_0()
         .flex()
-        .items_center()
-        .justify_between()
+        .flex_col()
         .gap(px(12.0))
         .child(
             div()
-                .text_size(px(tokens.metrics.ui_text_xs))
-                .text_color(rgb(tokens.ui.warning))
-                .child(label),
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .text_size(px(tokens.metrics.ui_text_sm))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(rgb(tokens.ui.warning))
+                        .child(label),
+                )
+                .child(action),
         )
-        .child(action)
+        .child(
+            div()
+                .text_size(px(tokens.metrics.ui_text_xs))
+                .text_color(rgb(tokens.ui.text_muted))
+                .child(description),
+        )
+        .child(tools)
         .into_any_element()
 }
 
@@ -824,4 +808,66 @@ pub fn settings_ai_policy_warning(tokens: &ThemeTokens, label: String) -> AnyEle
         .text_color(rgb(tokens.ui.warning))
         .child(label)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn context_capacity_controls_wrap_without_clipping(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        let tokens = oxideterm_theme::default_tokens();
+        for width in [720.0, 360.0] {
+            window.draw(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(width), px(180.0)),
+                |_, _| {
+                    let control = |width, color| {
+                        div()
+                            .w(px(width))
+                            .h(px(28.0))
+                            .flex_none()
+                            .bg(rgb(color))
+                            .into_any_element()
+                    };
+                    settings_ai_context_window_row(
+                        &tokens,
+                        "monospace".into(),
+                        "long-provider-model-name".into(),
+                        control(80.0, 0xff0000),
+                        control(112.0, 0x00ff00),
+                        Some(control(180.0, 0x0000ff)),
+                        true,
+                        true,
+                    )
+                },
+            );
+            window.update(|window, _| {
+                let scale = window.scale_factor();
+                let quads = window.painted_quads();
+                let bounds = |color| {
+                    quads
+                        .iter()
+                        .find(|quad| quad.background == rgb(color).into())
+                        .unwrap()
+                        .bounds
+                };
+                let input = bounds(0x00ff00);
+                let reset = bounds(0x0000ff);
+                assert_eq!(input.size.width.0 / scale, 112.0);
+                assert_eq!(reset.size.width.0 / scale, 180.0);
+                for color in [0xff0000, 0x00ff00, 0x0000ff] {
+                    let control = bounds(color);
+                    assert!(control.left().0 / scale >= 12.0);
+                    assert!(control.right().0 / scale <= width - 12.0);
+                }
+                if width < 400.0 {
+                    assert!(reset.top() >= input.bottom());
+                } else {
+                    assert_eq!(reset.top(), input.top());
+                }
+            });
+        }
+    }
 }

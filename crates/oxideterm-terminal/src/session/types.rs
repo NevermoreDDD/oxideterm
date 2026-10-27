@@ -81,6 +81,12 @@ pub struct SerialRuntimeOptions {
     pub local_echo: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TelnetLineEndings {
+    pub input: SerialLineEnding,
+    pub output: SerialLineEnding,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalResize {
     pub cols: usize,
@@ -116,6 +122,9 @@ pub trait TerminalSessionBackend: Send {
         self.lifecycle().is_running()
     }
     fn process_info(&self) -> TerminalProcessInfo;
+    fn launch_shell(&self) -> Option<crate::ShellInfo> {
+        None
+    }
     fn process_info_probe(&self) -> Option<TerminalProcessProbe> {
         None
     }
@@ -136,6 +145,12 @@ pub trait TerminalSessionBackend: Send {
     }
     fn activity_receiver(&self) -> TerminalActivityReceiver;
     fn take_events(&mut self) -> Vec<TerminalEvent>;
+    fn shell_channel_owned(&self) -> bool {
+        false
+    }
+    fn acquire_shell_channel(&mut self) -> Result<crate::ShellChannelAcquisition> {
+        bail!("Shell IDE requires an SSH terminal")
+    }
     fn write_input(&mut self, bytes: &[u8]) -> Result<()>;
     fn reconnect_ssh(&mut self, _config: SshSessionConfig) -> Result<()> {
         bail!("Only SSH terminals support this reconnect operation")
@@ -174,6 +189,12 @@ pub trait TerminalSessionBackend: Send {
     }
     fn send_telnet_control(&mut self, _command: TelnetControlCommand) -> Result<()> {
         bail!("Telnet controls are only supported by Telnet sessions")
+    }
+    fn telnet_line_endings(&self) -> Option<TelnetLineEndings> {
+        None
+    }
+    fn set_telnet_line_endings(&mut self, _options: TelnetLineEndings) -> Result<()> {
+        bail!("Telnet line endings are only supported by Telnet sessions")
     }
     fn mosh_connection_status(&self) -> Option<MoshConnectionStatus> {
         None

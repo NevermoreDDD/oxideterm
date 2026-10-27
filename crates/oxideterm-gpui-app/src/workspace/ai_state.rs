@@ -48,6 +48,7 @@ impl Drop for AiPendingCursorRequest {
 /// Pending input is owned by this workspace and is never replayed from chat persistence.
 pub(in crate::workspace) struct AiQueuedChatTurn {
     pub id: String,
+    pub images: Vec<oxideterm_ai::AiImageAttachment>,
     pub content: zeroize::Zeroizing<String>,
     pub context: Option<zeroize::Zeroizing<String>>,
     pub config: oxideterm_ai::AiChatStreamConfig,
@@ -55,6 +56,15 @@ pub(in crate::workspace) struct AiQueuedChatTurn {
     pub task_system_prompt: Option<zeroize::Zeroizing<String>>,
     pub participant: Option<String>,
     pub skill: Option<(String, String)>,
+}
+
+pub(in crate::workspace) struct AiPendingChatStream {
+    pub(in crate::workspace) launch_id: Option<String>,
+    pub(in crate::workspace) conversation_id: String,
+    pub(in crate::workspace) config: oxideterm_ai::AiChatStreamConfig,
+    pub(in crate::workspace) request_content: Option<String>,
+    pub(in crate::workspace) task_system_prompt: Option<String>,
+    pub(in crate::workspace) rag_system_prompt: Option<String>,
 }
 
 pub(in crate::workspace) enum AiWorkspaceEvent {
@@ -160,7 +170,9 @@ pub(in crate::workspace) enum AiModelRefreshIntent {
     MissingApiKey {
         provider_id: String,
     },
-    Failed,
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -204,7 +216,14 @@ enum AiProviderKeyOperation {
 
 enum AiModelRefreshFailure {
     MissingApiKey,
-    Failed,
+    Failed(String),
+}
+
+fn model_refresh_failure_message(error: &anyhow::Error) -> String {
+    // Preserve the proxy/TLS/HTTP classification while keeping the toast
+    // bounded and single-line. Reqwest errors already drop the request URL.
+    let message = format!("{error:#}").replace(['\r', '\n'], " ");
+    message.chars().take(400).collect()
 }
 
 struct AiModelRefreshWorkerDelivery {
@@ -284,7 +303,7 @@ impl Default for AiSettingsViewState {
             new_provider_type,
             provider_settings_expanded: true,
             tool_use_expanded: true,
-            context_windows_expanded: true,
+            context_windows_expanded: false,
             expanded_providers: std::collections::BTreeMap::new(),
             expanded_provider_models: std::collections::BTreeSet::new(),
             expanded_context_providers: std::collections::BTreeSet::new(),
@@ -382,6 +401,8 @@ pub(in crate::workspace) struct AiWorkspaceEntity {
     pub(in crate::workspace) queued_chat_turns: HashMap<String, VecDeque<AiQueuedChatTurn>>,
     pub(in crate::workspace) chat_launches: HashMap<String, String>,
     chat_drafts: HashMap<String, zeroize::Zeroizing<String>>,
+    chat_image_drafts: HashMap<String, Vec<oxideterm_ai::AiImageAttachment>>,
+    pub(in crate::workspace) pending_image_requests: HashMap<String, AiPendingChatStream>,
     pub(in crate::workspace) pending_user_questions: HashMap<(u64, String), AiPendingUserQuestion>,
     pub(in crate::workspace) pending_cursor_requests:
         HashMap<(u64, String), AiPendingCursorRequest>,
@@ -429,6 +450,37 @@ impl AiWorkspaceEntity {
     /// Returns chat presentation state from its sole owner.
     pub(in crate::workspace) fn chat_ui(&self) -> &AiChatWorkspaceState {
         &self.chat_ui
+    }
+
+    pub(in crate::workspace) fn chat_images_mut(
+        &mut self,
+    ) -> &mut Vec<oxideterm_ai::AiImageAttachment> {
+        &mut self.chat_ui.images
+    }
+
+    pub(in crate::workspace) fn set_chat_image_import(&mut self, task: Option<Task<()>>) {
+        self.chat_ui.image_import = task;
+    }
+
+    pub(in crate::workspace) fn set_chat_image_preview(
+        &mut self,
+        image: Option<(String, Arc<gpui::Image>)>,
+    ) {
+        if image.is_none() {
+            self.chat_ui.image_preview_task = None;
+        }
+        self.chat_ui.image_preview = image;
+        self.chat_ui
+            .message_signature_cache
+            .borrow_mut()
+            .invalidate_all();
+        self.chat_ui
+            .message_list_state
+            .remeasure_items(0..self.chat_ui.message_list_state.item_count());
+    }
+
+    pub(in crate::workspace) fn set_chat_image_preview_task(&mut self, task: Task<()>) {
+        self.chat_ui.image_preview_task = Some(task);
     }
 
     pub(in crate::workspace) fn sidebar_keyboard_target_focused(&self) -> bool {
@@ -657,6 +709,9 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn reset_chat_for_conversation_selection(&mut self) {
+        self.chat_ui.image_import = None;
+        self.chat_ui.image_preview = None;
+        self.chat_ui.image_preview_task = None;
         self.chat_ui.conversation_list_open = false;
         self.chat_ui.menu_open = false;
         self.chat_ui.safety_menu_open = false;
@@ -677,6 +732,10 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn reset_chat_for_new_conversation(&mut self) {
+        self.chat_ui.images.clear();
+        self.chat_ui.image_import = None;
+        self.chat_ui.image_preview = None;
+        self.chat_ui.image_preview_task = None;
         self.chat_ui.conversation_list_open = false;
         self.chat_ui.menu_open = false;
         self.clear_conversation_rename();
@@ -729,6 +788,9 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn clear_chat_input_after_submit(&mut self) {
+        self.chat_ui.images.clear();
+        self.chat_ui.image_import = None;
+        self.chat_ui.image_preview = None;
         self.chat_ui.draft.clear();
         self.chat_ui.autocomplete_index = 0;
         self.chat_ui.autocomplete_suppressed = false;
@@ -1174,6 +1236,8 @@ impl AiWorkspaceEntity {
             queued_chat_turns: HashMap::new(),
             chat_launches: HashMap::new(),
             chat_drafts: HashMap::new(),
+            chat_image_drafts: HashMap::new(),
+            pending_image_requests: HashMap::new(),
             pending_user_questions: HashMap::new(),
             pending_cursor_requests: HashMap::new(),
             pending_tool_approvals: HashMap::new(),
@@ -1788,6 +1852,7 @@ impl AiWorkspaceEntity {
                 .map(|draft| draft.to_string())
                 .unwrap_or_default();
             self.set_chat_draft(draft);
+            self.chat_ui.images = self.chat_image_drafts.remove(&id).unwrap_or_default();
         }
         self.close_agent_detail();
         self.history.archives.clear();
@@ -1838,6 +1903,8 @@ impl AiWorkspaceEntity {
         self.queued_chat_turns.remove(id);
         self.chat_launches.remove(id);
         self.chat_drafts.remove(id);
+        self.chat_image_drafts.remove(id);
+        self.pending_image_requests.remove(id);
         self.agents.services.runtime.remove_conversation(id);
         let removed: HashSet<_> = self
             .agents
@@ -1883,6 +1950,12 @@ impl AiWorkspaceEntity {
                 .map(|draft| draft.to_string())
                 .unwrap_or_default();
             self.set_chat_draft(draft);
+            self.chat_ui.images = self
+                .conversation_state
+                .active_conversation_id
+                .as_ref()
+                .and_then(|id| self.chat_image_drafts.remove(id))
+                .unwrap_or_default();
         }
         self.safety_modes_by_conversation.remove(id);
         if self.chat_ui.renaming_conversation_id.as_deref() == Some(id) {
@@ -2086,12 +2159,25 @@ impl AiWorkspaceEntity {
                             });
                             return;
                         }
-                        Ok(Err(_)) | Err(_) => {
+                        Ok(Err(error)) => {
                             let _ = worker_tx.send(AiModelRefreshWorkerDelivery {
                                 index,
                                 provider_id,
                                 generation,
-                                result: Err(AiModelRefreshFailure::Failed),
+                                result: Err(AiModelRefreshFailure::Failed(format!(
+                                    "could not read the saved API key: {error}"
+                                ))),
+                            });
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = worker_tx.send(AiModelRefreshWorkerDelivery {
+                                index,
+                                provider_id,
+                                generation,
+                                result: Err(AiModelRefreshFailure::Failed(format!(
+                                    "could not read the saved API key: {error}"
+                                ))),
                             });
                             return;
                         }
@@ -2100,7 +2186,9 @@ impl AiWorkspaceEntity {
             };
             let result = oxideterm_ai::fetch_provider_models(provider, api_key)
                 .await
-                .map_err(|_| AiModelRefreshFailure::Failed);
+                .map_err(|error| {
+                    AiModelRefreshFailure::Failed(model_refresh_failure_message(&error))
+                });
             let _ = worker_tx.send(AiModelRefreshWorkerDelivery {
                 index,
                 provider_id,
@@ -3557,6 +3645,8 @@ impl AiWorkspaceEntity {
 
     pub(in crate::workspace) fn stash_active_chat_draft(&mut self) {
         if let Some(id) = self.conversation_state.active_conversation_id.clone() {
+            self.chat_image_drafts
+                .insert(id.clone(), std::mem::take(&mut self.chat_ui.images));
             self.chat_drafts.insert(
                 id,
                 zeroize::Zeroizing::new(std::mem::take(&mut self.chat_ui.draft)),
@@ -3657,6 +3747,7 @@ impl AiWorkspaceEntity {
     }
 
     pub(in crate::workspace) fn cancel_chat_stream_for(&mut self, conversation_id: &str) {
+        self.pending_image_requests.remove(conversation_id);
         self.finish_compaction(conversation_id);
         self.history.compaction_loads.remove(conversation_id);
         self.history.compaction_sources.remove(conversation_id);
@@ -4332,7 +4423,9 @@ impl AiWorkspaceEntity {
                 Err(AiModelRefreshFailure::MissingApiKey) => AiModelRefreshIntent::MissingApiKey {
                     provider_id: delivery.provider_id,
                 },
-                Err(AiModelRefreshFailure::Failed) => AiModelRefreshIntent::Failed,
+                Err(AiModelRefreshFailure::Failed(message)) => {
+                    AiModelRefreshIntent::Failed { message }
+                }
             };
             self.model_refresh_intents.push_back(intent);
         }
@@ -4992,6 +5085,11 @@ pub(super) struct AiChatWorkspaceState {
     pub(super) summarize_confirm_open: bool,
     pub(super) summarize_confirm_presence: oxideterm_gpui_ui::motion::ExitPresence,
     pub(super) draft: String,
+    pub(super) images: Vec<oxideterm_ai::AiImageAttachment>,
+    pub(super) image_import: Option<Task<()>>,
+    pub(super) image_preview: Option<(String, Arc<gpui::Image>)>,
+    pub(super) image_preview_task: Option<Task<()>>,
+    pub(super) image_thumbnails: RefCell<HashMap<String, Arc<gpui::Image>>>,
     pub(super) input_focused: bool,
     pub(super) footer_focus: Option<AiChatFooterAction>,
     pub(super) renaming_conversation_id: Option<String>,
@@ -5061,6 +5159,11 @@ impl AiChatWorkspaceState {
             summarize_confirm_open: false,
             summarize_confirm_presence: oxideterm_gpui_ui::motion::ExitPresence::visible(),
             draft: String::new(),
+            images: Vec::new(),
+            image_import: None,
+            image_preview: None,
+            image_preview_task: None,
+            image_thumbnails: RefCell::new(HashMap::new()),
             input_focused: false,
             footer_focus: None,
             renaming_conversation_id: None,
@@ -5206,11 +5309,14 @@ pub(in crate::workspace) mod entity_tests {
 
     pub(in crate::workspace) fn queued_turn(id: &str) -> AiQueuedChatTurn {
         AiQueuedChatTurn {
+            images: Vec::new(),
             id: id.into(),
             content: zeroize::Zeroizing::new(id.into()),
             context: None,
             config: oxideterm_ai::AiChatStreamConfig {
                 api_protocol: oxideterm_ai::AiApiProtocol::default(),
+                image_input: Default::default(),
+                omit_history_images: false,
                 execution_backend: Default::default(),
                 provider_id: Some("provider".into()),
                 acp_agent_id: None,
@@ -5493,13 +5599,26 @@ pub(in crate::workspace) mod entity_tests {
             ai.conversation_state
                 .create_conversation("b".into(), None, 2, None);
             ai.set_chat_draft("draft-b".into());
+            let image = oxideterm_ai::AiImageAttachment::new(
+                "screen.png".into(),
+                "image/png".into(),
+                200,
+                100,
+                b"pixel",
+                b"thumb",
+            )
+            .unwrap();
+            ai.chat_images_mut().push(image.clone());
             ai.select_conversation("a".into());
             assert!(ai.chat_ui.draft.is_empty());
+            assert!(ai.chat_ui.images.is_empty());
             ai.set_chat_draft("draft-a".into());
             ai.select_conversation("b".into());
             assert_eq!(ai.chat_ui.draft, "draft-b");
+            assert_eq!(ai.chat_ui.images, vec![image]);
             ai.select_conversation("a".into());
             assert_eq!(ai.chat_ui.draft, "draft-a");
+            assert!(ai.chat_ui.images.is_empty());
         });
     }
 
@@ -7183,5 +7302,42 @@ pub(in crate::workspace) mod entity_tests {
         assert!(terminal_inline_wake.is_stopped());
         assert!(chat_stream_wake.is_stopped());
         assert!(compaction_wake.is_stopped());
+    }
+}
+
+#[cfg(test)]
+mod refresh_failure_message_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_cause_chain_on_one_bounded_line() {
+        let error = anyhow::Error::new(std::io::Error::other("certificate verify failed"))
+            .context("model refresh request failed");
+        let message = model_refresh_failure_message(&error);
+        assert!(
+            message.contains("model refresh request failed"),
+            "{message}"
+        );
+        assert!(message.contains("certificate verify failed"), "{message}");
+        assert!(
+            !message.contains('\n') && !message.contains('\r'),
+            "{message}"
+        );
+
+        let truncated = model_refresh_failure_message(&anyhow::Error::new(std::io::Error::other(
+            "x".repeat(500),
+        )));
+        assert_eq!(truncated.chars().count(), 400);
+    }
+
+    #[test]
+    fn flattens_newlines_inside_the_cause() {
+        let error = anyhow::Error::new(std::io::Error::other("line one\nline two\r\nline three"));
+        let message = model_refresh_failure_message(&error);
+        assert!(
+            !message.contains('\n') && !message.contains('\r'),
+            "{message}"
+        );
+        assert_eq!(message.matches("line").count(), 3, "{message}");
     }
 }

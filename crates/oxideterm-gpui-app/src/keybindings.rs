@@ -542,6 +542,12 @@ pub(crate) static ACTION_DEFINITIONS: LazyLock<Vec<ActionDefinition>> = LazyLock
             KeyCombo::ctrl("l"),
         ),
         def(
+            "sftp.revealTerminalDirectory",
+            ActionScope::Sftp,
+            KeyCombo::cmd_shift("g"),
+            KeyCombo::ctrl_shift("g"),
+        ),
+        def(
             "sftp.open",
             ActionScope::Sftp,
             KeyCombo::plain("enter"),
@@ -1878,6 +1884,55 @@ mod tests {
     fn sftp_keybindings_customization_releases_defaults_and_imports_tombstones() {
         let side = KeybindingSide::current();
         let mut overrides = Map::new();
+        let locate = action_definition("sftp.revealTerminalDirectory").unwrap();
+        // This action is used beside terminals, so its default must be distinct across scopes.
+        for side in [KeybindingSide::Mac, KeybindingSide::Other] {
+            let duplicates = ACTION_DEFINITIONS
+                .iter()
+                .filter(|definition| definition.id != locate.id)
+                .filter(|definition| {
+                    effective_combos(definition, &overrides, side)
+                        .contains(locate.default_combo(side))
+                })
+                .map(|definition| definition.id.as_ref())
+                .collect::<Vec<_>>();
+            assert_eq!(duplicates, Vec::<&str>::new(), "{side:?}");
+        }
+        let locate_default = if cfg!(target_os = "macos") {
+            "cmd-shift-g"
+        } else {
+            "ctrl-shift-g"
+        };
+        assert_eq!(
+            matched_scoped_action(
+                &Keystroke::parse(locate_default).unwrap(),
+                ActionScope::Sftp,
+                &overrides,
+            ),
+            Some("sftp.revealTerminalDirectory")
+        );
+        set_override(
+            &mut overrides,
+            "sftp.revealTerminalDirectory",
+            side,
+            KeyCombo::ctrl("f10"),
+        );
+        assert_eq!(
+            matched_scoped_action(
+                &Keystroke::parse(locate_default).unwrap(),
+                ActionScope::Sftp,
+                &overrides,
+            ),
+            None
+        );
+        assert_eq!(
+            matched_scoped_action(
+                &Keystroke::parse("ctrl-f10").unwrap(),
+                ActionScope::Sftp,
+                &overrides,
+            ),
+            Some("sftp.revealTerminalDirectory")
+        );
         assert!(keystroke_matches_action(
             &Keystroke::parse("backspace").unwrap(),
             "sftp.delete",
@@ -2038,6 +2093,19 @@ mod tests {
 }
 
 pub(crate) fn install_context_keybindings(overrides: &Map<String, Value>, cx: &mut gpui::App) {
+    // Native bindings dispatch before text key handlers. Modal controls must
+    // receive the chord themselves instead of invoking a background action.
+    cx.bind_keys(ACTION_DEFINITIONS.iter().flat_map(|definition| {
+        effective_combos(definition, overrides, KeybindingSide::current())
+            .into_iter()
+            .map(|combo| {
+                KeyBinding::new(
+                    &combo_to_gpui(&combo),
+                    NoAction {},
+                    Some(oxideterm_gpui_ui::modal::MODAL_KEY_CONTEXT),
+                )
+            })
+    }));
     use oxideterm_gpui_editor::{EditorKeybindings, EditorShortcut};
     let mut bindings = Vec::new();
     let mut editor_context = Vec::new();

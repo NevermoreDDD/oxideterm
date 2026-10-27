@@ -1,5 +1,6 @@
 {
   "ide": {
+    "file_binary": "This is a binary file and cannot be opened in the text editor.",
     "file_too_large": "The file exceeds the 100 MiB IDE editing limit.",
     "file_encoding": "File encoding",
     "file_line_ending": "Line endings",
@@ -43,6 +44,7 @@
     "search_truncated": "Results truncated. Refine your search for more specific matches.",
     "search_results_count": "{{count}} results in {{files}} files",
     "find_placeholder": "Find",
+    "insert_newline": "Insert newline",
     "replace_placeholder": "Replace",
     "find_next": "Next match (Enter)",
     "find_previous": "Previous match (Shift+Enter)",

@@ -16,6 +16,7 @@ crossbeam-channel.workspace = true
 fernomade-predict = { path = "../fernomade/predict" }
 libc.workspace = true
 memchr.workspace = true
+regex.workspace = true
 oxideterm-ssh = { path = "../oxideterm-ssh" }
 oxideterm-modem-transfer = { path = "../oxideterm-modem-transfer" }
 oxideterm-mosh = { path = "../oxideterm-mosh" }
@@ -26,6 +27,7 @@ oxideterm-terminal-model = { path = "../oxideterm-terminal-model" }
 oxideterm-terminal-triggers = { path = "../oxideterm-terminal-triggers" }
 oxideterm-tmux = { path = "../oxideterm-tmux" }
 oxideterm-trzsz = { path = "../oxideterm-trzsz" }
+parking_lot.workspace = true
 polling.workspace = true
 serialport.workspace = true
 serde.workspace = true
@@ -34,6 +36,7 @@ tracing.workspace = true
 tempfile = "3.23"
 unicode-segmentation.workspace = true
 zeroize.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
@@ -49,4 +52,8 @@ harness = false
 
 [[bench]]
 name = "privilege_prompt_stream"
+harness = false
+
+[[bench]]
+name = "history_search"
 harness = false

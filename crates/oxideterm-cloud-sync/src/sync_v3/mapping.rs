@@ -85,6 +85,16 @@ impl ConfigurationView {
         for record in snapshot.local_terminal_profiles {
             self.insert(ResourceKind::LocalTerminal, &record.id, &record)?;
         }
+        for record in snapshot.plugin_profiles {
+            self.insert(
+                ResourceKind::PluginConnection,
+                &record.id,
+                &record.portable(),
+            )?;
+        }
+        for record in snapshot.plugin_tombstones {
+            self.mark_deleted(ResourceKind::PluginConnection, &record.id)?;
+        }
         for record in snapshot.local_terminal_tombstones {
             self.mark_deleted(ResourceKind::LocalTerminal, &record.id)?;
         }
@@ -189,6 +199,13 @@ impl ConfigurationView {
         }
         for record in saved.local_terminal_profiles {
             view.insert(ResourceKind::LocalTerminal, &record.id, &record)?;
+        }
+        for record in saved.plugin_profiles {
+            view.insert(
+                ResourceKind::PluginConnection,
+                &record.id,
+                &record.portable(),
+            )?;
         }
         for record in saved.totp_credentials {
             view.insert(ResourceKind::Totp, &record.id, &record.portable())?;
@@ -304,7 +321,9 @@ impl ConfigurationView {
                     ids.as_ref().is_none_or(|ids| ids.contains(&resource.id))
                 };
                 match resource.kind {
-                    ResourceKind::Connection | ResourceKind::LocalTerminal => {
+                    ResourceKind::Connection
+                    | ResourceKind::LocalTerminal
+                    | ResourceKind::PluginConnection => {
                         scope.sync_connections && within(&filter.connection_ids)
                     }
                     ResourceKind::StandaloneSftp | ResourceKind::Ftp => scope.sync_connections,
@@ -383,7 +402,8 @@ impl ConfigurationView {
                 match field.resource.kind {
                     ResourceKind::Connection
                     | ResourceKind::Mosh
-                    | ResourceKind::StandaloneSftp => {
+                    | ResourceKind::StandaloneSftp
+                    | ResourceKind::PrivilegeCredential => {
                         collect_totp_references(&value.0, &mut dependencies);
                     }
                     ResourceKind::QuickCommand => {
@@ -467,6 +487,8 @@ impl ConfigurationView {
         }
         Ok(ResolvedConnectionConfiguration {
             connections: SavedConnectionsSyncSnapshot {
+                plugin_profiles: self.records(ResourceKind::PluginConnection, values)?,
+                plugin_tombstones: Vec::new(),
                 revision: "sync-v3".into(),
                 exported_at: now,
                 records,
@@ -721,7 +743,7 @@ fn credential_selected(id: &str, scope: &SyncScope, filter: &StructuredUploadIte
     let within =
         |id: &str, ids: &Option<BTreeSet<String>>| ids.as_ref().is_none_or(|ids| ids.contains(id));
     match target.owner {
-        CredentialOwner::Connection(id) => {
+        CredentialOwner::Connection(id) | CredentialOwner::PluginConnection(id) => {
             scope.sync_connections && within(&id, &filter.connection_ids)
         }
         CredentialOwner::StandaloneSftp(_) | CredentialOwner::Ftp(_) => scope.sync_connections,
@@ -971,6 +993,71 @@ mod tests {
                 &filter
             ),
             BTreeSet::new()
+        );
+    }
+
+    #[test]
+    fn ssh_common_privilege_sync_stays_out_of_partial_or_nonsecret_selections() {
+        let mut view = ConfigurationView::empty();
+        let common = SyncResource {
+            kind: ResourceKind::PrivilegeCredential,
+            id: serde_json::to_string(&(
+                oxideterm_connections::SSH_COMMON_PRIVILEGE_SCOPE_ID,
+                "common",
+            ))
+            .unwrap(),
+        };
+        let specific = SyncResource {
+            kind: ResourceKind::PrivilegeCredential,
+            id: serde_json::to_string(&("conn-1", "specific")).unwrap(),
+        };
+        for resource in [&common, &specific] {
+            view.insert_secret(
+                resource.kind,
+                &resource.id,
+                &serde_json::json!({"label": "Synthetic credential"}),
+            )
+            .unwrap();
+        }
+        let mut scope = SyncScope {
+            sync_connections: true,
+            sync_sensitive_credentials: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            view.selected(
+                std::iter::empty(),
+                &scope,
+                &StructuredUploadItemFilter::default()
+            ),
+            [common.clone(), specific.clone()].into_iter().collect()
+        );
+        let partial = StructuredUploadItemFilter {
+            connection_ids: Some(["conn-1".to_string()].into_iter().collect()),
+            ..Default::default()
+        };
+        assert_eq!(
+            view.selected(std::iter::empty(), &scope, &partial),
+            [specific].into_iter().collect()
+        );
+        scope.sync_sensitive_credentials = false;
+        assert!(
+            view.selected(
+                std::iter::empty(),
+                &scope,
+                &StructuredUploadItemFilter::default()
+            )
+            .is_empty()
+        );
+        scope.sync_sensitive_credentials = true;
+        scope.sync_connections = false;
+        assert!(
+            view.selected(
+                std::iter::empty(),
+                &scope,
+                &StructuredUploadItemFilter::default()
+            )
+            .is_empty()
         );
     }
 }

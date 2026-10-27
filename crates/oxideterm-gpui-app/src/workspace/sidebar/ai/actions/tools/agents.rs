@@ -84,6 +84,7 @@ fn agent_tool_result(call: &AiToolCall, value: serde_json::Value) -> AiExecutedT
     let value = oxideterm_ai::sanitize_tool_protocol_json_for_persistence(&value);
     let output = value.to_string();
     AiExecutedToolResult {
+        images: Vec::new(),
         tool_call_id: call.id.clone(),
         tool_name: call.name.clone(),
         success: true,
@@ -393,7 +394,7 @@ impl WorkspaceApp {
                 .map(|tool| tool.name.clone())
                 .collect(),
         );
-        let options = self.ai_entity.read(cx).agent_options(conversation_id);
+        let options = self.global_agent_options();
         if config.tool_policy.enabled {
             config.tools.extend(oxideterm_ai::agent::agent_tool_definitions(false).into_iter()
                 .filter(|tool| (options.enabled || tool.name == "ask_user")
@@ -439,7 +440,6 @@ impl WorkspaceApp {
     fn handle_ai_agent_command(
         &mut self,
         generation: u64,
-        conversation_id: &str,
         session: &ToolSessionId,
         call: AiToolCall,
         sender: tokio::sync::oneshot::Sender<AiExecutedToolResult>,
@@ -448,7 +448,7 @@ impl WorkspaceApp {
         if sender.is_closed() || !self.ai_entity.read(cx).run_accepts_tools(generation) {
             return;
         }
-        let result = self.apply_ai_agent_command(generation, conversation_id, session, &call, cx);
+        let result = self.apply_ai_agent_command(generation, session, &call, cx);
         let result = match result {
             Ok(value) => agent_tool_result(&call, value),
             Err(error) => rejected_ai_tool_result(
@@ -464,7 +464,6 @@ impl WorkspaceApp {
     fn apply_ai_agent_command(
         &mut self,
         generation: u64,
-        conversation_id: &str,
         session: &ToolSessionId,
         call: &AiToolCall,
         cx: &mut Context<Self>,
@@ -489,13 +488,8 @@ impl WorkspaceApp {
                 .ok_or_else(|| format!("Invalid {key}"))
         };
         if call.name == "delegate_task" {
-            if !self
-                .ai_entity
-                .read(cx)
-                .agent_options(conversation_id)
-                .enabled
-            {
-                return Err("Subagents are disabled for this conversation".into());
+            if !self.global_agent_options().enabled {
+                return Err("Subagents are disabled in global settings".into());
             }
             let title = AgentText::new(&text("title", 640)?);
             let task = AgentText::new(&text("task", 65536)?);
@@ -538,6 +532,8 @@ impl WorkspaceApp {
                 matches!(
                     name.as_str(),
                     "list_targets"
+                        | "search_web"
+                        | "read_web_page"
                         | "select_target"
                         | "get_state"
                         | "run_command"
@@ -557,11 +553,7 @@ impl WorkspaceApp {
                         | "manage_forward"
                 )
             });
-            let model = self
-                .ai_entity
-                .read(cx)
-                .agent_options(conversation_id)
-                .default_model;
+            let model = self.global_agent_options().default_model;
             let parent_targets = self
                 .ai_runtime_context
                 .read(cx)

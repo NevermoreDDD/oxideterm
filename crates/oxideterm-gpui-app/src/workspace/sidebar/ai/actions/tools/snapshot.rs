@@ -1652,6 +1652,10 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) {
         let conversation_id = owner.conversation_id.clone();
+        if oxideterm_ai::web::is_web_tool(&tool_name) {
+            self.start_ai_web_execution(owner, tool_call_id, tool_name, args, sender, cx);
+            return;
+        }
         let args = match self.prepare_ai_runtime_authority(&tool_session_id, &tool_name, args, cx) {
             Ok(args) => args,
             Err(error) => {
@@ -3029,6 +3033,7 @@ impl WorkspaceApp {
                     tool_call_id,
                     tool_name,
                     AiActionResultLite {
+                        images: Vec::new(),
                         ok: !output_empty,
                         summary: "Terminal command did not produce completed output.".to_string(),
                         output: if output_empty {
@@ -3729,7 +3734,7 @@ impl WorkspaceApp {
                             "reason": "Find a connected IDE or SSH target before opening IDE."
                         })]);
                 };
-                self.open_ide_folder_picker_tab(node_id, cx);
+                self.open_ide_folder_picker_tab(node_id, window, cx);
                 snapshot
                     .ok(
                         "Opened ide.",

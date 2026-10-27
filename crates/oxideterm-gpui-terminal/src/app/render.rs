@@ -275,9 +275,39 @@ impl Render for TerminalPane {
             self.render_stats.paint_micros = performance.paint_micros;
             self.render_stats.layout_cache_hit_percent = performance.cache_hit_percent;
         }
+        if self
+            .interactive_trigger_hover
+            .as_ref()
+            .is_some_and(|hover| hover.generation != self.snapshot_generation)
+            || self
+                .timestamp_hover
+                .as_ref()
+                .is_some_and(|hover| hover.generation != self.snapshot_generation)
+        {
+            self.clear_terminal_hover(cx);
+        }
+        if self
+            .archive_hover
+            .as_ref()
+            .is_some_and(|hover| hover.generation != self.snapshot_generation)
+        {
+            self.clear_terminal_hover(cx);
+        }
+        self.refresh_command_folding();
         let scrollbar_display_offset = self.smooth_scroll_display_offset();
+        if self
+            .context_menu
+            .as_ref()
+            .and_then(|menu| menu.trigger.as_ref())
+            .is_some_and(|menu| menu.generation != self.snapshot_generation)
+        {
+            self.dismiss_terminal_context_menu(cx);
+        }
         let (mut snapshot, smooth_scroll_y_offset, viewport_rows) =
             self.render_snapshot_for_smooth_scroll();
+        if self.snapshot_dirty {
+            window.request_animation_frame();
+        }
         snapshot.cursor_shape =
             terminal_cursor_shape_for_render(snapshot.cursor_shape, self.preferences.cursor_shape);
         // Mode belongs to the displayed grid; re-reading it would wait for the parser again.
@@ -381,17 +411,19 @@ impl Render for TerminalPane {
                 )))
         });
         let command_mark_ui_visible =
-            command_mark_ui_available(self.settings.command_marks_enabled, terminal_mode);
+            command_mark_ui_available(self.settings.command_marks_enabled, terminal_mode)
+                && self.command_actions_available(terminal_mode);
+        let command_actions_visible = self.command_actions_available(terminal_mode);
         if self.command_marks_render_cache_dirty {
             self.command_marks_render_cache = Arc::from(self.command_marks.clone());
             self.command_marks_render_cache_dirty = false;
         }
-        let selected_command_mark_id = if command_mark_ui_visible {
+        let selected_command_mark_id = if command_actions_visible {
             self.selected_command_mark_id.clone()
         } else {
             None
         };
-        let hovered_command_mark_id = if command_mark_ui_visible {
+        let hovered_command_mark_id = if command_actions_visible {
             self.hovered_command_mark_id.clone()
         } else {
             None
@@ -408,13 +440,13 @@ impl Render for TerminalPane {
         let terminal_element = TerminalElement::new_with_images_and_bidi(
             snapshot,
             rendered_images,
-            self.selection.filter(|s| !s.is_empty()),
+            self.displayed_selection().filter(|s| !s.is_empty()),
             self.metrics.clone(),
             self.theme.clone(),
             self.cursor_visible,
             self.marked_text.clone(),
             self.search_query.clone(),
-            search_matches,
+            self.displayed_search_matches(search_matches),
             self.selected_search_match,
             self.hovered_link.clone(),
             self.settings.bidi_enabled,
@@ -430,19 +462,37 @@ impl Render for TerminalPane {
         .precomputed_search_matches()
         .selection_highlight_query(selection_highlight_query)
         .command_marks(
-            if command_mark_ui_visible {
-                self.command_marks_render_cache.clone()
+            if command_actions_visible {
+                if self.folding_active() {
+                    self.command_marks
+                        .iter()
+                        .cloned()
+                        .map(|mark| self.displayed_command_mark(mark))
+                        .collect()
+                } else {
+                    self.command_marks_render_cache.clone()
+                }
             } else {
                 Arc::from([])
             },
             selected_command_mark_id,
             hovered_command_mark_id,
         )
+        .command_folding(self.collapsed_command_ids(), command_mark_ui_visible)
         .highlight_rules(self.preferences.highlight_rules.clone())
         .transient_command_highlight(
             self.command_context_highlighting_enabled
                 .then(|| self.command_fact_ledger.transient_command_highlight())
-                .flatten(),
+                .flatten()
+                .map(|mut highlight| {
+                    highlight.output_start_global_line = self
+                        .command_folding
+                        .visible_line(highlight.output_start_global_line);
+                    highlight.output_end_global_line = highlight
+                        .output_end_global_line
+                        .map(|line| self.command_folding.visible_line(line));
+                    highlight
+                }),
         )
         .semantic_configuration(
             self.semantic_coloring_enabled() && !terminal_mode.contains(TermMode::ALT_SCREEN),
@@ -457,11 +507,7 @@ impl Render for TerminalPane {
         .scroll_y_offset(smooth_scroll_y_offset)
         .scroll_x_offset(self.horizontal_scroll_offset_px)
         .performance_metrics_enabled(performance_metrics_enabled)
-        .command_mark_gutter_width(if command_mark_ui_visible {
-            self.command_mark_gutter_width()
-        } else {
-            0.0
-        })
+        .command_mark_gutter_width(self.command_mark_gutter_width())
         .layout_cache(self.layout_cache.clone());
         let accepts_external_path_drop =
             cfg!(target_os = "macos") && self.session_kind() == TerminalSessionKind::LocalPty;
@@ -469,6 +515,7 @@ impl Render for TerminalPane {
             .id("terminal-pane")
             .size_full()
             .relative()
+            .cursor(gpui::CursorStyle::IBeam)
             .bg(if transparent_pane_base {
                 rgba(0x00000000)
             } else {
@@ -505,19 +552,21 @@ impl Render for TerminalPane {
             )
             .on_mouse_down(
                 MouseButton::Middle,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus_handle, cx);
                     this.handle_mouse_down(event, cx);
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.clear_terminal_hover(cx);
                     window.focus(&this.focus_handle, cx);
                     let mode = this.terminal.lock().mode();
-                    if mouse_mode(mode, event.modifiers.shift) {
-                        this.handle_mouse_down(event, cx);
-                    } else if this.right_click_paste_requested(mode, event.modifiers) {
+                    if this.right_click_paste_requested(event.modifiers) {
                         window.prevent_default();
+                        this.handle_mouse_down(event, cx);
+                    } else if mouse_mode(mode, event.modifiers.shift) {
                         this.handle_mouse_down(event, cx);
                     } else {
                         window.prevent_default();
@@ -527,6 +576,11 @@ impl Render for TerminalPane {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.handle_mouse_move(event, cx);
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if !*hovered {
+                    this.clear_terminal_hover(cx);
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -571,10 +625,41 @@ impl Render for TerminalPane {
                     .right(px(self.preferences.padding_horizontal))
                     .bottom(px(self.preferences.padding_vertical))
                     .overflow_hidden()
-                    .child(terminal_element),
+                    .child(terminal_element)
+                    .children(self.render_command_gutter_controls(cx))
+                    .children(self.render_fold_summaries(cx)),
             )
             .when(self.is_serial_transport(), |pane| {
                 pane.child(self.render_serial_control_bar(cx))
+            })
+            .when(self.shell_ide_preparing, |pane| {
+                let label = self
+                    .shell_ide_progress
+                    .as_ref()
+                    .map(|(label, _)| label.clone())
+                    .unwrap_or_else(|| {
+                        self.preferences
+                            .command_selection_labels
+                            .shell_ide_preparing
+                            .clone()
+                    });
+                pane.child(
+                    div()
+                        .absolute()
+                        .bottom_3()
+                        .right_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(self.render_terminal_toolbar_status(label))
+                        .when_some(self.shell_ide_progress.as_ref(), |view, (_, percent)| {
+                            view.child(div().w(px(280.0)).child(progress(
+                                &self.theme.tokens,
+                                *percent,
+                                percent.is_none(),
+                            )))
+                        }),
+                )
             })
             .when(
                 self.can_reconnect_ssh() || self.ssh_reconnect_pending(),
@@ -644,7 +729,8 @@ impl Render for TerminalPane {
                 pane.child(self.render_terminal_performance_overlay())
             })
             .when(
-                command_mark_ui_visible && self.settings.command_marks_show_hover_actions,
+                self.command_actions_available(terminal_mode)
+                    && self.settings.command_marks_show_hover_actions,
                 |pane| {
                     pane.when_some(self.selected_command_mark(), |pane, mark| {
                         pane.child(self.render_command_mark_actions(mark, cx))
@@ -1571,6 +1657,14 @@ impl TerminalPane {
         TERMINAL_CONTROL_ROW_HEIGHT * if self.control_bar_expanded { 2.0 } else { 1.0 }
     }
 
+    pub(super) fn terminal_chrome_height(&self) -> f32 {
+        if self.is_serial_transport() || self.terminal.lock().tmux_state().is_some() {
+            self.terminal_control_bar_height()
+        } else {
+            0.0
+        }
+    }
+
     fn render_terminal_control_bar(
         &self,
         information: gpui::Div,
@@ -1880,7 +1974,7 @@ impl TerminalPane {
     }
 
     fn render_snapshot_for_smooth_scroll(&mut self) -> (TerminalSnapshot, gpui::Pixels, usize) {
-        let snapshot = self.snapshot.clone();
+        let snapshot = self.displayed_snapshot().clone();
         let viewport_rows = snapshot.rows;
         if !self.settings.smooth_scroll {
             return (snapshot, px(0.0), viewport_rows);
@@ -1902,6 +1996,16 @@ impl TerminalPane {
         // Absolute visual positioning lets repeated wheel events accumulate without requiring
         // one overscan row per pending line. Only the fractional leading row needs clipping.
         let requested_rows = viewport_rows.saturating_add(usize::from(needs_overscan));
+        if self.folding_active() {
+            return if let Some(snapshot) = self.folded_snapshot(base_display_offset, requested_rows)
+            {
+                (snapshot, y_offset, viewport_rows)
+            } else {
+                self.snapshot_dirty = true;
+                self.clear_smooth_scroll_remainder();
+                (snapshot, px(0.0), viewport_rows)
+            };
+        }
         let animated_snapshot =
             self.smooth_scroll_overscan_snapshot(base_display_offset, requested_rows);
         (animated_snapshot, y_offset, viewport_rows)
@@ -2014,6 +2118,10 @@ impl TerminalPane {
         let next_reference_line = menu.reference_line;
         let select_command_mark_id = command_mark_id.clone();
         let copy_command_mark_id = command_mark_id;
+        let fold_action = menu.command_mark_id.as_deref().and_then(|id| {
+            self.command_fold_action(id)
+                .map(|label| (id.to_string(), label))
+        });
         let free_type_insert_selection_available =
             self.free_type_context_insert_selection_available(&menu);
         let free_type_replace_command_available =
@@ -2023,7 +2131,23 @@ impl TerminalPane {
         let tokens = &self.theme.tokens;
         let menu_visible =
             self.context_menu_presence.phase() == oxideterm_gpui_ui::motion::ExitPhase::Visible;
-        let popup = if menu.serial_transfer_menu {
+        let telnet_line_endings = self.terminal.lock().telnet_line_endings();
+        let popup = if let Some(trigger) = menu.trigger.as_ref() {
+            context_menu_event_boundary(
+                context_menu_content(tokens)
+                    .w(px(TERMINAL_CONTEXT_MENU_WIDTH))
+                    .children(trigger.labels.iter().enumerate().map(|(index, label)| {
+                        self.render_terminal_context_menu_item(
+                            label.to_string(),
+                            !menu_visible,
+                            move |this, _, _, cx| {
+                                this.request_interactive_trigger_menu_item(index, cx)
+                            },
+                            cx,
+                        )
+                    })),
+            )
+        } else if menu.serial_transfer_menu {
             self.render_serial_transfer_menu(cx)
         } else {
             context_menu_event_boundary(
@@ -2039,6 +2163,20 @@ impl TerminalPane {
                             cx,
                         )
                     }))
+                    .when(self.session_kind == TerminalSessionKind::SshPty, |menu| {
+                        menu.child(self.render_terminal_context_menu_item(
+                            self.preferences.command_selection_labels.shell_ide.clone(),
+                            self.terminal_exited,
+                            |this, _, _, cx| {
+                                this.request_context_action(
+                                    TerminalContextAction::ConvertToShellIde,
+                                    false,
+                                    cx,
+                                )
+                            },
+                            cx,
+                        ))
+                    })
                     .child(self.render_terminal_context_menu_item(
                         copy_label,
                         !menu.has_selection,
@@ -2159,6 +2297,17 @@ impl TerminalPane {
                         },
                         cx,
                     ))
+                    .when_some(fold_action, |menu, (id, label)| {
+                        menu.child(self.render_terminal_context_menu_item(
+                            label,
+                            false,
+                            move |this, _, _, cx| {
+                                this.dismiss_terminal_context_menu(cx);
+                                this.toggle_command_fold(&id, cx);
+                            },
+                            cx,
+                        ))
+                    })
                     .child(self.render_terminal_context_menu_item(
                         previous_command_label,
                         !menu.has_previous_command,
@@ -2195,7 +2344,29 @@ impl TerminalPane {
                             this.clear_buffer(cx);
                         },
                         cx,
-                    )),
+                    ))
+                    .when_some(telnet_line_endings, |menu, options| {
+                        let labels = &self.preferences.serial_control_labels;
+                        menu.child(context_menu_separator(tokens)).children(
+                            [
+                                (false, &labels.line_ending, options.input),
+                                (true, &labels.output_line_ending, options.output),
+                            ]
+                            .into_iter()
+                            .map(|(output, label, value)| {
+                                self.render_terminal_context_menu_item(
+                                    format!(
+                                        "{}: {}",
+                                        label,
+                                        serial_line_ending_label(value, labels)
+                                    ),
+                                    false,
+                                    move |this, _, _, cx| this.cycle_telnet_line_ending(output, cx),
+                                    cx,
+                                )
+                            }),
+                        )
+                    }),
             )
         }
         .debug_selector(|| "terminal-context-menu".into());
@@ -2524,9 +2695,20 @@ impl TerminalPane {
 
     fn selected_command_mark(&self) -> Option<TerminalCommandMark> {
         let selected_id = self.selected_command_mark_id.as_deref()?;
+        let snapshot = self.displayed_snapshot();
+        let top = snapshot
+            .scrollback_lines
+            .saturating_sub(snapshot.display_offset);
         self.command_marks
             .iter()
             .find(|mark| mark.command_id == selected_id)
+            .filter(|mark| {
+                self.command_folding.visible_line(mark.start_line) < top + snapshot.rows
+                    && self
+                        .command_folding
+                        .visible_line(self.selectable_command_mark_end_line(mark))
+                        >= top
+            })
             .cloned()
     }
 
@@ -2627,7 +2809,9 @@ impl TerminalPane {
     ) -> AnyElement {
         let action_top = self.command_mark_action_top(&mark);
         let copy_label = self.preferences.command_selection_labels.copy.clone();
-        let _copy_title = self.preferences.command_selection_labels.copy_title.clone();
+        let fold_action = self
+            .command_fold_action(&mark.command_id)
+            .map(|label| (mark.command_id.clone(), label));
 
         div()
             .absolute()
@@ -2635,40 +2819,49 @@ impl TerminalPane {
             .right(px(10.0))
             .flex()
             .gap(px(4.0))
-            .child(
-                div()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(rgba(0x60a5fa59))
-                    .bg(rgba(0x0f172aeb))
-                    .px(px(7.0))
-                    .py(px(3.0))
-                    .text_size(px(10.0))
-                    .line_height(px(10.0))
-                    .text_color(rgb(0xbfdbfe))
-                    .cursor_pointer()
-                    .child(copy_label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                            this.copy_command_mark_output_to_clipboard(&mark, cx);
-                        }),
-                    ),
-            )
+            .when_some(fold_action, |actions, (id, label)| {
+                actions.child(self.render_command_mark_button(label).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.toggle_command_fold(&id, cx);
+                    }),
+                ))
+            })
+            .child(self.render_command_mark_button(copy_label).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.copy_command_mark_output_to_clipboard(&mark, cx);
+                }),
+            ))
             .into_any_element()
+    }
+
+    fn render_command_mark_button(&self, label: String) -> gpui::Div {
+        context_chip(
+            &self.theme.tokens,
+            ContextChipOptions::new().radius(ButtonRadius::Md),
+            None,
+            div().whitespace_nowrap().child(label).into_any_element(),
+            Vec::new(),
+        )
     }
 
     fn command_mark_action_top(&self, mark: &TerminalCommandMark) -> f32 {
         let Some(bounds) = self.bounds else {
             return 0.0;
         };
+        let end_line = self
+            .command_folding
+            .visible_line(self.selectable_command_mark_end_line(mark));
+        let mark = self.displayed_command_mark(mark.clone());
         let viewport_start = self
-            .snapshot
+            .displayed_snapshot()
             .scrollback_lines
-            .saturating_sub(self.snapshot.display_offset);
-        let end_line = self.selectable_command_mark_end_line(mark);
+            .saturating_sub(self.displayed_snapshot().display_offset);
         let visible_start = mark.start_line.max(viewport_start);
         let visible_end =
             end_line.min(viewport_start.saturating_add(self.snapshot.rows.saturating_sub(1)));
@@ -2687,6 +2880,7 @@ impl TerminalPane {
             overlay_bottom + gap
         };
         self.preferences.padding_vertical
+            + self.terminal_chrome_height()
             + top.clamp(0.0, (viewport_height - actions_height).max(0.0))
     }
 
@@ -2748,6 +2942,27 @@ mod tests {
                 self.background.clone(),
                 Some(self.image.clone()),
             )
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_viewport_uses_text_mouse_cursor(cx: &mut gpui::TestAppContext) {
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            super::TerminalPane::new_recording_playback(80, 24, Default::default(), window, cx)
+                .unwrap()
+        });
+        cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for (x, y) in [(4.0, 4.0), (200.0, 100.0)] {
+            cx.simulate_mouse_move(
+                gpui::point(gpui::px(x), gpui::px(y)),
+                None,
+                gpui::Modifiers::default(),
+            );
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                assert_eq!(window.cursor_style_for_test(), gpui::CursorStyle::IBeam);
+            });
         }
     }
 

@@ -12,7 +12,7 @@ On macOS, packaged artifacts include a `.dmg`, an `.app.zip`, and a portable arc
 
 ## First Launch
 
-Open the OxideTerm desktop app first. The main window is a tabbed SSH workspace with a left activity bar for sessions, files, forwarding, Host Tools, graphics/VNC, plugins, cloud sync, notifications, and settings.
+Open the OxideTerm desktop app first. The left side manages connections and global pages, the top bar selects a tab scope, and the right side opens OxideSens and Host Tools. See [Workspace Navigation](workspace.md).
 
 Start with a local terminal tab:
 
@@ -32,7 +32,7 @@ After the first local terminal and first SSH connection work, check the app surf
 - Connection monitor and Host Tools: connection health, stale nodes, reconnect state, host resources, and action results.
 - File manager or SFTP: remote directory browsing and transfers.
 - Terminal helpers: context menu actions, command bar actions, background image settings, and X/Y/ZMODEM transfer prompts.
-- Graphics/VNC: saved RDP/VNC profiles or node-launched visual sessions when the target supports them.
+- Remote desktop: install and enable the RDP or VNC plugin, then open a profile from New Connection or Session Manager. Windows WSL Graphics is a separate built-in feature.
 - IDE workspace: remote project folders and editor tabs.
 - AI sidebar: current workspace context and tool approvals.
 - Plugins: installed plugins and plugin settings.

@@ -44,9 +44,6 @@ use oxideterm_gpui_ui::{
     },
     modal::{dismissible_dialog_backdrop, modal_backdrop, overlay_content_boundary},
     surface::{color_for_background, color_for_background_or_alpha},
-    text_input::{
-        text_caret, text_input_secret_mask, text_input_value_segments, text_input_visual_range,
-    },
 };
 use oxideterm_session_adapter::upstream_proxy_config_from_saved_policy;
 use oxideterm_settings::{
@@ -59,7 +56,7 @@ use zeroize::Zeroizing;
 use super::*;
 use crate::workspace::ime::WorkspaceImeTarget;
 
-const BG_ACTIVE_THEME_ALPHA: u32 = 0x66; // Tauri [data-bg-active] color-mix(... 40%, transparent)
+const BG_ACTIVE_THEME_ALPHA: u32 = 0x99; // Nested fills share the tab's sidebar-bounded tint budget.
 const BG_ACTIVE_HOVER_ALPHA: u32 = 0x80; // Tauri bg-hover 50%
 const BG_ACTIVE_ROW_HOVER_ALPHA: u32 = 0x4d; // Keep full-width row hover quieter than compact controls.
 const ROW_HOVER_ALPHA: u32 = 0x66; // Plain-theme rows use the same restrained hierarchy as image-backed rows.
@@ -310,6 +307,8 @@ pub(super) enum SessionManagerDeleteConfirm {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SessionManagerSelectionTarget {
+    Tunnel(String),
+    Plugin(String),
     Connection(String),
     Serial(String),
     LocalTerminal(String),
@@ -341,6 +340,8 @@ impl SessionManagerDrag {
 
 #[derive(Clone, Debug)]
 pub(super) enum SessionManagerRowActionTarget {
+    Tunnel(String),
+    Plugin(String),
     Connection(String),
     Serial(String),
     LocalTerminal(String),

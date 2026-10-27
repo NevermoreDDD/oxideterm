@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "背景工作：{{count}}",
+      "search": "搜尋背景工作…",
+      "transferring": "傳輸中",
+      "reconnecting": "正在重新連線"
+    },
+    "tab_scope": {
+      "show_all": "顯示全部",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "顯示目前視窗的全部 {{total}} 個分頁。",
+      "filtered_tooltip": "僅顯示「{{scope}}」的分頁（{{visible}}/{{total}}）。其他分頁仍保持開啟。",
+      "all": "全部分頁",
+      "global": "全域頁面",
+      "local": "本機終端機",
+      "connection": "連線",
+      "empty": "此範圍內尚無分頁",
+      "search": "搜尋分頁範圍…",
+      "categories": "分類",
+      "connections": "連線",
+      "hint": "↑↓ 選擇 · Enter 切換 · Esc 取消"
+    },
     "search": {
       "title": "搜尋工作階段",
       "placeholder": "搜尋工作階段…",
@@ -13,6 +35,7 @@
       "connected_first": "已連線優先"
     },
     "actions": {
+      "enter_zen": "進入禪模式",
       "expand": "展開側邊欄",
       "collapse": "收合側邊欄",
       "new_local_terminal": "新增本機終端機",
@@ -41,6 +64,7 @@
       "import_tooltip": "從 .oxide 檔案匯入",
       "export_tooltip": "匯出為 .oxide 檔案",
       "host_tools": "主機工具",
+      "more_tools": "更多工具",
       "knowledge": "知識庫",
       "host_monitor": "監控",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "套件"
     },
     "tooltips": {
+      "switch_to_light": "切換為淺色主題",
+      "switch_to_dark": "切換為深色主題",
       "settings": "設定",
       "ai_hint": "OxideSens",
       "switch_tree": "切換到樹形視圖",
       "switch_focus": "切換到聚焦視圖",
+      "switch_host": "切換到主機視圖",
       "new_connection": "新建連線",
       "lock_app": "鎖定 OxideTerm",
       "setup_app_lock": "設定應用程式鎖定",

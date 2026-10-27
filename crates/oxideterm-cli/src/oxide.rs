@@ -494,6 +494,13 @@ fn load_export_forwards(
             target_port: forward.rule.target_port,
             description: Some(forward.rule.description),
             auto_start: forward.auto_start,
+            tunnel: forward.tunnel.map(|profile| {
+                oxideterm_connections::oxide_file::OxideTunnelProfile {
+                    name: profile.name,
+                    group: profile.group,
+                    connect_on_startup: profile.connect_on_startup,
+                }
+            }),
         });
     }
     if !requested.is_empty() {
@@ -551,6 +558,14 @@ fn owned_forward_import_record(record: &OxideForwardRecord) -> OwnedForwardImpor
         target_port: record.target_port,
         description: record.description.clone(),
         auto_start: record.auto_start,
+        tunnel: record
+            .tunnel
+            .as_ref()
+            .map(|profile| oxideterm_forwarding::SshTunnelProfile {
+                name: profile.name.clone(),
+                group: profile.group.clone(),
+                connect_on_startup: profile.connect_on_startup,
+            }),
     }
 }
 
@@ -679,6 +694,12 @@ fn selected_connection_ids(
         return Ok(connections
             .into_iter()
             .map(|connection| connection.id)
+            .chain(
+                store
+                    .plugin_profiles()
+                    .iter()
+                    .map(|profile| profile.id.clone()),
+            )
             .collect());
     }
     queries
@@ -686,6 +707,16 @@ fn selected_connection_ids(
         .map(|query| {
             find_connection(&connections, query)
                 .map(|connection| connection.id.clone())
+                .or_else(|| {
+                    store
+                        .plugin_profiles()
+                        .iter()
+                        .find(|profile| {
+                            profile.id == query.trim()
+                                || profile.name.eq_ignore_ascii_case(query.trim())
+                        })
+                        .map(|profile| profile.id.clone())
+                })
                 .ok_or_else(|| {
                     CliError::new(
                         "connection_not_found",
@@ -715,6 +746,28 @@ fn selected_names(values: &[String]) -> Option<Vec<String>> {
         .map(str::to_string)
         .collect::<Vec<_>>();
     (!selected.is_empty()).then_some(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oxide_selection_includes_plugin_profiles_without_installed_providers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::load(directory.path().join("connections.json")).unwrap();
+        store.save_plugin_profile(serde_json::from_value(serde_json::json!({
+            "id":"custom", "plugin_id":"missing.provider", "type_id":"custom", "name":"Device", "group":null,
+            "config":{}, "credential_refs":{}, "created_at":"2026-10-19T00:00:00Z", "updated_at":"2026-10-19T00:00:00Z", "last_used_at":null
+        })).unwrap()).unwrap();
+        for queries in [vec![], vec!["custom".into()], vec![" device ".into()]] {
+            assert_eq!(
+                selected_connection_ids(&store, &queries, true).unwrap(),
+                vec!["custom"]
+            );
+        }
+        assert!(selected_connection_ids(&store, &["missing".into()], true).is_err());
+    }
 }
 
 fn import_strategy(strategy: OxideImportStrategy) -> ImportConflictStrategy {

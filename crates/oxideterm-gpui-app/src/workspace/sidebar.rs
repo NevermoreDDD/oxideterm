@@ -99,6 +99,7 @@ pub(in crate::workspace) enum SessionActionVariant {
 pub(super) enum ActiveSessionSidebarViewMode {
     Tree,
     Focus,
+    Host,
 }
 
 impl SidebarSection {
@@ -191,6 +192,7 @@ pub(in crate::workspace) use region::sidebar_resize_hotzone_chrome;
 mod sessions;
 mod state;
 mod titlebar;
+mod tools;
 pub(in crate::workspace) use titlebar::{
     client_titlebar_button_layout, handle_window_drag_mouse_down,
 };

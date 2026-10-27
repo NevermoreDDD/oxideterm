@@ -11,31 +11,7 @@ impl WorkspaceApp {
         match section_index {
             0 => {
                 let mut shell_rows = vec![self.local_shell_select_row(settings, cx)];
-                if let Some(path_hint) = self.local_shell_path_hint(settings) {
-                    shell_rows.push(path_hint);
-                }
-                if cfg!(target_os = "windows") {
-                    shell_rows.push(self.card_separator());
-                    shell_rows.push(
-                        self.setting_row(
-                            "settings_view.local_terminal.git_bash_path",
-                            "settings_view.local_terminal.git_bash_path_hint",
-                            self.settings_text_input_control(
-                                SettingsInput::LocalGitBashPath,
-                                settings
-                                    .local_terminal
-                                    .git_bash_path
-                                    .clone()
-                                    .unwrap_or_default(),
-                                self.i18n
-                                    .t("settings_view.local_terminal.git_bash_path_placeholder"),
-                                300.0,
-                                cx,
-                            ),
-                            cx,
-                        ),
-                    );
-                }
+                shell_rows.extend(self.local_shell_options_rows(settings, cx));
                 shell_rows.push(self.card_separator());
                 shell_rows.push(
                     self.setting_row(
@@ -77,32 +53,6 @@ impl WorkspaceApp {
                 )],
             ),
             2 => self.local_privilege_credentials_card(cx),
-            3 => {
-                let effective_shells = self.effective_local_shells_for_settings(settings);
-                let shell_list = if effective_shells.is_empty() {
-                    div()
-                        .text_align(gpui::TextAlign::Center)
-                        .py(px(32.0))
-                        .text_color(rgb(self.tokens.ui.text_muted))
-                        .child(self.i18n.t("settings_view.local_terminal.loading_shells"))
-                        .into_any_element()
-                } else {
-                    let shell_count = effective_shells.len();
-                    let mut list = div().w_full().min_w(px(0.0)).flex().flex_col();
-                    for (index, shell) in effective_shells.iter().enumerate() {
-                        list = list.child(self.available_shell_row(index, shell, settings, cx));
-                        if index + 1 < shell_count {
-                            list = list.child(self.card_separator());
-                        }
-                    }
-                    list.into_any_element()
-                };
-                self.settings_card(
-                    "settings_view.local_terminal.available_shells",
-                    "settings_view.local_terminal.select_shell",
-                    vec![shell_list],
-                )
-            }
             _ => div().into_any_element(),
         }
     }
@@ -182,74 +132,59 @@ impl WorkspaceApp {
             .map(|credentials| credentials.len())
             .unwrap_or_default();
         let scope_id = LOCAL_SHELL_PRIVILEGE_CONNECTION_ID.to_string();
-        let summary = div()
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(12.0))
-            .child(
+        let summary = settings_row(
+            &self.tokens,
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(px(self.tokens.metrics.ui_text_sm))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(theme.text))
+                .child(Self::render_lucide_icon(
+                    LucideIcon::KeyRound,
+                    16.0,
+                    rgb(theme.text_muted),
+                ))
+                .child(self.i18n_replace(
+                    "settings_view.privilege_credentials.credential_count",
+                    &[("count", credential_count.to_string())],
+                ))
+                .into_any_element(),
+            Some(
                 div()
-                    // The summary owns the remaining row width so localized copy cannot collapse to min-content.
-                    .flex_1()
-                    .min_w(px(0.0))
+                    .text_size(px(self.tokens.metrics.ui_text_xs))
+                    .text_color(rgb(theme.text_muted))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .text_size(px(self.tokens.metrics.ui_text_sm))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(theme.text))
-                            .child(Self::render_lucide_icon(
-                                LucideIcon::KeyRound,
-                                16.0,
-                                rgb(theme.text_muted),
-                            ))
-                            .child(self.i18n_replace(
-                                "settings_view.privilege_credentials.credential_count",
-                                &[("count", credential_count.to_string())],
-                            )),
+                        self.i18n
+                            .t("settings_view.privilege_credentials.description"),
                     )
-                    .child(
-                        div()
-                            .mt(px(4.0))
-                            .text_size(px(self.tokens.metrics.ui_text_xs))
-                            .text_color(rgb(theme.text_muted))
-                            .child(
-                                self.i18n
-                                    .t("settings_view.privilege_credentials.description"),
-                            ),
-                    ),
-            )
-            .child(
-                self.workspace_toolbar_action_button(
-                    self.i18n.t("terminal.privilege_helper.manage"),
-                    Some(
-                        Self::render_lucide_icon(LucideIcon::Settings, 14.0, rgb(theme.text_muted))
-                            .into_any_element(),
-                    ),
-                    ToolbarButtonOptions {
-                        button: ButtonOptions {
-                            variant: ButtonVariant::Outline,
-                            size: ButtonSize::Sm,
-                            ..ButtonOptions::default()
-                        },
-                        ..ToolbarButtonOptions::default()
-                    },
-                    cx.listener(move |this, _event, window, cx| {
-                        // Local terminal settings intentionally delegate
-                        // credential editing to the unified privilege surface.
-                        this.open_privilege_credentials_settings(
-                            Some(scope_id.clone()),
-                            window,
-                            cx,
-                        );
-                        cx.stop_propagation();
-                    }),
+                    .into_any_element(),
+            ),
+            self.workspace_toolbar_action_button(
+                self.i18n.t("terminal.privilege_helper.manage"),
+                Some(
+                    Self::render_lucide_icon(LucideIcon::Settings, 14.0, rgb(theme.text_muted))
+                        .into_any_element(),
                 ),
-            );
+                ToolbarButtonOptions {
+                    button: ButtonOptions {
+                        variant: ButtonVariant::Outline,
+                        size: ButtonSize::Sm,
+                        ..ButtonOptions::default()
+                    },
+                    ..ToolbarButtonOptions::default()
+                },
+                cx.listener(move |this, _event, window, cx| {
+                    // Local terminal settings intentionally delegate
+                    // credential editing to the unified privilege surface.
+                    this.open_privilege_credentials_settings(Some(scope_id.clone()), window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element(),
+        );
 
         self.settings_card(
             "settings_view.local_terminal.privilege_credentials",
@@ -343,51 +278,13 @@ impl WorkspaceApp {
         checked: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap(px(16.0))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex_basis(px(SETTINGS_RECONNECT_FIELD_BASIS))
-                    .grid()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(self.tokens.metrics.ui_text_sm))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgb(self.tokens.ui.text))
-                            .child(self.i18n.t("settings_view.reconnect.enabled")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(self.tokens.metrics.ui_text_xs))
-                            .text_color(rgb(self.tokens.ui.text_muted))
-                            .child(self.i18n.t("settings_view.reconnect.enabled_hint")),
-                    ),
-            )
-            .child(
-                div().flex_none().child(
-                    checkbox(&self.tokens, String::new(), checked)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                this.edit_settings(
-                                    |settings| set_reconnect_enabled(settings, !checked),
-                                    cx,
-                                );
-                            }),
-                        )
-                        .into_any_element(),
-                ),
-            )
-            .into_any_element()
+        self.checkbox_row(
+            "settings_view.reconnect.enabled",
+            "settings_view.reconnect.enabled_hint",
+            checked,
+            set_reconnect_enabled,
+            cx,
+        )
     }
 
     pub(in crate::workspace) fn reconnect_select_field(

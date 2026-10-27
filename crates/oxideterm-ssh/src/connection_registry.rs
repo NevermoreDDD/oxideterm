@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -41,9 +41,10 @@ const REMOTE_ENV_TOTAL_TIMEOUT: Duration = Duration::from_secs(8);
 const REMOTE_ENV_PHASE_A_TIMEOUT: Duration = Duration::from_secs(3);
 const REMOTE_ENV_PHASE_B_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_ENV_MAX_OUTPUT_SIZE: usize = 8192;
-const REMOTE_ENV_PHASE_A_CMD: &str = "echo '===DETECT==='; if [ -n \"$PSModulePath\" ]; then echo 'PLATFORM=windows'; else echo \"PLATFORM=$(uname -s 2>/dev/null || echo unknown)\"; fi; echo '===END==='";
+// SSH exec uses the login shell, which may not understand POSIX conditionals.
+const REMOTE_ENV_PHASE_A_CMD: &str = r#"sh -c 'echo "===DETECT==="; if [ -n "$PSModulePath" ]; then echo "PLATFORM=windows"; else echo "PLATFORM=$(uname -s 2>/dev/null || echo unknown)"; fi; echo "===END==="'"#;
 const REMOTE_ENV_PHASE_B_UNIX_CMD: &str = "echo '===ENV==='; uname -s 2>/dev/null; echo '===ARCH==='; uname -m 2>/dev/null; echo '===KERNEL==='; uname -r 2>/dev/null; echo '===SHELL==='; echo $SHELL 2>/dev/null; echo '===HOME==='; echo $HOME 2>/dev/null; echo '===ZDOTDIR==='; echo $ZDOTDIR 2>/dev/null; echo '===XDG_CONFIG_HOME==='; echo $XDG_CONFIG_HOME 2>/dev/null; echo '===DISTRO==='; cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|ID)=' | head -2; echo '===END==='";
-const REMOTE_ENV_PHASE_B_WINDOWS_CMD: &str = "echo '===ENV==='; [System.Environment]::OSVersion.VersionString; echo '===ARCH==='; $env:PROCESSOR_ARCHITECTURE; echo '===SHELL==='; \"PowerShell $($PSVersionTable.PSVersion)\"; echo '===HOME==='; $HOME; echo '===ZDOTDIR==='; echo '===XDG_CONFIG_HOME==='; echo '===END==='";
+const REMOTE_ENV_PHASE_B_WINDOWS_CMD: &str = "echo '===PLATFORM==='; [System.Environment]::OSVersion.Platform; echo '===ENV==='; [System.Environment]::OSVersion.VersionString; echo '===ARCH==='; $env:PROCESSOR_ARCHITECTURE; echo '===SHELL==='; \"PowerShell $($PSVersionTable.PSVersion)\"; echo '===HOME==='; $HOME; echo '===ZDOTDIR==='; echo '===XDG_CONFIG_HOME==='; echo '===END==='";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,6 +252,7 @@ struct ConnectionEntry {
     consumers: RwLock<Vec<ConnectionConsumer>>,
     physical: RwLock<PhysicalConnection>,
     sftp: Mutex<SharedSftpState>,
+    active_sftp: ParkingMutex<Vec<(u64, Weak<SftpSession>)>>,
     sftp_generation: AtomicU64,
     sftp_state: RwLock<SftpSessionState>,
     remote_env: RwLock<Option<RemoteEnvInfo>>,
@@ -306,6 +308,7 @@ impl ConnectionEntry {
             consumers: RwLock::new(Vec::new()),
             physical: RwLock::new(PhysicalConnection::default()),
             sftp: Mutex::new(SharedSftpState::Empty),
+            active_sftp: ParkingMutex::new(Vec::new()),
             sftp_generation: AtomicU64::new(0),
             sftp_state: RwLock::new(SftpSessionState::default()),
             remote_env: RwLock::new(None),
@@ -573,6 +576,14 @@ impl SshConnectionHandle {
         self.entry.remote_env()
     }
 
+    pub fn remote_env_detection_running(&self) -> bool {
+        self.entry.remote_env.read().is_none()
+            && self
+                .entry
+                .remote_env_detection_started
+                .load(Ordering::Acquire)
+    }
+
     pub fn set_remote_env(&self, env: RemoteEnvInfo) -> bool {
         self.entry.set_remote_env(env)
     }
@@ -695,7 +706,7 @@ impl SshConnectionHandle {
                 continue;
             }
 
-            let created = self.create_sftp_session().await;
+            let created = self.acquire_transfer_sftp().await;
             let mut guard = self.entry.sftp.lock().await;
             match created {
                 Ok(sftp) => {
@@ -754,7 +765,52 @@ impl SshConnectionHandle {
     }
 
     pub async fn acquire_transfer_sftp(&self) -> Result<SftpSession, SftpError> {
-        self.create_sftp_session().await
+        let generation = self.entry.sftp_generation.load(Ordering::Acquire);
+        for attempt in 0..6 {
+            match self.create_sftp_session().await {
+                Ok(session) => {
+                    let session = Arc::new(session);
+                    let mut active = self.entry.active_sftp.lock();
+                    let current_generation = self.entry.sftp_generation.load(Ordering::Acquire);
+                    active.retain(|(g, session)| {
+                        *g == current_generation && session.strong_count() > 0
+                    });
+                    if generation == current_generation {
+                        active.push((generation, Arc::downgrade(&session)));
+                    }
+                    // Only callers retain the channel; the registry must not keep idle
+                    // transfer channels (or their physical connection owner) alive.
+                    return Ok(session.share().with_connection_owner(session));
+                }
+                Err(error @ SftpError::ChannelOpenRejected(_)) => {
+                    if generation != self.entry.sftp_generation.load(Ordering::Acquire) {
+                        return Err(error);
+                    }
+                    let existing = {
+                        let active = self.entry.active_sftp.lock();
+                        active
+                            .iter()
+                            .filter(|(g, _)| *g == generation)
+                            .filter_map(|(_, session)| session.upgrade())
+                            .find(|session| !session.is_closed())
+                    };
+                    if let Some(session) = existing {
+                        return Ok(session
+                            .share()
+                            .with_single_channel_transport()
+                            .with_connection_owner(session));
+                    }
+                    if attempt == 5 {
+                        return Err(error);
+                    }
+                    // The last consumer may have just dropped a channel. Its close
+                    // reaches sshd asynchronously; retry only rejected opens, never writes.
+                    sleep(Duration::from_millis(20 << attempt)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("last rejected open returns its error")
     }
 
     pub async fn clear_sftp(&self) {
@@ -1003,6 +1059,16 @@ impl SshConnectionRegistry {
             self.maybe_spawn_remote_env_detection(entry);
         }
         Some(first)
+    }
+
+    pub fn retry_remote_env_detection(&self, connection_id: &str) {
+        let Some(handle) = self.get(connection_id) else {
+            return;
+        };
+        // Preserve first-terminal output and single-channel connection isolation.
+        if handle.entry.first_visible_terminal_started() && !handle.entry.retire_when_unused {
+            self.maybe_spawn_remote_env_detection(handle.entry);
+        }
     }
 
     fn maybe_spawn_remote_env_detection(&self, entry: Arc<ConnectionEntry>) {
@@ -1781,61 +1847,114 @@ fn topology_consumer_summary(
     summary
 }
 
-async fn detect_remote_env_for_handle(handle: &SshConnectionHandle) -> RemoteEnvInfo {
-    tokio::time::timeout(REMOTE_ENV_TOTAL_TIMEOUT, detect_remote_env_inner(handle))
-        .await
-        .unwrap_or_else(|_| RemoteEnvInfo::unknown())
-}
-
-async fn detect_remote_env_inner(handle: &SshConnectionHandle) -> RemoteEnvInfo {
-    let phase_a_output = match handle
-        .run_command(
-            REMOTE_ENV_PHASE_A_CMD,
-            REMOTE_ENV_PHASE_A_TIMEOUT,
-            REMOTE_ENV_MAX_OUTPUT_SIZE,
+pub(crate) async fn detect_remote_env_for_handle(handle: &SshConnectionHandle) -> RemoteEnvInfo {
+    let env = tokio::time::timeout(
+        REMOTE_ENV_TOTAL_TIMEOUT,
+        detect_remote_env_inner(handle, None),
+    )
+    .await
+    .unwrap_or_else(|_| RemoteEnvInfo::unknown());
+    if !env.os_type.eq_ignore_ascii_case("unknown") {
+        return env;
+    }
+    // Probe through registry-owned channels so gateways can require a PTY
+    // without borrowing terminal input or triggering another authentication.
+    for with_pty in [false, true] {
+        let opened = handle
+            .open_sampling_shell_channel("", with_pty, REMOTE_ENV_TOTAL_TIMEOUT)
+            .await;
+        let Ok(mut shell) = opened else {
+            continue;
+        };
+        let detected = tokio::time::timeout(
+            REMOTE_ENV_TOTAL_TIMEOUT,
+            detect_remote_env_inner(handle, Some(&mut shell)),
         )
         .await
-    {
-        Ok(output) => output,
-        Err(_) => {
-            return handle
-                .run_command(
-                    REMOTE_ENV_PHASE_B_WINDOWS_CMD,
-                    REMOTE_ENV_PHASE_B_TIMEOUT,
+        .unwrap_or_else(|_| RemoteEnvInfo::unknown());
+        // Retain the channel outside the timeout so cancellation still closes it.
+        let _ = tokio::time::timeout(REMOTE_ENV_PHASE_A_TIMEOUT, shell.close()).await;
+        if !detected.os_type.eq_ignore_ascii_case("unknown") {
+            return detected;
+        }
+    }
+    env
+}
+
+async fn run_remote_env_probe(
+    handle: &SshConnectionHandle,
+    shell: &mut Option<&mut crate::SshShellChannel>,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, crate::SshTransportError> {
+    match shell.as_deref_mut() {
+        Some(shell) => {
+            shell
+                .sample_until(
+                    &format!("{command}\n"),
+                    "===END===",
+                    timeout,
                     REMOTE_ENV_MAX_OUTPUT_SIZE,
                 )
                 .await
-                .map(|output| parse_remote_windows_env(&output))
-                .unwrap_or_else(|_| RemoteEnvInfo::unknown());
+        }
+        None => {
+            handle
+                .run_command(command, timeout, REMOTE_ENV_MAX_OUTPUT_SIZE)
+                .await
+        }
+    }
+}
+
+async fn detect_remote_env_inner(
+    handle: &SshConnectionHandle,
+    mut shell: Option<&mut crate::SshShellChannel>,
+) -> RemoteEnvInfo {
+    let phase_a_output = match run_remote_env_probe(
+        handle,
+        &mut shell,
+        REMOTE_ENV_PHASE_A_CMD,
+        REMOTE_ENV_PHASE_A_TIMEOUT,
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(_) => {
+            return run_remote_env_probe(
+                handle,
+                &mut shell,
+                REMOTE_ENV_PHASE_B_WINDOWS_CMD,
+                REMOTE_ENV_PHASE_B_TIMEOUT,
+            )
+            .await
+            .map(|output| parse_remote_windows_env(&output))
+            .unwrap_or_else(|_| RemoteEnvInfo::unknown());
         }
     };
 
-    let is_windows = phase_a_output.contains("PLATFORM=windows");
-    let raw_platform = extract_between(&phase_a_output, "PLATFORM=", "\n")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let raw_platform = parse_remote_platform(&phase_a_output).unwrap_or_default();
+    let is_windows = raw_platform.eq_ignore_ascii_case("windows");
     let phase_b_command = if is_windows {
         REMOTE_ENV_PHASE_B_WINDOWS_CMD
     } else {
         REMOTE_ENV_PHASE_B_UNIX_CMD
     };
 
-    match handle
-        .run_command(
-            phase_b_command,
-            REMOTE_ENV_PHASE_B_TIMEOUT,
-            REMOTE_ENV_MAX_OUTPUT_SIZE,
-        )
-        .await
+    match run_remote_env_probe(
+        handle,
+        &mut shell,
+        phase_b_command,
+        REMOTE_ENV_PHASE_B_TIMEOUT,
+    )
+    .await
     {
         Ok(output) if is_windows => parse_remote_windows_env(&output),
-        Ok(output) => parse_remote_unix_env(&output, &raw_platform),
+        Ok(output) => parse_remote_unix_env(&output, raw_platform),
         Err(_) => RemoteEnvInfo {
             os_type: if is_windows {
                 "Windows".to_string()
             } else {
-                classify_remote_unix_os(&raw_platform)
+                classify_remote_unix_os(raw_platform)
             },
             os_version: None,
             kernel: None,
@@ -1892,6 +2011,11 @@ fn parse_remote_unix_env(output: &str, raw_platform: &str) -> RemoteEnvInfo {
 }
 
 fn parse_remote_windows_env(output: &str) -> RemoteEnvInfo {
+    // POSIX shells can echo the remaining PowerShell probe after its first
+    // command fails. Delimiters alone do not establish a Windows platform.
+    if extract_section_between(output, "===PLATFORM===", "===ENV===") != Some("Win32NT") {
+        return RemoteEnvInfo::unknown();
+    }
     RemoteEnvInfo {
         os_type: "Windows".to_string(),
         os_version: extract_section_between(output, "===ENV===", "===ARCH===")
@@ -1938,18 +2062,29 @@ fn classify_remote_unix_os(uname_s: &str) -> String {
     }
 }
 
-fn extract_between(value: &str, start: &str, end: &str) -> Option<String> {
-    let start_index = value.find(start)? + start.len();
-    let rest = &value[start_index..];
-    let end_index = rest.find(end).unwrap_or(rest.len());
-    Some(rest[..end_index].to_string())
+fn parse_remote_platform(output: &str) -> Option<&str> {
+    extract_section_between(output, "===DETECT===", "===END===")?
+        .split(['\r', '\n'])
+        .find_map(|line| line.trim().strip_prefix("PLATFORM="))
+        .map(str::trim)
 }
 
 fn extract_section_between<'a>(value: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    let start_index = value.find(start)? + start.len();
-    let rest = &value[start_index..];
-    let end_index = rest.find(end).unwrap_or(rest.len());
-    Some(rest[..end_index].trim())
+    // Gateways can echo probe commands containing every delimiter. Only output
+    // lines containing a standalone delimiter establish a result boundary.
+    let mut section_start = None;
+    let mut offset = 0;
+    for line in value.split_inclusive(['\r', '\n']) {
+        if let Some(start_index) = section_start {
+            if line.trim() == end {
+                return Some(value[start_index..offset].trim());
+            }
+        } else if line.trim() == start {
+            section_start = Some(offset + line.len());
+        }
+        offset += line.len();
+    }
+    None
 }
 
 fn extract_os_release_field(block: &str, key: &str) -> Option<String> {
@@ -2027,6 +2162,267 @@ impl Default for SshConnectionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shell_only_otp_server_keeps_sampling_on_shared_connection_despite_command_echo() {
+        assert_shell_only_sampling(false).await;
+    }
+
+    #[tokio::test]
+    async fn shell_only_otp_server_requiring_pty_keeps_sampling_on_shared_connection() {
+        assert_shell_only_sampling(true).await;
+    }
+
+    async fn assert_shell_only_sampling(require_sampling_pty: bool) {
+        use oxideterm_connection_monitor::ResourceSampler;
+        use russh::{Channel, ChannelId, server};
+        struct ShellOnlyPeer {
+            channels: HashMap<ChannelId, Channel<server::Msg>>,
+            pty_channels: HashSet<ChannelId>,
+            initialized_channels: HashSet<ChannelId>,
+            readiness_attempts: HashMap<ChannelId, usize>,
+            require_sampling_pty: bool,
+        }
+        struct OtpPrompt(Arc<std::sync::atomic::AtomicUsize>);
+        impl crate::SshPromptHandler for OtpPrompt {
+            fn keyboard_interactive(
+                &self,
+                _: crate::KeyboardInteractivePromptRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                crate::KeyboardInteractiveResponses,
+                                crate::SshPromptError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Ok(zeroize::Zeroizing::new(vec!["synthetic-otp".into()])) })
+            }
+        }
+        impl server::Handler for ShellOnlyPeer {
+            type Error = russh::Error;
+            async fn auth_keyboard_interactive<'a>(
+                &'a mut self,
+                _: &str,
+                _: &str,
+                response: Option<server::Response<'a>>,
+            ) -> Result<server::Auth, Self::Error> {
+                Ok(match response {
+                    None => server::Auth::Partial {
+                        name: "MFA".into(),
+                        instructions: "".into(),
+                        prompts: vec![("OTP Code:".into(), false)].into(),
+                    },
+                    Some(mut responses) => {
+                        if responses.next().as_deref() == Some(b"synthetic-otp".as_slice()) {
+                            server::Auth::Accept
+                        } else {
+                            server::Auth::reject()
+                        }
+                    }
+                })
+            }
+            async fn channel_open_session(
+                &mut self,
+                channel: Channel<server::Msg>,
+                reply: server::ChannelOpenHandle,
+                _: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                self.channels.insert(channel.id(), channel);
+                reply.accept().await;
+                Ok(())
+            }
+            async fn pty_request(
+                &mut self,
+                channel: ChannelId,
+                _: &str,
+                _: u32,
+                _: u32,
+                _: u32,
+                _: u32,
+                _: &[(russh::Pty, u32)],
+                session: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                self.pty_channels.insert(channel);
+                session.channel_success(channel)
+            }
+            async fn exec_request(
+                &mut self,
+                channel: ChannelId,
+                _: &[u8],
+                session: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                session.channel_failure(channel)?;
+                session.close(channel)
+            }
+            async fn shell_request(
+                &mut self,
+                channel: ChannelId,
+                session: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                session.channel_success(channel)
+            }
+            async fn data(
+                &mut self,
+                channel: ChannelId,
+                data: &[u8],
+                session: &mut server::Session,
+            ) -> Result<(), Self::Error> {
+                let command = std::str::from_utf8(data).unwrap();
+                if self.require_sampling_pty
+                    && self.pty_channels.contains(&channel)
+                    && !data.ends_with(b"\r")
+                    && !data.ends_with(b"\r\n")
+                {
+                    // Terminal gateways can require the same Enter byte as interactive input.
+                    return Ok(());
+                }
+                if self.require_sampling_pty
+                    && (!self.pty_channels.contains(&channel)
+                        || !self.initialized_channels.contains(&channel))
+                    && (command.contains("sample-ok")
+                        || command.contains("===STAT===")
+                        || command.contains("===DETECT===")
+                        || command.contains("===ENV==="))
+                {
+                    return session.close(channel);
+                }
+                let output = if command.contains("__OXIDE_MONITOR_READY__") {
+                    assert!(
+                        command.contains("stty -echo -icanon")
+                            || command.starts_with("echo __OXIDE_MONITOR_READY__")
+                    );
+                    let attempts = self.readiness_attempts.entry(channel).or_default();
+                    *attempts += 1;
+                    if *attempts == 1 {
+                        // Gateways can discard early input while target login is still running.
+                        "Connecting to target...\r\n"
+                    } else {
+                        self.initialized_channels.insert(channel);
+                        "\r\n__OXIDE_MONITOR_READY__\r\n"
+                    }
+                } else if command.contains("===DETECT===") {
+                    session.data(channel, data.to_vec())?;
+                    "===DETECT===\nPLATFORM=Linux\n===END===\n"
+                } else if command.contains("===ENV===") {
+                    session.data(channel, data.to_vec())?;
+                    "===ENV===\nLinux\n===ARCH===\nx86_64\n===KERNEL===\n6.8\n===SHELL===\n/bin/bash\n===HOME===\n/home/fixture\n===ZDOTDIR===\n===XDG_CONFIG_HOME===\n===DISTRO===\nPRETTY_NAME=Ubuntu\n===END===\n"
+                } else if command.contains("sample-ok") {
+                    // A gateway can echo the command in its own SSH data message before executing it.
+                    session.data(channel, data.to_vec())?;
+                    "sample-ok\n===END===\n"
+                } else if command.contains("===STAT===") {
+                    session.data(channel, data.to_vec())?;
+                    "===MEMINFO===\nMemTotal: 1024 kB\nMemAvailable: 512 kB\n===END===\n"
+                } else {
+                    ""
+                };
+                // End markers can span SSH messages independently of command echo.
+                let split = output.len().saturating_sub(3);
+                session.data(channel, output.as_bytes()[..split].to_vec())?;
+                session.data(channel, output.as_bytes()[split..].to_vec())
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let key =
+            russh::keys::PrivateKey::random(&mut rand10::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap();
+        let fingerprint = key
+            .public_key()
+            .fingerprint(russh::keys::HashAlg::Sha256)
+            .to_string();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let session = server::run_stream(
+                Arc::new(server::Config {
+                    keys: vec![key],
+                    ..Default::default()
+                }),
+                stream,
+                ShellOnlyPeer {
+                    channels: HashMap::new(),
+                    pty_channels: HashSet::new(),
+                    initialized_channels: HashSet::new(),
+                    readiness_attempts: HashMap::new(),
+                    require_sampling_pty,
+                },
+            )
+            .await
+            .unwrap();
+            let _ = session.await;
+        });
+        let mut config = SshConfig::password("127.0.0.1", port, "fixture", "fixture-password");
+        config.auth = crate::AuthMethod::KeyboardInteractive;
+        config.trust_host_key = Some(false);
+        config.expected_host_key_fingerprint = Some(fingerprint);
+        let registry = SshConnectionRegistry::default();
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handle = crate::SshTransportClient::new(config)
+            .with_prompt_handler(Arc::new(OtpPrompt(prompts.clone())))
+            .connect_node_with_registry(
+                registry.clone(),
+                ConnectionConsumer::NodeRouter("fixture".into()),
+            )
+            .await
+            .unwrap();
+        let env = detect_remote_env_for_handle(&handle).await;
+        assert_eq!(env.os_type, "Linux");
+        assert_eq!(env.arch.as_deref(), Some("x86_64"));
+        assert_eq!(env.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(env.home.as_deref(), Some("/home/fixture"));
+        let mut sample = handle.open_shell("", Duration::from_secs(2)).await.unwrap();
+        assert_eq!(
+            sample
+                .sample_until(
+                    "echo sample-ok; echo '===END==='\n",
+                    "===END===",
+                    Duration::from_secs(2),
+                    1024
+                )
+                .await
+                .unwrap(),
+            "echo sample-ok; echo '===END==='\nsample-ok\n===END===\n"
+        );
+        sample.close().await.unwrap();
+        let profiler = oxideterm_connection_monitor::ProfilerRegistry::new();
+        let (updates, mut updated) = tokio::sync::mpsc::channel(1);
+        profiler.start_with_sampler_on_config(
+            "fixture",
+            Arc::new(handle.clone()),
+            "Linux",
+            oxideterm_connection_monitor::ResourceSamplingConfig {
+                system: true,
+                gpu: false,
+                processes: false,
+                docker: false,
+            },
+            Some(updates),
+            tokio::runtime::Handle::current(),
+        );
+        tokio::time::timeout(Duration::from_secs(5), updated.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let metrics = profiler.latest("fixture").unwrap();
+        assert_eq!(metrics.memory_total, Some(1_048_576));
+        assert_eq!(metrics.memory_used, Some(524_288));
+        assert_eq!(profiler.failure("fixture"), None);
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        profiler.stop("fixture");
+        assert_eq!(
+            handle.info().consumers,
+            vec![ConnectionConsumer::NodeRouter("fixture".into())]
+        );
+        handle.clear_physical().await;
+        server.abort();
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn audit_follows_shared_connection_after_terminal_release_and_new_connection() {
         use oxideterm_audit::*;
@@ -2278,8 +2674,10 @@ mod tests {
         );
 
         assert!(handle.entry.try_begin_remote_env_detection());
+        assert!(handle.remote_env_detection_running());
         assert!(!handle.set_remote_env(RemoteEnvInfo::unknown()));
         assert_eq!(handle.remote_env(), None);
+        assert!(!handle.remote_env_detection_running());
         assert!(handle.entry.try_begin_remote_env_detection());
     }
 
@@ -2303,6 +2701,41 @@ mod tests {
     }
 
     #[test]
+    fn remote_platform_parser_ignores_echoed_probe_branches() {
+        for (output, expected) in [
+            (
+                format!(
+                    "{REMOTE_ENV_PHASE_A_CMD}\r\n===DETECT===\r\nPLATFORM=Linux\r\n===END===\r\n"
+                ),
+                Some("Linux"),
+            ),
+            (
+                format!("{REMOTE_ENV_PHASE_A_CMD}\n===DETECT===\nPLATFORM=windows\n===END===\n"),
+                Some("windows"),
+            ),
+            (format!("{REMOTE_ENV_PHASE_A_CMD}\n"), None),
+            ("===DETECT===\nPLATFORM=Linux\n".to_owned(), None),
+        ] {
+            assert_eq!(parse_remote_platform(&output), expected);
+        }
+    }
+
+    #[test]
+    fn windows_environment_probe_requires_windows_platform_evidence() {
+        let unix_output = format!(
+            "{REMOTE_ENV_PHASE_B_WINDOWS_CMD}\n===PLATFORM===\n===ENV===\n===ARCH===\n:PROCESSOR_ARCHITECTURE\n===SHELL===\nPowerShell\n===HOME===\n/home/fixture\n===ZDOTDIR===\n===XDG_CONFIG_HOME===\n===END===\n"
+        );
+        assert_eq!(parse_remote_windows_env(&unix_output).os_type, "Unknown");
+        let windows_output = format!(
+            "{REMOTE_ENV_PHASE_B_WINDOWS_CMD}\r\n===PLATFORM===\r\nWin32NT\r\n===ENV===\r\nMicrosoft Windows NT 10.0.22631.0\r\n===ARCH===\r\nAMD64\r\n===SHELL===\r\nPowerShell 7.5.0\r\n===HOME===\r\nC:\\Users\\fixture\r\n===ZDOTDIR===\r\n===XDG_CONFIG_HOME===\r\n===END===\r\n"
+        );
+        let windows = parse_remote_windows_env(&windows_output);
+        assert_eq!(windows.os_type, "Windows");
+        assert_eq!(windows.arch.as_deref(), Some("AMD64"));
+        assert_eq!(windows.shell.as_deref(), Some("PowerShell 7.5.0"));
+    }
+
+    #[test]
     fn remote_env_parser_preserves_shell_configuration_directories() {
         let output = "===ENV===\nLinux\n===ARCH===\nx86_64\n===KERNEL===\n6.8\n===SHELL===\n/bin/zsh\n===HOME===\n/home/alice\n===ZDOTDIR===\n/home/alice/.config/zsh\n===XDG_CONFIG_HOME===\n/home/alice/.config\n===DISTRO===\nPRETTY_NAME=Ubuntu\nID=ubuntu\n===END===\n";
         let parsed = parse_remote_unix_env(output, "Linux");
@@ -2313,6 +2746,42 @@ mod tests {
         assert_eq!(
             parsed.xdg_config_home.as_deref(),
             Some("/home/alice/.config")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires Fish installed"]
+    fn remote_env_probe_runs_under_fish() {
+        let run = |command: &str| {
+            let output = std::process::Command::new("fish")
+                .args(["--no-config", "-c", command])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("SHELL", "/usr/bin/fish")
+                .env("HOME", "/home/fish-test")
+                .env("XDG_CONFIG_HOME", "/home/fish-test/config")
+                .output()
+                .expect("run Fish environment probe");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let platform_output = run(REMOTE_ENV_PHASE_A_CMD);
+        let platform = parse_remote_platform(&platform_output).unwrap();
+        assert!(matches!(
+            platform,
+            "Linux" | "Darwin" | "FreeBSD" | "OpenBSD" | "NetBSD"
+        ));
+        let env = parse_remote_unix_env(&run(REMOTE_ENV_PHASE_B_UNIX_CMD), platform);
+        assert_eq!(env.shell.as_deref(), Some("/usr/bin/fish"));
+        assert_eq!(env.home.as_deref(), Some("/home/fish-test"));
+        assert_eq!(
+            env.xdg_config_home.as_deref(),
+            Some("/home/fish-test/config")
         );
     }
 

@@ -65,6 +65,10 @@ pub fn set_detect_file_paths_as_links(settings: &mut PersistedSettings, value: b
     settings.terminal.detect_file_paths_as_links = value;
 }
 
+pub fn set_timestamp_hover(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.timestamp_hover = value;
+}
+
 pub fn set_selection_requires_shift(settings: &mut PersistedSettings, value: bool) {
     settings.terminal.selection_requires_shift = value;
 }
@@ -520,8 +524,16 @@ pub fn set_autosuggest_local_history(settings: &mut PersistedSettings, value: bo
     settings.terminal.autosuggest.local_shell_history = value;
 }
 
+pub fn set_save_command_history(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.autosuggest.save_history = value;
+}
+
 pub fn set_command_marks_enabled(settings: &mut PersistedSettings, value: bool) {
     settings.terminal.command_marks.enabled = value;
+}
+
+pub fn set_command_folding_enabled(settings: &mut PersistedSettings, value: bool) {
+    settings.terminal.command_marks.folding_enabled = value;
 }
 
 pub fn set_command_marks_hover_actions(settings: &mut PersistedSettings, value: bool) {

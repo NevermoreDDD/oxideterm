@@ -1,7 +1,8 @@
 use super::*;
 
-pub(in crate::workspace) const SIDEBAR_RESIZE_DIVIDER_WIDTH: f32 = 1.0;
-pub(in crate::workspace) const SIDEBAR_RESIZE_HOTZONE_WIDTH: f32 = 9.0;
+pub(in crate::workspace) use oxideterm_gpui_ui::separator::{
+    SIDEBAR_RESIZE_HOTZONE_WIDTH, sidebar_resize_hotzone_chrome,
+};
 const EMBEDDED_SFTP_SPLIT_HANDLE_SIZE: f32 = 7.0;
 const EMBEDDED_SFTP_SPLIT_LINE_SIZE: f32 = 1.0;
 const EMBEDDED_SFTP_SPLIT_HOVER_ALPHA: u32 = 0x1f;
@@ -28,36 +29,6 @@ pub(in crate::workspace) fn context_sidebar_frame_chrome(
 
 pub(in crate::workspace) fn context_sidebar_region_chrome() -> gpui::Div {
     div().relative().flex_1().min_w(px(0.0)).h_full().min_h_0()
-}
-
-pub(in crate::workspace) fn sidebar_resize_hotzone_chrome(
-    element_id: &'static str,
-    line_color: gpui::Rgba,
-    divider_at_right: bool,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(element_id)
-        .group(element_id)
-        .absolute()
-        .w(px(SIDEBAR_RESIZE_HOTZONE_WIDTH))
-        .cursor_col_resize()
-        // Keep the full drag target inside the sidebar so terminal column zero
-        // remains selectable even when the terminal has no padding.
-        .occlude()
-        .bg(rgba(0x00000000))
-        .child(
-            div()
-                .absolute()
-                .when(divider_at_right, |divider| divider.right_0())
-                .when(!divider_at_right, |divider| divider.left_0())
-                .top_0()
-                .bottom_0()
-                .w(px(SIDEBAR_RESIZE_DIVIDER_WIDTH))
-                // Keep the resize cursor when the pointer lands on the painted line itself.
-                .cursor_col_resize()
-                .bg(line_color)
-                .group_hover(element_id, move |style| style.bg(line_color.alpha(1.0))),
-        )
 }
 
 pub(in crate::workspace) fn sidebar_resize_hotzone_origin(seam: f32) -> f32 {
@@ -149,11 +120,10 @@ impl WorkspaceApp {
             ContextSidebarPanel::Assistant => {
                 ("sidebar.panels.ai", "assistant", LucideIcon::Sparkles)
             }
-            ContextSidebarPanel::HostTools => (
-                "sidebar.panels.host_tools",
-                "host-tools",
-                LucideIcon::Wrench,
-            ),
+            ContextSidebarPanel::HostTools => {
+                let tool = self.host_tools.read(cx).active_tool();
+                (tool.label_key(), "host-tools", tool.icon())
+            }
         };
         context_sidebar_region_chrome()
             .child(
@@ -175,8 +145,6 @@ impl WorkspaceApp {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
                             .px_3()
                             // Match the center tab bar's chrome opacity instead
                             // of inheriting the more transparent sidebar body.
@@ -187,55 +155,12 @@ impl WorkspaceApp {
                             .occlude()
                             .border_b_1()
                             .border_color(self.workspace_chrome_divider())
-                            // Keep the title and collapse button in one real
-                            // horizontal flex row. The region width is owned by
-                            // the parent frame, so this row must never infer a
-                            // smaller hand-derived width from the title text.
                             .child(self.render_context_sidebar_panel_title(
                                 title_key, title_role, icon, cx,
                             ))
-                            .child(
-                                div()
-                                    .id("context-sidebar-collapse")
-                                    .flex_none()
-                                    .size(px(28.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(self.tokens.radii.md))
-                                    .cursor_pointer()
-                                    .hover(move |button| button.bg(rgb(theme.bg_hover)))
-                                    .child(Self::render_lucide_icon(
-                                        LucideIcon::PanelRightClose,
-                                        self.tokens.metrics.sidebar_collapse_icon_size,
-                                        rgb(theme.text_muted),
-                                    ))
-                                    .on_mouse_move(cx.listener({
-                                        let label = self.i18n.t("sidebar.tooltips.collapse");
-                                        move |this, event: &MouseMoveEvent, _window, cx| {
-                                            this.queue_workspace_tooltip(
-                                                "context-sidebar-collapse",
-                                                label.clone(),
-                                                f32::from(event.position.x) + 12.0,
-                                                f32::from(event.position.y) + 16.0,
-                                                cx,
-                                            );
-                                        }
-                                    }))
-                                    .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                                        if !*hovered {
-                                            this.clear_workspace_tooltip(
-                                                "context-sidebar-collapse",
-                                                cx,
-                                            );
-                                        }
-                                    }))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _event, _window, cx| {
-                                            this.collapse_context_sidebar(cx);
-                                        }),
-                                    ),
+                            .when(
+                                self.active_context_sidebar_panel == ContextSidebarPanel::HostTools,
+                                |header| header.child(self.render_host_tool_monitoring_toggle(cx)),
                             ),
                     )
                     .child(
@@ -259,15 +184,13 @@ impl WorkspaceApp {
                                         self.render_host_tools_context_panel(cx)
                                     }
                                 };
-                                oxideterm_gpui_ui::motion::fade_in(
+                                oxideterm_gpui_ui::motion::slide_fade_in_x(
                                     &self.tokens,
-                                    match self.active_context_sidebar_panel {
-                                        ContextSidebarPanel::Assistant => "context-panel-assistant",
-                                        ContextSidebarPanel::HostTools => {
-                                            "context-panel-host-tools"
-                                        }
-                                    },
+                                    gpui::ElementId::Name(
+                                        format!("context-panel-{title_key}").into(),
+                                    ),
                                     div().size_full().child(content),
+                                    6.0,
                                     oxideterm_gpui_ui::motion::MotionDuration::Micro,
                                 )
                             }),
@@ -288,7 +211,7 @@ impl WorkspaceApp {
             if self.sidebar_resizing {
                 rgb(theme.accent)
             } else {
-                rgba(theme.border << 8)
+                self.workspace_divider_color(theme.border, 0x40)
             },
             true,
         )
@@ -322,6 +245,7 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.tokens.ui;
+        let activity_width = self.tokens.metrics.activity_bar_width;
         let hotzone = sidebar_resize_hotzone_chrome(
             "context-right-sidebar-resize-hotzone",
             if self.ai_entity.read(cx).chat_ui().sidebar_resizing {
@@ -351,7 +275,9 @@ impl WorkspaceApp {
             &self.tokens,
             "right-sidebar-edge-motion",
             hotzone,
-            |edge, width| edge.right(px(sidebar_resize_hotzone_origin(width))),
+            move |edge, width| {
+                edge.right(px(sidebar_resize_hotzone_origin(activity_width + width)))
+            },
         )
     }
 
@@ -406,8 +332,8 @@ impl WorkspaceApp {
             .h_full()
             .flex()
             .flex_col()
-            .border_r_1()
-            .border_color(self.workspace_chrome_divider())
+            // The overlaid resize hotzone owns the seam without reserving an
+            // untinted layout border between the sidebar and main content.
             .child(self.render_sidebar_header(cx))
             .when(
                 self.effective_sidebar_panel_section() == SidebarSection::Sessions
@@ -444,11 +370,6 @@ impl WorkspaceApp {
                 self.effective_sidebar_panel_section() == SidebarSection::Sessions,
                 |sidebar| sidebar.child(self.render_active_sessions_footer(cx)),
             )
-            .child(oxideterm_gpui_ui::surface::panel_edge_highlight(
-                &self.tokens,
-                self.workspace_sidebar_background(theme.bg).a,
-                0.0,
-            ))
             .into_any_element()
     }
 
@@ -528,6 +449,9 @@ impl WorkspaceApp {
                 ActiveSessionSidebarViewMode::Focus => {
                     (LucideIcon::ListChecks, SidebarActionKind::ToggleSessionView)
                 }
+                ActiveSessionSidebarViewMode::Host => {
+                    (LucideIcon::Server, SidebarActionKind::ToggleSessionView)
+                }
             };
             header = header
                 .child(self.render_session_search_button(cx))
@@ -552,17 +476,19 @@ impl WorkspaceApp {
         let label = match action {
             SidebarActionKind::ToggleSessionView => match self.active_session_sidebar_view_mode {
                 ActiveSessionSidebarViewMode::Tree => self.i18n.t("sidebar.tooltips.switch_focus"),
-                ActiveSessionSidebarViewMode::Focus => self.i18n.t("sidebar.tooltips.switch_tree"),
+                ActiveSessionSidebarViewMode::Focus => self.i18n.t("sidebar.tooltips.switch_host"),
+                ActiveSessionSidebarViewMode::Host => self.i18n.t("sidebar.tooltips.switch_tree"),
             },
             SidebarActionKind::NewConnection => self.i18n.t("sidebar.tooltips.new_connection"),
         };
 
         let toggle_focus_active = action == SidebarActionKind::ToggleSessionView
-            && self.active_session_sidebar_view_mode == ActiveSessionSidebarViewMode::Focus;
+            && self.active_session_sidebar_view_mode != ActiveSessionSidebarViewMode::Tree;
 
         // Tauri sidebar header actions are icon buttons with title tooltips.
         // The view-mode action is the old Folder/ListChecks toggle from
-        // Sidebar.tsx; keep its active "secondary" chrome only in focus mode.
+        // Sidebar.tsx; keep its active "secondary" chrome for every non-default
+        // view mode so the header shows that a mode is engaged.
         div()
             .ml_1()
             .child(self.workspace_tooltip_icon_button(
@@ -1246,6 +1172,99 @@ mod sidebar_resize_region_tests {
         Styled, TestAppContext, Window, canvas, div, px, size,
     };
 
+    struct SidebarSurfaceView(Entity<WorkspaceApp>);
+
+    impl Render for SidebarSurfaceView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |workspace, cx| {
+                div()
+                    .size_full()
+                    .flex()
+                    .child(workspace.render_activity_bar(cx))
+                    .child(workspace.render_sidebar_region(window, cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_tints_reach_the_seams_without_exposing_wallpaper(cx: &mut TestAppContext) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_SIDEBAR_SEAM_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // Portable storage isolates the real workspace from user settings and plugins.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            fs::hard_link(&executable, &child).unwrap();
+            fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(PathBuf::from(fixture_dir)));
+        let mut settings = SettingsStore::load_from_path(settings_path).unwrap();
+        settings.settings_mut().ssh_config.auto_load_hosts = false;
+        settings.settings_mut().onboarding_completed = true;
+        settings.save().unwrap();
+        cx.executor().allow_parking();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            SidebarSurfaceView(cx.new(|cx| {
+                let mut workspace = WorkspaceApp::new(window, cx, None, None).unwrap();
+                workspace.active_background.enabled = true;
+                workspace.active_background.image = Some("seam-fixture.png".into());
+                workspace.active_background.scope = oxideterm_settings::BackgroundScope::Window;
+                workspace.render_policy.allow_background_images = true;
+                workspace.tokens.ui.bg = 0x102030;
+                workspace.tokens.metrics.sidebar_vibrancy_alpha = 0.5;
+                workspace.sidebar_width = 300.0;
+                workspace
+            }))
+        });
+        cx.simulate_resize(size(px(800.0), px(600.0)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let activity_width = view.read_with(cx, |view, cx| {
+            view.0.read(cx).tokens.metrics.activity_bar_width
+        });
+        cx.update(|window, _| {
+            let tint: gpui::Hsla = rgba(0x10203080).into();
+            let scale = window.scale_factor();
+            let quads = window.painted_quads();
+            for (left, right) in [(0.0, activity_width), (activity_width, 300.0)] {
+                let body = quads
+                    .iter()
+                    .filter(|quad| {
+                        quad.background.as_solid() == Some(tint)
+                            && (quad.bounds.left().0 / scale - left).abs() < 0.01
+                    })
+                    .max_by(|a, b| {
+                        a.bounds
+                            .size
+                            .height
+                            .partial_cmp(&b.bounds.size.height)
+                            .unwrap()
+                    })
+                    .expect("sidebar body tint");
+                assert_eq!(
+                    body.bounds.right().0 / scale,
+                    right,
+                    "the body must cover the border slot, not expose a bright wallpaper strip"
+                );
+            }
+        });
+    }
+
     struct TestContextSidebarChrome {
         total_width: f32,
         resize_started: Rc<Cell<bool>>,
@@ -1344,8 +1363,6 @@ mod sidebar_resize_region_tests {
                                                 .flex()
                                                 .flex_row()
                                                 .items_center()
-                                                .justify_between()
-                                                .gap(px(8.0))
                                                 .px_3()
                                                 .debug_selector(|| "context-titlebar".to_string())
                                                 .child(
@@ -1355,14 +1372,6 @@ mod sidebar_resize_region_tests {
                                                         .min_w(px(0.0))
                                                         .debug_selector(|| {
                                                             "context-title-drag".to_string()
-                                                        }),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .size(px(28.0))
-                                                        .debug_selector(|| {
-                                                            "context-collapse".to_string()
                                                         }),
                                                 ),
                                         ),
@@ -1515,9 +1524,6 @@ mod sidebar_resize_region_tests {
         let titlebar = cx
             .debug_bounds("context-titlebar")
             .expect("titlebar bounds");
-        let collapse = cx
-            .debug_bounds("context-collapse")
-            .expect("collapse bounds");
         let hotzone = cx.debug_bounds("context-hotzone").expect("hotzone bounds");
 
         assert_close("frame width", f32::from(frame.size.width), total_width);
@@ -1532,12 +1538,6 @@ mod sidebar_resize_region_tests {
             f32::from(titlebar.size.width),
             f32::from(region.size.width),
         );
-
-        // The collapse control should be at the right chrome edge, allowing for
-        // the titlebar padding. This catches regressions where the titlebar row
-        // shrinks to the intrinsic "OxideSens" title width.
-        let right_padding = right_edge(&titlebar) - right_edge(&collapse);
-        assert_close("collapse right padding", right_padding, 12.0);
 
         assert_close(
             "hotzone origin",

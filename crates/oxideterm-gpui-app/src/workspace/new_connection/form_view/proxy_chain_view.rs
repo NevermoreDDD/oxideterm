@@ -178,6 +178,43 @@ impl WorkspaceApp {
                     );
                 }
             }
+            NewConnectionSelect::TunnelHost => {
+                let selected_id = self
+                    .ssh_tunnels
+                    .form
+                    .as_ref()
+                    .and_then(|form| form.host_id.as_deref());
+                let connections = self.connection_store.connection_infos();
+                if connections.is_empty() {
+                    popup = popup.child(
+                        div()
+                            .p_2()
+                            .text_size(px(self.tokens.metrics.ui_text_sm))
+                            .text_color(rgb(self.tokens.ui.text_muted))
+                            .child(self.i18n.t("ssh_tunnel.choose_host")),
+                    );
+                }
+                for host in connections {
+                    let selected = selected_id == Some(host.id.as_str());
+                    let label = format!(
+                        "{} · {}@{}:{}",
+                        host.name, host.username, host.host, host.port
+                    );
+                    popup = popup.child(select_option_action(
+                        select_option(&self.tokens, label, selected),
+                        false,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.close_new_connection_select(cx);
+                            if let Some(form) = this.ssh_tunnels.form.as_mut() {
+                                form.host_id = Some(host.id.clone());
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ));
+                }
+            }
             NewConnectionSelect::JumpSavedConnection => {
                 let selected_connection_id = self
                     .connection_form_state(cx)
@@ -937,6 +974,53 @@ impl WorkspaceApp {
                             this.close_new_connection_select(cx);
                             this.set_new_connection_serial_parity(parity, cx);
                             cx.stop_propagation();
+                        }),
+                    ));
+                }
+            }
+            NewConnectionSelect::TelnetInputLineEnding
+            | NewConnectionSelect::TelnetOutputLineEnding => {
+                use oxideterm_connections::SerialLineEnding;
+                let output = select_id == NewConnectionSelect::TelnetOutputLineEnding;
+                let selected = self
+                    .connection_form_state(cx)
+                    .form
+                    .as_ref()
+                    .map(|form| {
+                        if output {
+                            form.telnet_output_line_ending
+                        } else {
+                            form.telnet_input_line_ending
+                        }
+                    })
+                    .unwrap_or_default();
+                for value in [
+                    SerialLineEnding::None,
+                    SerialLineEnding::Lf,
+                    SerialLineEnding::CrLf,
+                    SerialLineEnding::Cr,
+                ] {
+                    popup = popup.child(select_option_action(
+                        select_option(
+                            &self.tokens,
+                            self.connection_line_ending_label(value),
+                            selected == value,
+                        ),
+                        false,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.close_new_connection_select(cx);
+                            this.update_connection_form_state(cx, |state| {
+                                if let Some(form) = state.form.as_mut() {
+                                    if output {
+                                        form.telnet_output_line_ending = value;
+                                    } else {
+                                        form.telnet_input_line_ending = value;
+                                    }
+                                }
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
                         }),
                     ));
                 }

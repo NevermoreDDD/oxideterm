@@ -188,12 +188,16 @@ impl ConnectionStore {
             return Ok(());
         }
 
+        // Imports can reuse a slot whose earlier deletion was deferred. A live
+        // reference retires that cleanup request rather than its current secret.
+        let active_privilege_ids = collect_active_privilege_keychain_ids(&self.data);
         self.data.pending_keychain_cleanup = original_connection_ids
             .into_iter()
             .filter(|id| self.keychain.delete(id).is_err())
             .collect();
         self.data.pending_privilege_keychain_cleanup = original_privilege_ids
             .into_iter()
+            .filter(|id| !active_privilege_ids.contains(id))
             .filter(|id| self.privilege_keychain.delete(id).is_err())
             .collect();
         self.save()
@@ -669,6 +673,16 @@ impl ConnectionStore {
                 .groups
                 .retain(|group| !group_path_is_within(group, &name));
             let now = Utc::now();
+            for profile in &mut self.data.plugin_profiles {
+                if profile
+                    .group
+                    .as_deref()
+                    .is_some_and(|group| group_path_is_within(group, &name))
+                {
+                    profile.group = None;
+                    profile.updated_at = now;
+                }
+            }
             for conn in &mut self.data.connections {
                 if conn
                     .group
@@ -810,6 +824,17 @@ impl ConnectionStore {
                 updated += 1;
             }
         }
+        for profile in &mut self.data.plugin_profiles {
+            if let Some(renamed) = profile
+                .group
+                .as_deref()
+                .and_then(|group| rename_group_path(group, &old_name, &new_name))
+            {
+                profile.group = Some(renamed);
+                profile.updated_at = now;
+                updated += 1;
+            }
+        }
         for profile in &mut self.data.local_terminal_profiles {
             if let Some(renamed) = profile
                 .group
@@ -896,7 +921,7 @@ impl ConnectionStore {
     }
 
     pub fn move_to_group(&mut self, ids: &[String], group: Option<&str>) -> Result<usize> {
-        self.move_session_assets_to_group(ids, &[], &[], &[], &[], &[], &[], &[], group)
+        self.move_session_assets_to_group(ids, &[], &[], &[], &[], &[], &[], &[], &[], group)
     }
 
     /// Moves all saved Session Manager asset types in one metadata save.
@@ -910,6 +935,7 @@ impl ConnectionStore {
         standalone_sftp_profile_ids: &[String],
         remote_desktop_ids: &[String],
         ftp_profile_ids: &[String],
+        plugin_profile_ids: &[String],
         group: Option<&str>,
     ) -> Result<usize> {
         let original_groups = self.data.groups.clone();
@@ -932,6 +958,13 @@ impl ConnectionStore {
         let ftp_profile_id_set = ftp_profile_ids.iter().collect::<HashSet<_>>();
         let now = Utc::now();
         let mut updated = 0;
+        for profile in &mut self.data.plugin_profiles {
+            if plugin_profile_ids.contains(&profile.id) && profile.group != group {
+                profile.group = group.clone();
+                profile.updated_at = now;
+                updated += 1;
+            }
+        }
         for conn in &mut self.data.connections {
             if connection_id_set.contains(&conn.id) && conn.group != group {
                 conn.group = group.clone();
@@ -1485,6 +1518,12 @@ impl ConnectionStore {
             profile.icon_background_color = normalize_optional_text(request.icon_background_color);
             profile.host = request.host.trim().to_string();
             profile.port = request.port;
+            if let Some(value) = request.input_line_ending {
+                profile.input_line_ending = value;
+            }
+            if let Some(value) = request.output_line_ending {
+                profile.output_line_ending = value;
+            }
             profile.upstream_proxy = self.materialize_upstream_proxy_policy(
                 request
                     .upstream_proxy
@@ -1528,6 +1567,46 @@ impl ConnectionStore {
         })();
         audit.result(&audit_result);
         audit_result
+    }
+
+    pub fn set_telnet_profile_line_endings(
+        &mut self,
+        id: &str,
+        input: Option<SerialLineEnding>,
+        output: Option<SerialLineEnding>,
+    ) -> Result<bool> {
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Configuration,
+            "configuration_save",
+            Some(id),
+            Some("telnet_line_endings"),
+        );
+        let result = (|| {
+            let Some(profile) = self
+                .data
+                .telnet_profiles
+                .iter_mut()
+                .find(|profile| profile.id == id)
+            else {
+                return Ok(false);
+            };
+            if !input.is_some_and(|value| profile.input_line_ending != value)
+                && !output.is_some_and(|value| profile.output_line_ending != value)
+            {
+                return Ok(false);
+            }
+            if let Some(value) = input {
+                profile.input_line_ending = value;
+            }
+            if let Some(value) = output {
+                profile.output_line_ending = value;
+            }
+            profile.updated_at = Utc::now();
+            self.save()?;
+            Ok(true)
+        })();
+        audit.changed(&result);
+        result
     }
 
     pub fn delete_telnet_profile(&mut self, id: &str) -> Result<bool> {
@@ -2459,6 +2538,22 @@ impl ConnectionStore {
         Ok(())
     }
 
+    fn delete_or_queue_privilege_keychain_entry(&mut self, reference: String) -> Result<()> {
+        if self.privilege_keychain.delete(&reference).is_err()
+            && !self
+                .data
+                .pending_privilege_keychain_cleanup
+                .contains(&reference)
+        {
+            // Retain the request in memory even if persisting it also fails.
+            self.data
+                .pending_privilege_keychain_cleanup
+                .push(reference);
+            self.save()?;
+        }
+        Ok(())
+    }
+
     pub fn import_ssh_connection(
         &mut self,
         mut connection: SavedConnection,
@@ -2616,17 +2711,8 @@ impl ConnectionStore {
         let original_keychain = self.snapshot_keychain_entries(&original_data)?;
         let imported_privilege_keychain_ids =
             collect_imported_privilege_keychain_ids(&connections);
-        let existing_privilege_keychain_ids = original_data
-            .connections
-            .iter()
-            .flat_map(collect_privilege_keychain_ids)
-            .chain(
-                original_data
-                    .local_privilege_credentials
-                    .iter()
-                    .filter_map(|credential| credential.keychain_id.clone()),
-            )
-            .collect::<HashSet<_>>();
+        let existing_privilege_keychain_ids =
+            collect_active_privilege_keychain_ids(&original_data);
         let overwritten_privilege_keychain_ids = imported_privilege_keychain_ids
             .intersection(&existing_privilege_keychain_ids)
             .cloned()
@@ -2639,6 +2725,7 @@ impl ConnectionStore {
         let mut touched_managed_secret_ids = HashSet::new();
         let mut created_managed_secret_config_key = false;
         let mut stale_old_keychain_ids = HashSet::new();
+        let mut stale_old_privilege_keychain_ids = HashSet::new();
         let mut imported_ids = Vec::new();
 
         let result = (|| {
@@ -2657,7 +2744,21 @@ impl ConnectionStore {
                 touched_keychain_ids.extend(staged.touched_keychain_ids);
                 touched_privilege_keychain_ids.extend(staged.touched_privilege_keychain_ids);
                 stale_old_keychain_ids.extend(staged.stale_old_keychain_ids);
+                stale_old_privilege_keychain_ids
+                    .extend(staged.stale_old_privilege_keychain_ids);
                 imported_ids.push(staged.id);
+            }
+            for keychain_id in stale_old_privilege_keychain_ids {
+                if !self
+                    .data
+                    .pending_privilege_keychain_cleanup
+                    .contains(&keychain_id)
+                {
+                    // Persist cleanup in the same transaction that retires the reference.
+                    self.data
+                        .pending_privilege_keychain_cleanup
+                        .push(keychain_id);
+                }
             }
             self.normalize();
             self.save()?;
@@ -2702,6 +2803,7 @@ impl ConnectionStore {
         for keychain_id in &stale_old_keychain_ids {
             let _ = self.keychain.delete(keychain_id);
         }
+        let _ = self.retry_persisted_keychain_cleanup();
 
         Ok(imported_ids
             .iter()
@@ -2742,73 +2844,152 @@ impl ConnectionStore {
             Some("privilege_credential"),
         );
         let audit_result = (|| {
-        let connection_id = non_empty(request.connection_id.trim(), "Connection id")?.to_string();
-        let label = non_empty(request.label.trim(), "Credential label")?.to_string();
-        let now = Utc::now();
-        let credential_id = request
-            .credential_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let keychain_id = privilege_keychain_id(&connection_id, &credential_id);
-
-        if let Some(secret) = request.secret.as_ref() {
-            // The explicit-click privilege secret is written to the dedicated
-            // namespace before metadata is persisted, matching the Tauri
-            // boundary where SavedConnection never owns the secret value.
-            self.privilege_keychain.store(&keychain_id, secret)?;
-        }
-
-        let credentials = self.privilege_credentials_for_scope_mut(&connection_id)?;
-        let existing = credentials
-            .iter()
-            .find(|credential| credential.id == credential_id)
-            .cloned();
-        audit.summary(if existing.is_some() { "credential:updated" } else { "credential:created" });
-        let prompt_patterns =
-            normalize_privilege_prompt_patterns(request.kind, request.prompt_patterns);
-        let keychain_id = if request.secret.is_some() {
-            Some(keychain_id)
-        } else {
-            existing
-                .as_ref()
-                .and_then(|credential| credential.keychain_id.clone())
-        };
-        let credential = SavedPrivilegeCredential {
-            id: credential_id.clone(),
-            connection_id,
-            label,
-            kind: request.kind,
-            username_hint: request
-                .username_hint
+            let connection_id =
+                non_empty(request.connection_id.trim(), "Connection id")?.to_string();
+            let label = non_empty(request.label.trim(), "Credential label")?.to_string();
+            let credential_id = request
+                .credential_id
                 .as_deref()
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
-            prompt_patterns,
-            keychain_id,
-            plaintext_secret: None,
-            enabled: request.enabled,
-            require_click_to_send: request.require_click_to_send,
-            created_at: existing
+                .filter(|id| !id.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let existing = self
+                .privilege_credentials_for_scope(&connection_id)?
+                .iter()
+                .find(|credential| credential.id == credential_id)
+                .cloned();
+            audit.summary(if existing.is_some() {
+                "credential:updated"
+            } else {
+                "credential:created"
+            });
+            let host_patterns = if connection_id == SSH_COMMON_PRIVILEGE_SCOPE_ID {
+                let mut patterns = normalize_privilege_host_patterns(request.host_patterns);
+                // `*` is the canonical all-host marker. Keep click-only shared
+                // credentials in that form so a reload does not report an empty
+                // scope that the UI renders as `*` anyway.
+                if patterns.is_empty() && request.require_click_to_send {
+                    patterns.push("*".to_string());
+                }
+                patterns
+            } else {
+                // Host patterns only partition the shared SSH scope. A
+                // connection-specific credential already has an exact owner.
+                Vec::new()
+            };
+            if connection_id == SSH_COMMON_PRIVILEGE_SCOPE_ID
+                && !request.require_click_to_send
+                && host_patterns.is_empty()
+            {
+                bail!("Automatic privilege fill requires a host pattern or a connection scope");
+            }
+            let second_factor_patterns = normalize_privilege_second_factor_patterns(
+                request.response_mode,
+                request.second_factor_patterns,
+            );
+            let second_factor_user_hint = if request.response_mode.waits_for_totp() {
+                request
+                    .second_factor_user_hint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|hint| !hint.is_empty())
+                    .map(ToOwned::to_owned)
+            } else {
+                None
+            };
+            let totp_credential_id = if request.response_mode.uses_totp() {
+                request
+                    .totp_credential_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(ToOwned::to_owned)
+            } else {
+                None
+            };
+            if request.response_mode.uses_totp() && totp_credential_id.is_none() {
+                bail!("TOTP response modes require a verification code credential");
+            }
+            if let Some(totp_credential_id) = totp_credential_id.as_deref()
+                && !self
+                    .data
+                    .totp_credentials
+                    .iter()
+                    .any(|credential| credential.id == totp_credential_id)
+            {
+                bail!("TOTP credential not found");
+            }
+            let new_reference = request
+                .secret
                 .as_ref()
-                .map(|credential| credential.created_at)
-                .unwrap_or(now),
-            updated_at: now,
-        };
-        if let Some(index) = credentials
-            .iter()
-            .position(|candidate| candidate.id == credential_id)
-        {
-            credentials[index] = credential.clone();
-        } else {
-            credentials.push(credential.clone());
-        }
-        self.touch_privilege_scope(&credential.connection_id);
-        self.save()?;
-        Ok(credential)
+                .map(|_| format!("privilege-{}", Uuid::new_v4()));
+            if let (Some(secret), Some(reference)) = (&request.secret, &new_reference) {
+                // Stage a new slot so failed metadata writes leave the old password usable.
+                self.privilege_keychain.store(reference, secret)?;
+            }
+            let now = Utc::now();
+            let credential = SavedPrivilegeCredential {
+                id: credential_id,
+                connection_id,
+                label,
+                prompt_type: request.prompt_type,
+                response_mode: request.response_mode,
+                username_hint: request
+                    .username_hint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|hint| !hint.is_empty())
+                    .map(ToOwned::to_owned),
+                prompt_patterns: normalize_privilege_prompt_patterns(
+                    request.prompt_type,
+                    request.prompt_patterns,
+                ),
+                host_patterns,
+                second_factor_patterns,
+                second_factor_user_hint,
+                totp_credential_id,
+                keychain_id: new_reference
+                    .clone()
+                    .or_else(|| existing.as_ref().and_then(|old| old.keychain_id.clone())),
+                plaintext_secret: None,
+                enabled: request.enabled,
+                require_click_to_send: request.require_click_to_send,
+                created_at: existing.as_ref().map(|old| old.created_at).unwrap_or(now),
+                updated_at: now,
+            };
+            let mut candidate = self.clone();
+            let credentials =
+                candidate.privilege_credentials_for_scope_mut(&credential.connection_id)?;
+            if let Some(index) = credentials.iter().position(|old| old.id == credential.id) {
+                credentials[index] = credential.clone();
+            } else {
+                credentials.push(credential.clone());
+            }
+            if new_reference.is_some()
+                && let Some(reference) = existing.and_then(|old| old.keychain_id)
+            {
+                candidate
+                    .data
+                    .pending_privilege_keychain_cleanup
+                    .push(reference);
+            }
+            candidate.touch_privilege_scope(&credential.connection_id);
+            if let Err(error) = candidate.save() {
+                // A failed cleanup must not replace the metadata persistence error.
+                if let Some(reference) = new_reference
+                    && let Err(cleanup_error) =
+                        self.delete_or_queue_privilege_keychain_entry(reference)
+                {
+                    return Err(anyhow::anyhow!(
+                        "{error:#}; staged privilege secret cleanup remains in memory because its retry record could not be saved: {cleanup_error:#}"
+                    ));
+                }
+                return Err(error);
+            }
+            self.data = candidate.data;
+            let _ = self.retry_persisted_keychain_cleanup();
+            Ok(credential)
         })();
         audit.result(&audit_result);
         audit_result
@@ -2826,18 +3007,29 @@ impl ConnectionStore {
             Some("privilege_credential"),
         );
         let audit_result = (|| {
-        let credentials = self.privilege_credentials_for_scope_mut(connection_id)?;
-        let before = credentials.len();
-        credentials
-            .retain(|credential| credential.id != credential_id);
-        let removed = before != credentials.len();
-        if removed {
-            self.touch_privilege_scope(connection_id);
-            let keychain_id = privilege_keychain_id(connection_id, credential_id);
-            let _ = self.privilege_keychain.delete(&keychain_id);
-            self.save()?;
-        }
-        Ok(removed)
+            let Some(credential) = self
+                .privilege_credentials_for_scope(connection_id)?
+                .iter()
+                .find(|credential| credential.id == credential_id)
+                .cloned()
+            else {
+                return Ok(false);
+            };
+            let mut candidate = self.clone();
+            candidate
+                .privilege_credentials_for_scope_mut(connection_id)?
+                .retain(|credential| credential.id != credential_id);
+            if let Some(reference) = credential.keychain_id {
+                candidate
+                    .data
+                    .pending_privilege_keychain_cleanup
+                    .push(reference);
+            }
+            candidate.touch_privilege_scope(connection_id);
+            candidate.save()?;
+            self.data = candidate.data;
+            let _ = self.retry_persisted_keychain_cleanup();
+            Ok(true)
         })();
         audit.changed(&audit_result);
         audit_result
@@ -2885,6 +3077,9 @@ impl ConnectionStore {
             // keychain-only secret boundary as SSH privilege credentials.
             return Ok(&self.data.local_privilege_credentials);
         }
+        if connection_id == SSH_COMMON_PRIVILEGE_SCOPE_ID {
+            return Ok(&self.data.ssh_common_privilege_credentials);
+        }
         self.get(connection_id)
             .map(|connection| &connection.privilege_credentials)
             .ok_or_else(|| anyhow::anyhow!("Connection not found"))
@@ -2899,6 +3094,9 @@ impl ConnectionStore {
             // level list while secrets remain in the dedicated privilege
             // keychain service.
             return Ok(&mut self.data.local_privilege_credentials);
+        }
+        if connection_id == SSH_COMMON_PRIVILEGE_SCOPE_ID {
+            return Ok(&mut self.data.ssh_common_privilege_credentials);
         }
         self.data
             .connections
@@ -3825,6 +4023,10 @@ impl ConnectionStore {
             .as_ref()
             .map(collect_connection_keychain_ids)
             .unwrap_or_default();
+        let old_privilege_keychain_ids = existing
+            .as_ref()
+            .map(collect_privilege_keychain_ids)
+            .unwrap_or_default();
         let existing_auth = existing.as_ref().map(|conn| conn.auth.clone());
 
         connection.version = CONFIG_VERSION;
@@ -3894,9 +4096,45 @@ impl ConnectionStore {
         } else if connection.created_at.timestamp() <= 0 {
             connection.created_at = now;
         }
+        for credential in &mut connection.privilege_credentials {
+            if credential.plaintext_secret.is_none() && credential.keychain_id.is_none()
+            {
+                let credential_connection_id =
+                    privilege_credential_connection_id(&credential.connection_id, &connection.id);
+                let existing_credential = existing.as_ref().and_then(|existing_connection| {
+                    existing_connection
+                        .privilege_credentials
+                        .iter()
+                        .find(|candidate| {
+                            candidate.id == credential.id
+                                && candidate.prompt_type == credential.prompt_type
+                                && candidate.response_mode == credential.response_mode
+                                && privilege_credential_connection_id(
+                                    &candidate.connection_id,
+                                    &existing_connection.id,
+                                ) == credential_connection_id
+                        })
+                });
+                if let Some(existing_credential) = existing_credential {
+                    // Metadata-only imports do not carry secrets. Reuse a local
+                    // reference only when the credential identity and prompt scope
+                    // still match; otherwise the old entry must be retired.
+                    credential.keychain_id = existing_credential.keychain_id.clone();
+                }
+            }
+        }
         let (privilege_credentials, touched_privilege_keychain_ids) =
             self.materialize_privilege_credentials(&connection.id, connection.privilege_credentials)?;
         connection.privilege_credentials = privilege_credentials;
+        let next_privilege_keychain_ids = connection
+            .privilege_credentials
+            .iter()
+            .filter_map(|credential| credential.keychain_id.clone())
+            .collect::<HashSet<_>>();
+        let stale_old_privilege_keychain_ids = old_privilege_keychain_ids
+            .into_iter()
+            .filter(|keychain_id| !next_privilege_keychain_ids.contains(keychain_id))
+            .collect::<Vec<_>>();
         connection.updated_at = Some(now);
 
         let next_keychain_ids = collect_keychain_ids_for_parts(
@@ -3929,6 +4167,7 @@ impl ConnectionStore {
             touched_keychain_ids,
             touched_privilege_keychain_ids,
             stale_old_keychain_ids,
+            stale_old_privilege_keychain_ids,
         })
     }
 
@@ -4221,7 +4460,18 @@ impl ConnectionStore {
                     .iter()
                     .filter_map(|profile| profile.group.clone()),
             )
-            .chain(self.data.local_terminal_profiles.iter().filter_map(|profile| profile.group.clone()))
+            .chain(
+                self.data
+                    .local_terminal_profiles
+                    .iter()
+                    .filter_map(|profile| profile.group.clone()),
+            )
+            .chain(
+                self.data
+                    .plugin_profiles
+                    .iter()
+                    .filter_map(|profile| profile.group.clone()),
+            )
             .collect::<Vec<_>>();
         for group in implicit_local_groups {
             if !self.data.groups.contains(&group) {

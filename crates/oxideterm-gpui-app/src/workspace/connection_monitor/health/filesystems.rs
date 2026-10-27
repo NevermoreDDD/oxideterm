@@ -112,7 +112,7 @@ impl HostToolsEntity {
         let anchor_frame = ime.clone();
         text_input_anchor_probe(
             ime.anchor_id(),
-            text_input(
+            ime.text_input(
                 tokens,
                 TextInputView {
                     value: &self.ui.host_filesystem_search_query,
@@ -506,6 +506,11 @@ impl HostToolsEntity {
         let read_only = host_filesystem_read_only_display(i18n, entry.read_only);
 
         div()
+            .id(host_tools_row_id(
+                "host-filesystem-row",
+                connection_id,
+                entry.id.clone(),
+            ))
             .w_full()
             .min_w_0()
             .border_b_1()

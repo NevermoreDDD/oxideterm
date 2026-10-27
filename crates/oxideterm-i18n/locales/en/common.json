@@ -257,6 +257,21 @@
     }
   },
   "plugin": {
+    "connections": {
+      "name": "Name",
+      "group": "Group",
+      "cancel": "Cancel",
+      "save": "Save",
+      "save_connect": "Save and connect",
+      "failed": "Could not complete the operation. Check the connection settings and plugin permissions.",
+      "disconnect": "Disconnect",
+      "connecting": "Connecting…",
+      "connected": "Connected",
+      "disconnected": "Disconnected",
+      "unavailable": "The connection provider is unavailable. Enable or install the plugin to connect.",
+      "password_unchanged": "Leave blank to keep the saved value",
+      "clear_credentials": "Clear saved credentials"
+    },
     "install_queued": "Waiting · {{position}}",
     "installing_named": "Installing {{name}}",
     "install_queue_count": "{{count}} waiting",
@@ -288,6 +303,7 @@
     "manager_compatibility_notice": "Native plugins can use a manifest, WASM, or a separate process. Legacy JavaScript plugins from the Tauri version remain available for inspection or removal, but cannot run in the native version.",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "The current password does not match the one used for this sync space. Enter and save the original password before changing it. If you have forgotten it, use a new namespace and upload this device's configuration.",
         "protocol_upgrade_required": "Update your sync server to a version that supports the new cloud sync protocol, then synchronize again.",
         "password_change_pending": "A password change is pending. Retry with the same new password.",
         "change_password": "Change sync password",
@@ -476,7 +492,7 @@
         "auto_upload_interval": "Auto upload interval (minutes)",
         "default_conflict_strategy": "Default conflict strategy",
         "sync_connections": "Sync connections",
-        "sync_forwards": "Sync saved forwards",
+        "sync_forwards": "Sync port forwards and SSH tunnels",
         "sync_quick_commands": "Sync quick commands",
         "sync_serial_profiles": "Sync serial profiles",
         "sync_telnet_profiles": "Sync Telnet profiles",
@@ -852,6 +868,7 @@
         "redacted": "redacted"
       },
       "diff_fields": {
+        "plugin_configuration": "Connection settings",
         "name": "Name",
         "group": "Group",
         "host": "Host",
@@ -1141,6 +1158,8 @@
     "continue_button": "Continue to OxideTerm 2"
   },
   "onboarding": {
+    "more_features": "Explore more features",
+    "less_features": "Show fewer features",
     "step_welcome": "Welcome",
     "step_appearance": "Appearance",
     "step_workflow": "Connections & workflow",
@@ -1318,8 +1337,8 @@
     "external_import_desc": "Import hosts from SSH config and supported third-party terminal managers with preview and duplicate handling."
   },
   "zen_mode": {
-    "hint": "Zen Mode — Press ⌘⇧Z to exit",
-    "hint_other": "Zen Mode — Press Ctrl+Shift+Z to exit"
+    "hint": "Zen Mode — Press {{shortcut}} to exit",
+    "hint_unbound": "Zen Mode — Exit from the command palette"
   },
   "tabbar": {
     "drag_to_dock": "Drag to dock",

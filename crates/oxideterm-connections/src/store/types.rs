@@ -3,6 +3,7 @@ use crate::{SecretString, keychain::ConnectionKeychain};
 pub const CONFIG_VERSION: u32 = 1;
 pub const CONNECTION_TOMBSTONE_RETENTION_DAYS: i64 = 30;
 pub const LOCAL_SHELL_PRIVILEGE_CONNECTION_ID: &str = "local-shell:default";
+pub const SSH_COMMON_PRIVILEGE_SCOPE_ID: &str = "ssh:common";
 pub const GLOBAL_UPSTREAM_PROXY_PASSWORD_KEYCHAIN_ID: &str = "oxide_global_upstream_proxy_password";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -522,24 +523,65 @@ impl fmt::Debug for SavedProxyCommand {
     }
 }
 
+/// Classifies the terminal prompt this credential answers. The response mode
+/// is independent: a sudo prompt may demand a password, a password and a
+/// separate verification code, or both values in one response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PrivilegeCredentialKind {
-    SudoPassword,
-    SuPassword,
-    CustomPrompt,
+pub enum PrivilegePromptType {
+    Sudo,
+    Su,
+    Custom,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivilegeResponseMode {
+    /// Send the stored secret and press Enter.
+    #[default]
+    PasswordOnly,
+    /// Send the stored secret, then answer a second prompt with a TOTP code.
+    PasswordThenTotp,
+    /// Append the current TOTP code to the stored secret in one response.
+    PasswordWithTotp,
+}
+
+impl PrivilegeResponseMode {
+    /// Both TOTP modes need a bound verification-code credential.
+    pub fn uses_totp(self) -> bool {
+        !matches!(self, Self::PasswordOnly)
+    }
+
+    /// Only the separate-input flow observes a second terminal prompt.
+    pub fn waits_for_totp(self) -> bool {
+        matches!(self, Self::PasswordThenTotp)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SavedPrivilegeCredential {
     pub id: String,
     pub connection_id: String,
     pub label: String,
-    pub kind: PrivilegeCredentialKind,
+    pub prompt_type: PrivilegePromptType,
+    pub response_mode: PrivilegeResponseMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompt_patterns: Vec<String>,
+    /// SSH-common credentials can target a host group without becoming a
+    /// connection-specific credential. Empty means every SSH host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_patterns: Vec<String>,
+    /// Text fragments that identify the second prompt in a two-stage
+    /// authentication credential.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub second_factor_patterns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_factor_user_hint: Option<String>,
+    /// Optional second-factor seed used after a successful password prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub totp_credential_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keychain_id: Option<String>,
     #[serde(default, skip)]
@@ -550,6 +592,126 @@ pub struct SavedPrivilegeCredential {
     pub require_click_to_send: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Pre-split credential shape. Existing installations may still carry it in
+/// `connections.json`, so reading the old kind must not prevent startup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LegacyPrivilegeCredentialKind {
+    SudoPassword,
+    SuPassword,
+    CustomPrompt,
+    #[serde(alias = "two_stage_authentication")]
+    TwoStageSeparateInput,
+    TwoStageCombinedInput,
+}
+
+impl LegacyPrivilegeCredentialKind {
+    pub(crate) fn into_parts(self) -> (PrivilegePromptType, PrivilegeResponseMode) {
+        match self {
+            Self::SudoPassword => (PrivilegePromptType::Sudo, PrivilegeResponseMode::PasswordOnly),
+            Self::SuPassword => (PrivilegePromptType::Su, PrivilegeResponseMode::PasswordOnly),
+            // Old two-stage credentials carried only prompt fragments, so
+            // Custom preserves their original first-stage matching behavior.
+            Self::CustomPrompt => (
+                PrivilegePromptType::Custom,
+                PrivilegeResponseMode::PasswordOnly,
+            ),
+            Self::TwoStageSeparateInput => (
+                PrivilegePromptType::Custom,
+                PrivilegeResponseMode::PasswordThenTotp,
+            ),
+            Self::TwoStageCombinedInput => (
+                PrivilegePromptType::Custom,
+                PrivilegeResponseMode::PasswordWithTotp,
+            ),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SavedPrivilegeCredentialWire {
+    id: String,
+    connection_id: String,
+    label: String,
+    #[serde(default)]
+    prompt_type: Option<PrivilegePromptType>,
+    #[serde(default)]
+    response_mode: Option<PrivilegeResponseMode>,
+    #[serde(default)]
+    kind: Option<LegacyPrivilegeCredentialKind>,
+    #[serde(default)]
+    username_hint: Option<String>,
+    #[serde(default)]
+    prompt_patterns: Vec<String>,
+    #[serde(default)]
+    host_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    second_factor_patterns: Vec<String>,
+    #[serde(default)]
+    second_factor_user_hint: Option<String>,
+    #[serde(default)]
+    totp_credential_id: Option<String>,
+    #[serde(default)]
+    keychain_id: Option<String>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_true")]
+    require_click_to_send: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for SavedPrivilegeCredential {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let wire = SavedPrivilegeCredentialWire::deserialize(deserializer)?;
+        let legacy = wire.kind.map(LegacyPrivilegeCredentialKind::into_parts);
+        let prompt_type = wire
+            .prompt_type
+            .or_else(|| legacy.map(|(prompt_type, _)| prompt_type))
+            .ok_or_else(|| D::Error::missing_field("prompt_type"))?;
+        // A credential that already identifies its prompt but predates the
+        // split answered with a password only.
+        let response_mode = wire
+            .response_mode
+            .or_else(|| legacy.map(|(_, response_mode)| response_mode))
+            .unwrap_or_default();
+        // Configurations written before host patterns existed applied every
+        // shared credential to every SSH host. Materialize that as `*` so a
+        // sync round-trip does not downgrade automatic fill to click-only.
+        let host_patterns = wire.host_patterns.unwrap_or_else(|| {
+            if wire.connection_id == SSH_COMMON_PRIVILEGE_SCOPE_ID {
+                vec!["*".to_string()]
+            } else {
+                Vec::new()
+            }
+        });
+        Ok(Self {
+            id: wire.id,
+            connection_id: wire.connection_id,
+            label: wire.label,
+            prompt_type,
+            response_mode,
+            username_hint: wire.username_hint,
+            prompt_patterns: wire.prompt_patterns,
+            host_patterns,
+            second_factor_patterns: wire.second_factor_patterns,
+            second_factor_user_hint: wire.second_factor_user_hint,
+            totp_credential_id: wire.totp_credential_id,
+            keychain_id: wire.keychain_id,
+            plaintext_secret: None,
+            enabled: wire.enabled,
+            require_click_to_send: wire.require_click_to_send,
+            created_at: wire.created_at,
+            updated_at: wire.updated_at,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -787,9 +949,14 @@ pub struct SavePrivilegeCredentialRequest {
     pub connection_id: String,
     pub credential_id: Option<String>,
     pub label: String,
-    pub kind: PrivilegeCredentialKind,
+    pub prompt_type: PrivilegePromptType,
+    pub response_mode: PrivilegeResponseMode,
     pub username_hint: Option<String>,
     pub prompt_patterns: Vec<String>,
+    pub host_patterns: Vec<String>,
+    pub second_factor_patterns: Vec<String>,
+    pub second_factor_user_hint: Option<String>,
+    pub totp_credential_id: Option<String>,
     /// UI drafts become SecretString at the store boundary. The value is stored
     /// in keychain and never serialized into SavedConnection.
     pub secret: Option<SecretString>,
@@ -807,9 +974,14 @@ impl fmt::Debug for SavePrivilegeCredentialRequest {
             .field("connection_id", &self.connection_id)
             .field("credential_id", &self.credential_id)
             .field("label", &self.label)
-            .field("kind", &self.kind)
+            .field("prompt_type", &self.prompt_type)
+            .field("response_mode", &self.response_mode)
             .field("username_hint", &self.username_hint)
             .field("prompt_patterns", &self.prompt_patterns)
+            .field("host_patterns", &self.host_patterns)
+            .field("second_factor_patterns", &self.second_factor_patterns)
+            .field("second_factor_user_hint", &self.second_factor_user_hint)
+            .field("totp_credential_id", &self.totp_credential_id)
             .field("secret", &self.secret.as_ref().map(|_| "[redacted secret]"))
             .field("enabled", &self.enabled)
             .field("require_click_to_send", &self.require_click_to_send)
@@ -999,6 +1171,10 @@ pub struct TelnetProfile {
     pub icon_background_color: Option<String>,
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub input_line_ending: SerialLineEnding,
+    #[serde(default)]
+    pub output_line_ending: SerialLineEnding,
     #[serde(default = "default_telnet_upstream_proxy")]
     pub upstream_proxy: SavedUpstreamProxyPolicy,
     #[serde(
@@ -1025,6 +1201,8 @@ pub struct SaveTelnetProfileRequest {
     pub icon_background_color: Option<String>,
     pub host: String,
     pub port: u16,
+    pub input_line_ending: Option<SerialLineEnding>,
+    pub output_line_ending: Option<SerialLineEnding>,
     pub upstream_proxy: Option<SavedUpstreamProxyPolicy>,
     pub terminal: ConnectionTerminalOptions,
     pub connect_on_open: Option<bool>,
@@ -1575,6 +1753,8 @@ impl TelnetProfile {
             icon_background_color: None,
             host: host.into(),
             port,
+            input_line_ending: SerialLineEnding::None,
+            output_line_ending: SerialLineEnding::None,
             upstream_proxy: SavedUpstreamProxyPolicy::Direct,
             terminal: ConnectionTerminalOptions::default(),
             connect_on_open: false,
@@ -1925,6 +2105,10 @@ impl fmt::Debug for SavedConnectionRuntimeSecrets {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionStoreData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_tombstones: Vec<DeletedConnectionTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_profiles: Vec<PluginConnectionProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub totp_credentials: Vec<crate::totp::TotpCredential>,
     #[serde(default = "default_config_version")]
     pub version: u32,
@@ -1967,6 +2151,8 @@ pub struct ConnectionStoreData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_privilege_credentials: Vec<SavedPrivilegeCredential>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_common_privilege_credentials: Vec<SavedPrivilegeCredential>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_keychain_cleanup: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_privilege_keychain_cleanup: Vec<String>,
@@ -1975,6 +2161,8 @@ pub struct ConnectionStoreData {
 impl Default for ConnectionStoreData {
     fn default() -> Self {
         Self {
+            plugin_tombstones: Vec::new(),
+            plugin_profiles: Vec::new(),
             totp_credentials: Vec::new(),
             version: CONFIG_VERSION,
             connections: Vec::new(),
@@ -1996,6 +2184,7 @@ impl Default for ConnectionStoreData {
             standalone_sftp_profiles: Vec::new(),
             remote_desktop_profiles: Vec::new(),
             local_privilege_credentials: Vec::new(),
+            ssh_common_privilege_credentials: Vec::new(),
             pending_keychain_cleanup: Vec::new(),
             pending_privilege_keychain_cleanup: Vec::new(),
         }
@@ -2110,6 +2299,10 @@ pub struct SavedConnectionSyncRecord {
 #[serde(rename_all = "camelCase")]
 pub struct SavedConnectionsSyncSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_profiles: Vec<PluginConnectionProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_tombstones: Vec<DeletedConnectionTombstone>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub totp_credentials: Vec<crate::totp::TotpCredential>,
     pub revision: String,
     pub exported_at: String,
@@ -2122,11 +2315,19 @@ pub struct SavedConnectionsSyncSnapshot {
 
 impl SavedConnectionsSyncSnapshot {
     pub fn record_count(&self) -> usize {
-        self.records.len() + self.local_terminal_profiles.len() + self.local_terminal_tombstones.len()
+        self.records.len()
+            + self.local_terminal_profiles.len()
+            + self.local_terminal_tombstones.len()
+            + self.plugin_profiles.len()
+            + self.plugin_tombstones.len()
     }
 
     pub fn record_ids(&self) -> impl Iterator<Item = &str> {
-        self.records.iter().map(|r| r.id.as_str())
+        self.records
+            .iter()
+            .map(|r| r.id.as_str())
+            .chain(self.plugin_profiles.iter().map(|p| p.id.as_str()))
+            .chain(self.plugin_tombstones.iter().map(|p| p.id.as_str()))
             .chain(self.local_terminal_profiles.iter().map(|p| p.id.as_str()))
             .chain(self.local_terminal_tombstones.iter().map(|p| p.id.as_str()))
     }
@@ -2239,4 +2440,5 @@ struct StagedImportedConnection {
     touched_keychain_ids: Vec<String>,
     touched_privilege_keychain_ids: Vec<String>,
     stale_old_keychain_ids: Vec<String>,
+    stale_old_privilege_keychain_ids: Vec<String>,
 }

@@ -1,6 +1,31 @@
 const AI_AGENT_CONCURRENCY_SETTING: &str = "subagentConcurrency";
 
 impl WorkspaceApp {
+    pub(in crate::workspace) fn global_agent_options(&self) -> oxideterm_ai::agent::AgentOptions {
+        self.settings_store
+            .settings()
+            .ai
+            .extra
+            .get("subagents")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    fn set_global_agent_options(
+        &mut self,
+        options: oxideterm_ai::agent::AgentOptions,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_settings(
+            move |settings| {
+                settings.ai.extra.insert(
+                    "subagents".into(),
+                    serde_json::to_value(&options).expect("agent options are serializable"),
+                );
+            },
+            cx,
+        );
+    }
     fn agent_usage_label(&self, usage: oxideterm_ai::agent::AgentUsage) -> String {
         match (usage.input_tokens, usage.output_tokens) {
             (Some(input), Some(output)) => self
@@ -99,6 +124,17 @@ impl WorkspaceApp {
         model: Option<AgentModel>,
         cx: &mut Context<Self>,
     ) {
+        if target.is_none() {
+            let mut options = self.global_agent_options();
+            options.default_model = model;
+            self.set_global_agent_options(options, cx);
+            self.ai_entity.update(cx, |ai, _| {
+                ai.agents.model_picker_open = false;
+                ai.agents.settings_model_picker_open = false;
+            });
+            cx.notify();
+            return;
+        }
         let changed = self.ai_entity.update(cx, |ai, _cx| {
             let changed = if let Some(id) = target {
                 ai.agents
@@ -112,11 +148,6 @@ impl WorkspaceApp {
                             .change_queued_model(&record.snapshot.run, model)
                             .is_ok()
                     })
-            } else if let Some(id) = ai.conversation_state().active_conversation_id.clone() {
-                let mut options = ai.agent_options(&id);
-                options.default_model = model;
-                ai.set_agent_options(&id, options);
-                true
             } else {
                 false
             };
@@ -182,17 +213,14 @@ impl WorkspaceApp {
         &self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ai = self.ai_entity.read(cx);
-        let conversation = ai
-            .conversation_state()
-            .active_conversation()
-            .map(|conversation| (conversation.id.clone(), conversation.title.clone()));
+        let options = self.global_agent_options();
+        let picker_open = self.ai_entity.read(cx).agents.settings_model_picker_open;
         let mut section = div()
             .w_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(self.tokens.spacing.two))
+            .gap(px(self.tokens.metrics.settings_card_gap))
             .child(self.ai_section_title("settings_view.ai.conversation_agents"))
             .child(
                 div()
@@ -200,81 +228,63 @@ impl WorkspaceApp {
                     .text_color(rgb(self.tokens.ui.text_muted))
                     .child(self.i18n.t("settings_view.ai.conversation_agents_hint")),
             );
-        if let Some((id, title)) = conversation {
-            let options = ai.agent_options(&id);
-            let picker_open = ai.agents.settings_model_picker_open;
+        if !self.settings_store.settings().ai.tool_use.enabled {
             section = section.child(
                 div()
                     .text_size(px(self.tokens.metrics.ui_text_xs))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(
-                        self.i18n
-                            .t("ai.agents.current_conversation")
-                            .replace("{{title}}", &title),
-                    ),
-            );
-            let checked = options.enabled;
-            let toggle = self
-                .agent_control(
-                    "allow-subagents".into(),
-                    self.i18n.t("ai.agents.allow"),
-                    oxideterm_gpui_ui::checkbox::checkbox(&self.tokens, String::new(), checked),
-                    move |this, _, cx| {
-                        this.ai_entity.update(cx, |ai, _cx| {
-                            let mut options = ai.agent_options(&id);
-                            options.enabled = !options.enabled;
-                            ai.set_agent_options(&id, options);
-                        });
-                        cx.notify();
-                    },
-                    cx,
-                )
-                .role(gpui::Role::CheckBox)
-                .aria_toggled(if checked {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                })
-                .into_any_element();
-            section = section.child(self.setting_row(
-                "ai.agents.allow",
-                "ai.agents.scope_hint",
-                toggle,
-                cx,
-            ));
-            let label = options
-                .default_model
-                .map(|model| format!("{} / {}", model.provider_id, model.model))
-                .unwrap_or_else(|| self.i18n.t("ai.agents.inherit_model"));
-            let picker = self.agent_button(
-                "agent-default-model".into(),
-                label,
-                |this, _, cx| {
-                    this.ai_entity.update(cx, |ai, _cx| {
-                        ai.agents.settings_model_picker_open = !ai.agents.settings_model_picker_open
-                    });
-                    cx.notify();
-                },
-                cx,
-            );
-            section = section.child(self.setting_row(
-                "ai.agents.model",
-                "ai.agents.model_hint",
-                picker,
-                cx,
-            ));
-            if picker_open {
-                section = section.child(self.render_agent_model_picker(None, cx));
-            }
-        } else {
-            section = section.child(
-                div()
-                    .text_size(px(self.tokens.metrics.ui_text_xs))
-                    .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(self.i18n.t("ai.agents.no_conversation")),
+                    .text_color(rgb(self.tokens.ui.warning))
+                    .child(self.i18n.t("settings_view.ai.subagents_tools_off")),
             );
         }
-        section.into_any_element()
+        let checked = options.enabled;
+        let toggle = self
+            .agent_control(
+                "allow-subagents".into(),
+                self.i18n.t("ai.agents.allow"),
+                oxideterm_gpui_ui::checkbox::checkbox(&self.tokens, String::new(), checked),
+                |this, _, cx| {
+                    let mut options = this.global_agent_options();
+                    options.enabled = !options.enabled;
+                    this.set_global_agent_options(options, cx);
+                },
+                cx,
+            )
+            .role(gpui::Role::CheckBox)
+            .aria_toggled(if checked {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .into_any_element();
+        section = section.child(self.setting_row(
+            "ai.agents.allow",
+            "settings_view.ai.subagents_scope_hint",
+            toggle,
+            cx,
+        ));
+        let label = options
+            .default_model
+            .map(|model| format!("{} / {}", model.provider_id, model.model))
+            .unwrap_or_else(|| self.i18n.t("ai.agents.inherit_model"));
+        let picker = self.agent_button(
+            "agent-default-model".into(),
+            label,
+            |this, _, cx| {
+                this.ai_entity.update(cx, |ai, _| {
+                    ai.agents.settings_model_picker_open = !ai.agents.settings_model_picker_open;
+                });
+                cx.notify();
+            },
+            cx,
+        );
+        section =
+            section.child(self.setting_row("ai.agents.model", "ai.agents.model_hint", picker, cx));
+        if picker_open {
+            section = section.child(self.render_agent_model_picker(None, cx));
+        }
+        section
+            .child(self.render_ai_agent_concurrency_setting(cx))
+            .into_any_element()
     }
 
     pub(in crate::workspace) fn render_ai_agent_concurrency_setting(
@@ -318,7 +328,7 @@ impl WorkspaceApp {
         }
         self.setting_row(
             "ai.agents.concurrency",
-            "ai.agents.concurrency_hint",
+            "settings_view.ai.subagents_global_hint",
             choices.into_any_element(),
             cx,
         )

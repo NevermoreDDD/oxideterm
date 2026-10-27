@@ -749,6 +749,12 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
         ("connectionDefaults.port", 22, 1, 65_535),
         ("sidebarUI.width", 300, 200, 600),
         ("sidebarUI.aiSidebarWidth", 340, 280, 500),
+        (
+            "sidebarUI.fileManagerSidebarWidth",
+            FILE_MANAGER_SIDEBAR_DEFAULT_WIDTH,
+            FILE_MANAGER_SIDEBAR_MIN_WIDTH,
+            FILE_MANAGER_SIDEBAR_MAX_WIDTH,
+        ),
         ("sftp.maxConcurrentTransfers", 3, 1, 10),
         ("sftp.directoryParallelism", 4, 1, 16),
         ("sftp.speedLimitKBps", 0, 0, 10_000_000),
@@ -1017,6 +1023,13 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
     normalize_ai_reasoning_effort_aliases(&mut settings);
     sanitize_enum(
         &mut settings,
+        &["terminal", "xmodemBlockSize"],
+        &["128", "1024"],
+        "128",
+        &mut validation_warnings,
+    );
+    sanitize_enum(
+        &mut settings,
         &["ai", "reasoningEffort"],
         &[
             "none", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
@@ -1051,6 +1064,26 @@ pub fn sanitize_settings_value(raw: Value) -> Result<SanitizedSettings> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xmodem_block_size_accepts_protocol_sizes_and_resets_invalid_values() {
+        for (input, expected, warns) in [
+            (json!("128"), XmodemBlockSize::Bytes128, false),
+            (json!("1024"), XmodemBlockSize::Bytes1024, false),
+            (json!("256"), XmodemBlockSize::Bytes128, true),
+        ] {
+            let sanitized =
+                sanitize_settings_value(json!({"terminal":{"xmodemBlockSize":input}})).unwrap();
+            assert_eq!(sanitized.settings.terminal.xmodem_block_size, expected);
+            assert_eq!(
+                sanitized
+                    .validation_warnings
+                    .iter()
+                    .any(|warning| warning.contains("terminal.xmodemBlockSize")),
+                warns
+            );
+        }
+    }
 
     #[test]
     fn invalid_terminal_rule_references_are_removed_while_valid_bindings_survive() {
@@ -1129,6 +1162,30 @@ mod tests {
     #[test]
     fn saved_display_values_use_supported_defaults_and_bounds() {
         for (input, path, expected, warning) in [
+            (
+                json!({"sidebarUI": {}}),
+                "/sidebarUI/fileManagerSidebarWidth",
+                json!(184),
+                None,
+            ),
+            (
+                json!({"sidebarUI": {"fileManagerSidebarWidth": 300}}),
+                "/sidebarUI/fileManagerSidebarWidth",
+                json!(300),
+                None,
+            ),
+            (
+                json!({"sidebarUI": {"fileManagerSidebarWidth": 999}}),
+                "/sidebarUI/fileManagerSidebarWidth",
+                json!(480),
+                Some("sidebarUI.fileManagerSidebarWidth"),
+            ),
+            (
+                json!({"sidebarUI": {"fileManagerSidebarWidth": 10}}),
+                "/sidebarUI/fileManagerSidebarWidth",
+                json!(160),
+                Some("sidebarUI.fileManagerSidebarWidth"),
+            ),
             (
                 json!({"general": {"updateChannel": "gpui-preview"}}),
                 "/general/updateChannel",

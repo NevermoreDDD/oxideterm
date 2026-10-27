@@ -94,6 +94,7 @@ fn apply_oxide_import_with_options_inner(
         })?
     };
     let EncryptedPayload {
+        mut plugin_profiles,
         totp_credentials,
         connections,
         app_settings_json,
@@ -104,9 +105,16 @@ fn apply_oxide_import_with_options_inner(
         standalone_sftp_profiles_json,
         remote_desktop_profiles_json,
         plugin_settings,
-        portable_secrets,
+        mut portable_secrets,
         ..
     } = payload;
+    plugin_profiles.retain(|profile| {
+        options
+            .selected_names
+            .as_ref()
+            .is_none_or(|names| names.contains(&profile.name))
+    });
+    let plugin_plans = plan_plugin_import(store, &plugin_profiles, options.conflict_strategy)?;
 
     // Parse and validate every selected profile resource before preparing or
     // committing connections. This keeps a bad late archive section from
@@ -438,22 +446,55 @@ fn apply_oxide_import_with_options_inner(
     // owner state before the first write. Secret-bearing connection upserts run
     // last, leaving no fallible archive stage after credentials are committed.
     let checkpoint = store.create_checkpoint()?;
-    let credential_selection = crate::CredentialSyncSelection {
+    let mut credential_selection = crate::CredentialSyncSelection {
         totp_ids: connections_to_save
             .iter()
             .flat_map(|p| {
                 p.options.totp_credential_id.iter().cloned().chain(
                     p.proxy_chain.iter().filter_map(|h| h.totp_credential_id.clone()),
+                ).chain(
+                    p.privilege_credentials
+                        .iter()
+                        .filter_map(|credential| credential.totp_credential_id.clone()),
                 )
             })
             .collect(),
         connection_ids: connections_to_save.iter().map(|p| p.id.clone()).collect(),
         ..Default::default()
     };
-    let mut prepared_totp = None;
+    let mut prepared_credentials = None;
     let apply_result = (|| {
         current_step += 1;
         report_progress("saving_config", current_step);
+        let plugin_ids =
+            stage_plugin_connections(store, plugin_profiles, plugin_plans, &mut result)?;
+        credential_selection.plugin_connection_ids = plugin_ids.values().cloned().collect();
+        if options.import_portable_secrets && !plugin_ids.is_empty() {
+            for secret in portable_secrets
+                .iter_mut()
+                .filter(|secret| crate::is_profile_credential(secret))
+            {
+                let mut target: crate::CredentialTarget = serde_json::from_str(&secret.id)
+                    .map_err(|_| {
+                        OxideFileError::InvalidFormat("Invalid portable credential target".into())
+                    })?;
+                if let crate::CredentialOwner::PluginConnection(id) = &mut target.owner {
+                    if let Some(imported) = plugin_ids.get(id) {
+                        *id = imported.clone();
+                        let remapped = serde_json::to_string(&target)?;
+                        // Deferred credential consumers must use the imported profile identity too.
+                        if let Some(deferred) = result
+                            .portable_secrets
+                            .iter_mut()
+                            .find(|entry| entry.id == secret.id && entry.kind == secret.kind)
+                        {
+                            deferred.id = remapped.clone();
+                        }
+                        secret.id = remapped;
+                    }
+                }
+            }
+        }
 
         if let Some(serial_profiles_snapshot) = serial_profiles_snapshot {
             let serial_profiles_count = serial_profiles_snapshot.records.len();
@@ -551,17 +592,51 @@ fn apply_oxide_import_with_options_inner(
                 .iter()
                 .filter(|secret| {
                     crate::is_profile_credential(secret)
-                        && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
-                            .is_ok_and(|target| matches!(target.owner, crate::CredentialOwner::Totp(_)))
+                        && serde_json::from_str::<crate::CredentialTarget>(&secret.id).is_ok_and(
+                            |target| {
+                                matches!(
+                                    target.owner,
+                                    crate::CredentialOwner::Totp(_)
+                                        | crate::CredentialOwner::PluginConnection(_)
+                                )
+                            },
+                        )
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            prepared_totp = Some(store.prepare_profile_credentials(
-                &secrets, &credential_selection, &mut None,
+            prepared_credentials = Some(store.prepare_profile_credentials(
+                &secrets,
+                &credential_selection,
+                &mut None,
             )?);
             result.portable_secrets.retain(|secret| {
-                !secrets.iter().any(|handled| handled.id == secret.id && handled.kind == secret.kind)
+                !crate::is_profile_credential(secret)
+                    || !serde_json::from_str::<crate::CredentialTarget>(&secret.id).is_ok_and(
+                        |target| {
+                            matches!(
+                                target.owner,
+                                crate::CredentialOwner::Totp(_)
+                                    | crate::CredentialOwner::PluginConnection(_)
+                            )
+                        },
+                    )
             });
+        }
+        let available_totp_ids = store
+            .totp_credentials()
+            .iter()
+            .map(|credential| credential.id.clone())
+            .collect::<HashSet<_>>();
+        for connection in &mut connections_to_save {
+            for credential in &mut connection.privilege_credentials {
+                if credential
+                    .totp_credential_id
+                    .as_deref()
+                    .is_some_and(|id| !available_totp_ids.contains(id))
+                {
+                    credential.totp_credential_id = None;
+                }
+            }
         }
         store.upsert_imported_connections_and_managed_keys_transaction(
             connections_to_save,
@@ -571,8 +646,10 @@ fn apply_oxide_import_with_options_inner(
     })();
 
     if let Err(import_error) = apply_result {
-        let secret_rollback = prepared_totp.take()
-            .map(|prepared| store.rollback_profile_credentials(prepared)).transpose();
+        let secret_rollback = prepared_credentials
+            .take()
+            .map(|prepared| store.rollback_profile_credentials(prepared))
+            .transpose();
         // Restore metadata even if protected-slot cleanup fails.
         return match store.restore_checkpoint(&checkpoint) {
             Ok(()) => {
@@ -585,7 +662,7 @@ fn apply_oxide_import_with_options_inner(
         };
     }
 
-    if let Some(mut prepared) = prepared_totp {
+    if let Some(mut prepared) = prepared_credentials {
         result.restored_profile_credentials += prepared.summary.restored;
         result.cleared_profile_credentials += prepared.summary.cleared;
         result.skipped_profile_credentials += prepared.summary.skipped;
@@ -597,8 +674,13 @@ fn apply_oxide_import_with_options_inner(
         for secret in &portable_secrets {
             if !options.defer_totp_secrets
                 && crate::is_profile_credential(secret)
-                && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
-                    .is_ok_and(|target| matches!(target.owner, crate::CredentialOwner::Totp(_)))
+                && serde_json::from_str::<crate::CredentialTarget>(&secret.id).is_ok_and(|target| {
+                    matches!(
+                        target.owner,
+                        crate::CredentialOwner::Totp(_)
+                            | crate::CredentialOwner::PluginConnection(_)
+                    )
+                })
             {
                 continue;
             }
@@ -834,9 +916,31 @@ fn import_privilege_credentials(
             id: credential.id,
             connection_id: connection_id.to_string(),
             label: credential.label,
-            kind: credential.kind,
+            prompt_type: credential.prompt_type,
+            response_mode: credential.response_mode,
             username_hint: credential.username_hint,
             prompt_patterns: credential.prompt_patterns,
+            // An archive copy is scoped to one connection, so host-group
+            // patterns no longer add anything and must not leak across scopes.
+            host_patterns: Vec::new(),
+            second_factor_patterns: if credential.response_mode.waits_for_totp() {
+                credential.second_factor_patterns
+            } else {
+                Vec::new()
+            },
+            second_factor_user_hint: if credential.response_mode.waits_for_totp() {
+                credential.second_factor_user_hint
+            } else {
+                None
+            },
+            // TOTP seeds are merged before connections are written. A missing
+            // binding is cleared after the merge instead of consulting the
+            // pre-import store here.
+            totp_credential_id: if credential.response_mode.uses_totp() {
+                credential.totp_credential_id
+            } else {
+                None
+            },
             keychain_id: None,
             plaintext_secret: credential.secret.map(SecretString::from),
             enabled: credential.enabled,
@@ -863,6 +967,7 @@ fn import_forwards(
             target_port: forward.target_port,
             description: forward.description,
             auto_start: forward.auto_start,
+            tunnel: forward.tunnel,
         })
         .collect()
 }

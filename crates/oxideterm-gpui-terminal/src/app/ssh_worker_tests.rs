@@ -8,6 +8,71 @@ use gpui::{
 mod ssh_peer;
 
 #[gpui::test]
+fn ssh_search_refreshes_during_output(cx: &mut TestAppContext) {
+    let mut peer = ssh_peer::SshPeer::new();
+    let config = SshSessionConfig::from(peer.config.take().unwrap())
+        .with_runtime(peer.runtime.clone())
+        .with_registry(
+            peer.registry.clone(),
+            oxideterm_ssh::ConnectionConsumer::Terminal("search-output".into()),
+        );
+    let (pane, cx) = cx.add_window_view(move |window, cx| {
+        TerminalPane::new_ssh_with_preferences(
+            config,
+            TerminalUiPreferences {
+                cursor_blink: false,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+        .unwrap()
+    });
+    let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    pane.update(cx, |pane, cx| {
+        pane.tick(cx);
+        pane.set_search_query(Some("late-hit".into()), None, cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(TERMINAL_SEARCH_DEBOUNCE);
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.current_search_matches().as_ref(), &[])
+    });
+    let activity = pane.read_with(cx, |pane, _| pane.terminal.lock().activity_receiver());
+    for output in ["late-hit\r\n", "more output\r\n"] {
+        peer.runtime
+            .block_on(sender.data(channel, output.as_bytes().to_vec()))
+            .unwrap();
+        peer.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !pane.read_with(cx, |pane, _| {
+                    pane.terminal.lock().buffer_text().contains(output.trim())
+                }) {
+                    assert!(activity.notified().await);
+                }
+            })
+            .await
+            .expect("SSH parser did not consume the new output");
+        });
+        pane.update(cx, |pane, cx| pane.tick(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(TERMINAL_SEARCH_DEBOUNCE / 2);
+        cx.run_until_parked();
+    }
+    pane.read_with(cx, |pane, _| {
+        let matches = pane.current_search_matches();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|hit| (hit.line, hit.start_col, hit.end_col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 8)]
+        );
+    });
+}
+
+#[gpui::test]
 fn exited_ssh_pane_requests_reconnect_only_for_enter_and_resumes_in_place(cx: &mut TestAppContext) {
     let mut peer = ssh_peer::SshPeer::new();
     let config = SshSessionConfig::from(peer.config.take().unwrap())
@@ -75,6 +140,11 @@ fn exited_ssh_pane_requests_reconnect_only_for_enter_and_resumes_in_place(cx: &m
             cx,
         );
         assert_eq!(pane.take_context_action_request(), None);
+        // A node failure clears the panes that are still waiting for the queued
+        // open, and only those: a reconnect already handed to the shell keeps its
+        // StartingShell state instead of flipping back to a usable button.
+        assert!(pane.clear_ssh_reconnect_waiting(cx));
+        assert!(!pane.ssh_reconnect_pending());
         pane.reconnect_ssh(
             SshSessionConfig::for_existing_connection(connection_id, "fixture", 22, "parser-test")
                 .with_runtime(peer.runtime.clone())
@@ -85,6 +155,9 @@ fn exited_ssh_pane_requests_reconnect_only_for_enter_and_resumes_in_place(cx: &m
             cx,
         )
         .unwrap();
+        assert!(pane.ssh_reconnect_starting());
+        assert!(!pane.clear_ssh_reconnect_waiting(cx));
+        assert!(pane.ssh_reconnect_starting());
     });
     let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(5)).unwrap();
     peer.runtime
@@ -121,7 +194,7 @@ fn exited_ssh_pane_requests_reconnect_only_for_enter_and_resumes_in_place(cx: &m
 }
 
 #[gpui::test]
-fn confirmed_clipboard_paste_sends_one_bracketed_text_block(cx: &mut TestAppContext) {
+fn mouse_clipboard_paste_overrides_tracking_and_preserves_confirmation(cx: &mut TestAppContext) {
     let mut peer = ssh_peer::SshPeer::new();
     let config =
         SshSessionConfig::from(peer.config.take().unwrap()).with_runtime(peer.runtime.clone());
@@ -130,6 +203,8 @@ fn confirmed_clipboard_paste_sends_one_bracketed_text_block(cx: &mut TestAppCont
             config,
             TerminalUiPreferences {
                 paste_protection: true,
+                right_click_paste: true,
+                middle_click_paste: true,
                 ..Default::default()
             },
             window,
@@ -139,40 +214,127 @@ fn confirmed_clipboard_paste_sends_one_bracketed_text_block(cx: &mut TestAppCont
     });
     let (sender, channel) = peer.ready.recv_timeout(Duration::from_secs(10)).unwrap();
     peer.runtime
-        .block_on(sender.data(channel, b"\x1b[?2004h".to_vec()))
+        .block_on(sender.data(channel, b"\x1b[?2004h\x1b[?1003h\x1b[?1006h".to_vec()))
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !pane.read_with(cx, |pane, _| {
         pane.terminal
             .lock()
             .mode()
-            .contains(TermMode::BRACKETED_PASTE)
+            .contains(TermMode::BRACKETED_PASTE | TermMode::MOUSE_MOTION | TermMode::SGR_MOUSE)
     }) {
         assert!(Instant::now() < deadline, "paste mode was not parsed");
         std::thread::sleep(Duration::from_millis(2));
     }
-    pane.update(cx, |pane, cx| {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-            "第一段\r\n\r\n第二段\n第三段\r".into(),
-        ));
-        pane.paste_from_clipboard(cx);
-        pane.send_protocol_bytes(b"before-paste", cx);
+    pane.update(cx, |pane, cx| pane.tick(cx));
+    cx.simulate_resize(size(px(900.0), px(600.0)));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.apply_viewport_bounds(
+                gpui::Bounds::new(point(px(0.0), px(0.0)), window.viewport_size()),
+                window.scale_factor(),
+                cx,
+            );
+        });
     });
-    let (before_confirmation, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(before_confirmation, b"before-paste");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let (start, end) = pane.read_with(cx, |pane, _| {
+        let origin = pane.content_origin();
+        let start = point(
+            origin.x + px(pane.terminal_content_padding_x() + 0.5 * pane.metrics.cell_width_f32()),
+            origin.y + px(TERMINAL_CONTENT_PADDING + 0.5 * pane.metrics.line_height_f32()),
+        );
+        (
+            start,
+            start + point(px(pane.metrics.cell_width_f32()), px(0.0)),
+        )
+    });
+    for button in [MouseButton::Right, MouseButton::Middle] {
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                "第一段\r\n\r\n第二段\n第三段\r".into(),
+            ))
+        });
+        cx.simulate_mouse_down(start, button, Default::default());
+        cx.simulate_mouse_move(end, button, Default::default());
+        // Ownership belongs to the press even if Shift changes before release.
+        cx.simulate_mouse_up(
+            end,
+            button,
+            gpui::Modifiers {
+                shift: button == MouseButton::Right,
+                ..Default::default()
+            },
+        );
+        pane.update(cx, |pane, cx| pane.send_protocol_bytes(b"before-paste", cx));
+        let (before_confirmation, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(before_confirmation, b"before-paste");
 
-    pane.update(cx, |pane, cx| {
-        pane.confirm_pending_paste(cx);
-        pane.send_protocol_bytes(b"after-paste", cx);
-    });
-    let mut received = Vec::new();
-    while !received.ends_with(b"after-paste") {
-        let (bytes, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
-        received.extend_from_slice(&bytes);
+        pane.update(cx, |pane, cx| {
+            pane.confirm_pending_paste(cx);
+            pane.send_protocol_bytes(b"after-paste", cx);
+        });
+        let mut received = Vec::new();
+        while !received.ends_with(b"after-paste") {
+            let (bytes, _) = peer.input.recv_timeout(Duration::from_secs(5)).unwrap();
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(
+            received,
+            "\x1b[200~第一段\n\n第二段\n第三段\n\x1b[201~after-paste".as_bytes()
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
     }
+    for (button, enabled, expected) in [
+        (
+            MouseButton::Right,
+            false,
+            "\x1b[<2;1;1M\x1b[<34;2;1M\x1b[<2;2;1m",
+        ),
+        (
+            MouseButton::Middle,
+            false,
+            "\x1b[<1;1;1M\x1b[<33;2;1M\x1b[<1;2;1m",
+        ),
+        (
+            MouseButton::Left,
+            true,
+            "\x1b[<0;1;1M\x1b[<32;2;1M\x1b[<0;2;1m",
+        ),
+    ] {
+        pane.update(cx, |pane, cx| {
+            pane.settings.right_click_paste = enabled;
+            pane.settings.middle_click_paste = enabled;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(start, button, Default::default());
+        cx.simulate_mouse_move(end, button, Default::default());
+        cx.simulate_mouse_up(end, button, Default::default());
+        pane.update(cx, |pane, cx| pane.send_protocol_bytes(b"after-mouse", cx));
+        let mut received = Vec::new();
+        while !received.ends_with(b"after-mouse") {
+            received.extend(peer.input.recv_timeout(Duration::from_secs(5)).unwrap().0);
+        }
+        assert_eq!(received, format!("{expected}after-mouse").as_bytes());
+    }
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_mouse_down(
+        start,
+        MouseButton::Right,
+        gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    );
+    cx.simulate_mouse_up(start, MouseButton::Right, Default::default());
+    pane.update(cx, |pane, cx| {
+        assert!(pane.context_menu.is_some());
+        pane.send_protocol_bytes(b"after-menu", cx);
+    });
     assert_eq!(
-        received,
-        "\x1b[200~第一段\n\n第二段\n第三段\n\x1b[201~after-paste".as_bytes()
+        peer.input.recv_timeout(Duration::from_secs(5)).unwrap().0,
+        b"after-menu"
     );
     pane.update(cx, |pane, _| pane.terminal.lock().shutdown());
 }

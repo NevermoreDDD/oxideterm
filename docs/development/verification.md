@@ -13,6 +13,8 @@ cargo fmt --check
 
 Run checks from the repository root. When a command needs an operating-system-specific backend, run it on that host instead of treating a cross-platform compile from another machine as equivalent evidence.
 
+Complete a coherent set of implementation, caller, and test changes before checking it. Reuse successful results while their source, dependencies, configuration, and environment are unchanged. A successful Clippy run already establishes compilation for that configuration; do not follow it with a duplicate `cargo check`. Launch the application only for the manual acceptance that needs it, not after every edit.
+
 ## Focused Changes
 
 | Change area | Required focused verification | Manual verification when applicable |
@@ -26,6 +28,7 @@ Run checks from the repository root. When a command needs an operating-system-sp
 | Linux framework code | Relevant Linux crate and application checks | Both affected compositor paths: Wayland and/or X11 |
 | Repository scripts or workflows | The matching script test module | Dispatch only the workflow needed by the change |
 | Git dependencies, Nix package, or flake | `nix build .#oxideterm -L --show-trace` and `nix flake check -L` | Confirm `result/bin/oxideterm` builds and runs |
+| Documentation only | Relative links, referenced paths, locale/route parity, and `git diff --check`; build the docs website when changed | Inspect changed website pages; no Rust build |
 
 ## Selecting The Scope
 
@@ -50,6 +53,14 @@ Check normal output, a long scrolling workload, selection, resize, alternate scr
 
 Open two consumers for the same node, then close one. Confirm that the remaining terminal, SFTP surface, or forward continues to work. Test explicit disconnect and reconnect separately; they have different ownership consequences.
 
+### Tab Scopes, Search, and Motion
+
+For tab-scope changes, cover mixed-pane membership, visible-only navigation/closing/reordering, empty scopes, and window moves while hidden work continues. For search/input changes, cover multiline paste, explicit newline insertion, replacement captures, independent undo, horizontal scrolling, and IME coordinates. For motion changes, use the existing controllable-clock tests for interruption/reversal and Off/Reduced behavior, then inspect the actual transition once the edits are complete.
+
+### Remote Desktop Displays
+
+Check the affected plugin and host together. Distinguish single-monitor viewport resize from all-monitor topology. Exercise external-display changes, laptop-lid state, scaling, and reconnect when those paths changed. Compare remote screenshots with local viewer output and reported remote dimensions to identify cropping.
+
 ### Platform Windowing
 
 For pointer and titlebar work, move the pointer outside the window while pressed, switch focus, return, and verify no stuck cursor, pressed control, capture, or drag state remains. For IME work, verify composition start, commit, cancellation, and focus changes.
@@ -69,6 +80,16 @@ Do not add tests merely to increase coverage. Add a focused regression test when
 
 ## CI Mapping
 
-The primary CI workflow runs workspace check, formatting, workspace tests, locale auditing, packaging-helper tests, and repository-policy tests. Native platform CI separately checks Windows and macOS GPUI backends and the application. A green Linux workspace job therefore does not establish Windows or macOS native behavior.
+The primary CI workflow runs workspace check, formatting, workspace tests, locale auditing, packaging-helper tests, and repository-policy tests. Its Ubuntu job also compiles the Linux GPUI backend and application; there is no second Linux-only compile job. Native platform CI separately checks Windows and macOS GPUI backends and the application, including the Windows shader, message, text and ConPTY tests. A green Linux workspace job therefore does not establish Windows or macOS native behavior.
 
-The independent [Nix Package workflow](../../.github/workflows/nix-package.yml) runs `nix build .#oxideterm -L --show-trace` and `nix flake check -L` with a 90-minute timeout. It runs automatically when Nix expressions, the flake lock, Cargo manifests, the Cargo lock, or the workflow itself change. Run it manually before a release or when other changes need Nix verification. See the [Nix packaging guide](../../nix/README.md#package-verification) for the trigger paths and manual workflow.
+CI uses the following execution policy:
+
+- Ready code PRs retain the full Linux workspace checks and the path-selected Windows/macOS, Nix, background-media and remote-agent checks.
+- Documentation-only changes skip Rust setup, caches, system dependencies, compilation and tests in triggered PR and push runs. Locale and repository-policy checks still run. `scripts/ci/rust-scope.cjs` recognizes `docs/`, root Markdown, `.github/` Markdown and conventional README/CHANGELOG/CONTRIBUTING/AGENTS Markdown files. Other files, including Markdown fixtures under crates, conservatively retain Rust checks.
+- Draft PRs skip heavy jobs. `ready_for_review` starts them; `converted_to_draft` cancels superseded work through the existing concurrency groups. Lightweight locale and policy checks continue to run.
+- Pushes to `main` and `experiment/rust-native-v2` retain the primary CI workflow's path triggers, Linux workspace validation and lightweight checks. Scope compares the push event's `before` commit with the checkout, fetching that commit when shallow history omits it. New branches receive full validation.
+- Windows/macOS, Nix, background-media and remote-agent workflows run on relevant ready PRs or manual dispatch, not again on push. For direct pushes that need these checks, manually dispatch the relevant workflow on the pushed branch. Run the applicable full checks before release. Manual runs always retain full validation.
+
+The required checks keep the names `Rust workspace (check + fmt + test)` and `i18n completeness`. The Rust workflow still starts for documentation PRs and completes its scope step instead of omitting a required status through a workflow-level path filter. PR scope is determined from the checked-out merge commit against its first parent, with both parents fetched. Deleted paths and both sides of renames participate; a failed diff fails the job rather than skipping validation.
+
+The independent [Nix Package workflow](../../.github/workflows/nix-package.yml) runs `nix build .#oxideterm -L --show-trace` and `nix flake check -L` with a 90-minute timeout. It runs automatically on ready PRs when Nix expressions, the flake lock, Cargo manifests, the Cargo lock, or the workflow itself change. Run it manually before a release or when direct pushes or other changes need Nix verification. See the [Nix packaging guide](../../nix/README.md#package-verification) for the trigger paths and manual workflow.

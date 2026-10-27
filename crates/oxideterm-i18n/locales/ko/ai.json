@@ -1,5 +1,41 @@
 {
   "ai": {
+    "web": {
+      "sources": "출처",
+      "disabled": "웹 접근이 꺼져 있습니다.",
+      "configuration": "AI 설정에서 공식 DeepSeek 설정을 선택하세요.",
+      "authentication": "DeepSeek 키가 없거나 유효하지 않습니다. 선택한 설정을 확인하세요.",
+      "balance": "DeepSeek 계정 잔액이 부족합니다.",
+      "rate_limit": "검색 서비스 요청 한도에 도달했습니다. 나중에 다시 시도하세요.",
+      "unavailable": "페이지에 접근할 수 없거나 본문을 추출할 수 없습니다.",
+      "invalid_arguments": "인증 정보가 없는 공개 URL이나 128자 이하의 검색어를 사용하세요.",
+      "request": "웹 요청이 실패했거나 시간이 초과되었습니다. 네트워크를 확인하세요.",
+      "response": "검색 서비스가 잘못되었거나 너무 큰 데이터를 반환했습니다.",
+      "search_done": "검색 완료",
+      "read_done": "페이지를 읽었습니다"
+    },
+    "images": {
+      "tool_invalid": "도구가 읽을 수 없거나 지원되지 않거나 크기 제한을 초과한 이미지를 반환했습니다.",
+      "count": "이미지 {{count}}개",
+      "request_limit": "이미지의 총 크기가 요청 한도를 초과했습니다. 이미지를 줄이거나 새 대화를 시작하세요.",
+      "add": "이미지 추가",
+      "loading": "이미지 읽는 중…",
+      "pasted": "붙여넣은 이미지",
+      "remove": "제거",
+      "tokens": "약 {{count}} 토큰",
+      "tokens_uncertain": "약 {{count}} 토큰 · 임시 추정",
+      "auto": "이미지: 자동",
+      "enabled": "이미지: 지원",
+      "disabled": "이미지: 미지원",
+      "model_unavailable": "현재 모델은 이미지를 받을 수 없습니다. 이미지를 지원하는 모델로 전환하세요.",
+      "history_prompt": "{{model}} 모델은 이전 이미지를 읽을 수 없습니다. 이미지는 보관하고 텍스트만으로 계속할까요?",
+      "continue_text": "텍스트만으로 계속",
+      "invalid": "PNG, JPEG, WebP 지원. 이미지당 최대 10 MB, 4천만 화소. 전송 전 긴 변을 2000 px로 줄입니다.",
+      "limit": "메시지당 최대 8개의 이미지입니다.",
+      "queue_only": "이미지는 새 메시지로 보내거나 다음 차례 대기열에 추가하세요.",
+      "missing": "저장된 이미지를 읽을 수 없습니다.",
+      "settings": "이미지 설정"
+    },
     "agents": {
       "parent": "상위 에이전트",
       "runs": "실행 기록",
@@ -32,11 +68,7 @@
       "usage_unknown": "토큰 사용량을 알 수 없음",
       "message_not_sent": "추가 지시를 보내지 못했습니다.",
       "supplement": "추가 지시",
-      "current_conversation": "현재 대화: {{title}}",
-      "scope_hint": "이 대화에서만 위임을 허용합니다. 기본값은 꺼짐입니다.",
-      "model_hint": "새 작업은 상위 모델을 상속하며, 설정된 모델을 선택할 수도 있습니다.",
-      "no_conversation": "대화를 열어 하위 에이전트를 설정하세요.",
-      "concurrency_hint": "앱 전체의 동시 실행 작업 수입니다. 대기 중인 작업은 슬롯을 반납합니다.",
+      "model_hint": "모든 대화의 새 하위 작업은 이 모델을 사용하거나 각 상위 작업의 모델을 따릅니다.",
       "context": "작업 배경 및 기록",
       "loading": "작업 세부 정보 불러오는 중…",
       "load_error": "작업 세부 정보를 불러오지 못했습니다."
@@ -253,6 +285,8 @@
       "approve": "승인",
       "reject": "거부",
       "tool_names": {
+        "search_web": "웹 검색",
+        "read_web_page": "웹페이지 읽기",
         "delegate_task": "작업 위임",
         "send_agent_message": "하위 에이전트에 메시지 보내기",
         "wait_agents": "하위 에이전트 대기",

@@ -2,17 +2,14 @@ use super::*;
 mod entity;
 
 pub(in crate::workspace) use entity::CommandPaletteEntity;
-use entity::CommandPaletteView;
+use entity::{CommandPaletteView, PaletteContent};
 use oxideterm_connections::{resolve_ssh_config_alias, saved_connection_from_ssh_host};
 use oxideterm_gpui_settings_view::{OXIDE_THEME_IDS, built_in_theme_exists, is_oxide_theme};
-use oxideterm_gpui_ui::motion::{ExitPhase, MotionDuration};
-use oxideterm_gpui_ui::{
-    modal::{
-        dialog_content, dismissible_command_palette_backdrop, dismissible_dialog_backdrop,
-        overlay_content_boundary, rounded_shell_child_radius,
-    },
-    text_input::text_input_value_segments,
+use oxideterm_gpui_ui::modal::{
+    dialog_content, dismissible_command_palette_backdrop, dismissible_dialog_backdrop,
+    overlay_content_boundary, rounded_shell_child_radius,
 };
+use oxideterm_gpui_ui::motion::{ExitPhase, MotionDuration};
 use oxideterm_remote_desktop::{RemoteDesktopConnectionProfile, RemoteDesktopProtocol};
 use oxideterm_ssh_launch::{format_user_host_port_target, parse_explicit_user_host_port_target};
 use oxideterm_theme::BUILT_IN_THEMES;
@@ -44,6 +41,8 @@ enum PaletteSection {
     Commands,
     Sessions,
     Connections,
+    Transfers,
+    Reconnects,
     #[allow(dead_code)]
     Plugins,
     Help,
@@ -64,6 +63,9 @@ struct PaletteItem {
 
 #[derive(Clone)]
 enum PaletteAction {
+    SelectQuickBarCategory(Option<String>),
+    SelectTabScope(tabs::TabScope),
+    BackgroundTask(background_tasks::BackgroundTaskTarget),
     Keybinding(&'static str),
     ActivateTab(TabId),
     OpenSavedConnection(String),
@@ -154,6 +156,75 @@ enum ShortcutsModalVirtualRow {
 }
 
 impl WorkspaceApp {
+    pub(in crate::workspace) fn open_quick_bar_category_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_modal_interaction_boundary(cx);
+        let selected = self
+            .settings_store
+            .settings()
+            .terminal
+            .command_bar
+            .quick_bar_category
+            .as_deref();
+        let index = self
+            .quick_bar_category_choices(cx)
+            .iter()
+            .position(|(id, _, _)| id.as_deref() == selected)
+            .unwrap_or(0);
+        self.command_palette.update(cx, |palette, cx| {
+            palette.open_quick_bar_categories(cx);
+            palette.set_selected_index(index, cx);
+        });
+        self.scroll_selected_command_palette_item_into_view(cx);
+        self.clear_ime_selection();
+        self.show_active_input_caret(cx);
+        self.needs_active_pane_focus = false;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn open_tab_scope_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_modal_interaction_boundary(cx);
+        let scope = self.tab_host.read(cx).scope();
+        let index = self
+            .tab_scope_choices(cx)
+            .iter()
+            .position(|(choice, _, _)| choice == scope)
+            .unwrap_or(0);
+        self.command_palette.update(cx, |palette, cx| {
+            palette.open_tab_scopes(cx);
+            palette.set_selected_index(index, cx);
+        });
+        self.scroll_selected_command_palette_item_into_view(cx);
+        self.clear_ime_selection();
+        self.show_active_input_caret(cx);
+        self.needs_active_pane_focus = false;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    pub(in crate::workspace) fn open_background_task_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_modal_interaction_boundary(cx);
+        self.command_palette
+            .update(cx, |palette, cx| palette.open_background_tasks(cx));
+        self.clear_ime_selection();
+        self.show_active_input_caret(cx);
+        self.needs_active_pane_focus = false;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
     pub(super) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.bootstrap_native_plugin_runtime(cx);
         self.prepare_modal_interaction_boundary(cx);
@@ -374,49 +445,28 @@ impl WorkspaceApp {
         line_height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let visually_empty = value.is_empty();
-        let display = if visually_empty { placeholder } else { value };
-        let selected_range = self.ime_selected_range_for_target(target, cx);
-        let selection_range = selected_range
-            .as_ref()
-            .filter(|range| range.start < range.end)
-            .cloned();
-        let caret_offset = selected_range
-            .as_ref()
-            .filter(|range| range.start == range.end)
-            .map(|range| range.start);
-        let marked_text = self.marked_text_for_target(target, cx).unwrap_or_default();
         self.text_input_with_workspace_ime(
             target,
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .text_size(px(text_size))
-                .line_height(px(line_height))
-                .text_color(if visually_empty {
-                    rgb(self.tokens.ui.text_muted)
-                } else {
-                    rgb(self.tokens.ui.text)
-                })
-                .overflow_hidden()
-                .child(text_input_value_segments(
-                    &self.tokens,
-                    &display,
-                    visually_empty,
-                    selection_range,
-                    caret_offset,
-                    self.input_caret.visible(),
-                ))
-                .when(!marked_text.is_empty(), |input| {
-                    input.child(
-                        div()
-                            .underline()
-                            .text_color(rgb(self.tokens.ui.text))
-                            .child(marked_text.to_string()),
-                    )
-                }),
+            self.workspace_text_input(
+                target,
+                oxideterm_gpui_ui::text_input::TextInputView {
+                    value: &value,
+                    placeholder,
+                    focused: true,
+                    caret_visible: self.input_caret.visible(),
+                    secret: false,
+                    selected_all: false,
+                    selected_range: self.ime_selected_range_for_target(target, cx),
+                    marked_text: self.marked_text_for_target(target, cx),
+                },
+            )
+            .flex_1()
+            .min_w_0()
+            .border_0()
+            .bg(gpui::rgba(0x00000000))
+            .px(px(0.0))
+            .text_size(px(text_size))
+            .line_height(px(line_height)),
             |_this, _cx| {},
             cx,
         )
@@ -506,10 +556,37 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.record_command_palette_mru(&execution.id, cx);
+        if !matches!(
+            execution.action,
+            PaletteAction::SelectTabScope(_)
+                | PaletteAction::BackgroundTask(_)
+                | PaletteAction::SelectQuickBarCategory(_)
+        ) {
+            self.record_command_palette_mru(&execution.id, cx);
+        }
         self.ime_marked_text = None;
 
         match execution.action {
+            PaletteAction::SelectQuickBarCategory(category) => {
+                let category = category.filter(|id| {
+                    self.terminal
+                        .read(cx)
+                        .quick_commands
+                        .store
+                        .categories
+                        .iter()
+                        .any(|c| c.id == *id)
+                });
+                self.edit_settings(
+                    |settings| settings.terminal.command_bar.quick_bar_category = category,
+                    cx,
+                );
+                self.needs_active_pane_focus = true;
+            }
+            PaletteAction::SelectTabScope(scope) => self.select_tab_scope(scope, window, cx),
+            PaletteAction::BackgroundTask(target) => {
+                self.reveal_background_task(target, window, cx)
+            }
             PaletteAction::Keybinding(action_id) => {
                 let _ = self.dispatch_keybinding_action(action_id, window, cx);
             }
@@ -706,6 +783,16 @@ impl WorkspaceApp {
         if matches!(effect, Some(WorkspaceOverlayConfirmEffect::ResetSettings)) {
             self.edit_settings(|settings| *settings = PersistedSettings::default(), cx);
         }
+        if let Some(WorkspaceOverlayConfirmEffect::ClearCommandHistory { all }) = effect {
+            if all {
+                self.terminal_history_store.clear();
+                for history in self.ssh_terminal_command_histories.values() {
+                    history.clear();
+                }
+            } else if let Some(history) = self.active_command_history(cx) {
+                history.clear();
+            }
+        }
         started
     }
 
@@ -716,7 +803,22 @@ impl WorkspaceApp {
         let Some(snapshot) = self.overlay.read(cx).confirm_snapshot() else {
             return div().into_any_element();
         };
-        if !matches!(snapshot.kind, WorkspaceOverlayConfirmKind::SettingsReset) {
+        let clear_history = matches!(
+            snapshot.kind,
+            WorkspaceOverlayConfirmKind::CommandHistoryClear { .. }
+        );
+        let clear_current = matches!(
+            snapshot.kind,
+            WorkspaceOverlayConfirmKind::CommandHistoryClear { all: false }
+        );
+        let title_key = if clear_current {
+            "terminal.history.clear_current"
+        } else if clear_history {
+            "terminal.history.clear_all"
+        } else {
+            "command_palette.cmd_reset_settings"
+        };
+        if !clear_history && !matches!(snapshot.kind, WorkspaceOverlayConfirmKind::SettingsReset) {
             return div().into_any_element();
         }
         oxideterm_gpui_ui::confirm::confirm_dialog_with_focus_motion(
@@ -725,20 +827,22 @@ impl WorkspaceApp {
             snapshot.phase,
             ConfirmDialogView {
                 variant: ConfirmDialogVariant::Danger,
-                title: div()
-                    .child(self.i18n.t("command_palette.cmd_reset_settings"))
-                    .into_any_element(),
+                title: div().child(self.i18n.t(title_key)).into_any_element(),
                 description: Some(
                     div()
-                        .child(self.i18n.t("command_palette.confirm_reset_settings"))
+                        .child(self.i18n.t(if clear_current {
+                            "terminal.history.clear_confirm_current"
+                        } else if clear_history {
+                            "terminal.history.clear_confirm"
+                        } else {
+                            "command_palette.confirm_reset_settings"
+                        }))
                         .into_any_element(),
                 ),
                 cancel_label: div()
                     .child(self.i18n.t("common.actions.cancel"))
                     .into_any_element(),
-                confirm_label: div()
-                    .child(self.i18n.t("command_palette.cmd_reset_settings"))
-                    .into_any_element(),
+                confirm_label: div().child(self.i18n.t(title_key)).into_any_element(),
             },
             snapshot.focused_action,
             cx.listener(|this, _event, _window, cx| {
@@ -785,10 +889,9 @@ impl WorkspaceApp {
         // the shortcut closes an active split pane in terminal tabs, while the
         // palette command directly closes all tabs except the active tab.
         let tab_ids = self
-            .tabs(cx)
-            .iter()
-            .filter(|tab| self.tab_host.read(cx).container_tab_id(tab.id) != active_tab_id)
-            .map(|tab| tab.id)
+            .main_tabs(cx)
+            .filter(|(_, tab)| tab.id != active_tab_id)
+            .map(|(_, tab)| tab.id)
             .collect::<Vec<_>>();
         for tab_id in tab_ids {
             self.close_tab_by_id(tab_id, window, cx);
@@ -796,7 +899,10 @@ impl WorkspaceApp {
     }
 
     fn close_all_tabs_from_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab_ids = self.tabs(cx).iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let tab_ids = self
+            .main_tabs(cx)
+            .map(|(_, tab)| tab.id)
+            .collect::<Vec<_>>();
         for tab_id in tab_ids {
             self.close_tab_by_id(tab_id, window, cx);
         }
@@ -926,6 +1032,115 @@ impl WorkspaceApp {
     }
 
     fn ranked_command_palette_items(&self, cx: &Context<Self>) -> Vec<RankedItem> {
+        if self.command_palette.read(cx).is_background_task_picker() {
+            let query = self.command_palette.read(cx).query();
+            return self
+                .background_task_choices(cx)
+                .into_iter()
+                .filter_map(|(target, label, detail, icon)| {
+                    let value = format!("{label} {detail}");
+                    let matched = command_palette_match(&label, &value, query)?;
+                    let section = match &target {
+                        background_tasks::BackgroundTaskTarget::Transfer(_) => {
+                            PaletteSection::Transfers
+                        }
+                        background_tasks::BackgroundTaskTarget::Reconnect(_) => {
+                            PaletteSection::Reconnects
+                        }
+                    };
+                    let id = match &target {
+                        background_tasks::BackgroundTaskTarget::Transfer(id) => {
+                            format!("background-transfer:{id}")
+                        }
+                        background_tasks::BackgroundTaskTarget::Reconnect(node) => {
+                            format!("background-reconnect:{}", node.0)
+                        }
+                    };
+                    Some(RankedItem {
+                        score: matched.score,
+                        highlights: matched.highlights,
+                        item: PaletteItem {
+                            id,
+                            label,
+                            section,
+                            icon,
+                            detail: Some(detail),
+                            shortcut: None,
+                            value,
+                            action: PaletteAction::BackgroundTask(target),
+                            disabled: false,
+                        },
+                    })
+                })
+                .collect();
+        }
+        if self.command_palette.read(cx).is_quick_bar_category_picker() {
+            let query = self.command_palette.read(cx).query();
+            return self
+                .quick_bar_category_choices(cx)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, (id, label, icon))| {
+                    let matched = command_palette_match(&label, &label, query)?;
+                    Some(RankedItem {
+                        score: matched.score,
+                        highlights: Vec::new(),
+                        item: PaletteItem {
+                            id: format!("quick-bar-category-{index}"),
+                            value: label.clone(),
+                            label,
+                            icon,
+                            detail: None,
+                            section: PaletteSection::Commands,
+                            shortcut: None,
+                            action: PaletteAction::SelectQuickBarCategory(id),
+                            disabled: false,
+                        },
+                    })
+                })
+                .collect();
+        }
+        if self.command_palette.read(cx).is_tab_scope_picker() {
+            let query = self.command_palette.read(cx).query();
+            return self
+                .tab_scope_choices(cx)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, (scope, label, detail))| {
+                    let value = format!("{label} {}", detail.as_deref().unwrap_or_default());
+                    let matched = command_palette_match(&label, &value, query)?;
+                    let icon = match &scope {
+                        tabs::TabScope::All => LucideIcon::Layers,
+                        tabs::TabScope::Affinity(tabs::TabAffinity::Global) => {
+                            LucideIcon::AppWindow
+                        }
+                        tabs::TabScope::Affinity(tabs::TabAffinity::LocalTerminal) => {
+                            LucideIcon::Terminal
+                        }
+                        _ => LucideIcon::Server,
+                    };
+                    Some(RankedItem {
+                        score: matched.score,
+                        highlights: Vec::new(),
+                        item: PaletteItem {
+                            id: format!("tab-scope-{index}"),
+                            label,
+                            detail,
+                            icon,
+                            section: if index < 3 {
+                                PaletteSection::Commands
+                            } else {
+                                PaletteSection::Connections
+                            },
+                            shortcut: None,
+                            value,
+                            action: PaletteAction::SelectTabScope(scope),
+                            disabled: false,
+                        },
+                    })
+                })
+                .collect();
+        }
         let (raw_query, ssh_config_hosts) = {
             let palette = self.command_palette.read(cx);
             (palette.query().to_string(), palette.ssh_config_hosts())
@@ -937,7 +1152,7 @@ impl WorkspaceApp {
             if let Some(item) = self.quick_connect_item(&query) {
                 ranked.push(RankedItem {
                     item,
-                    score: 2.0,
+                    score: 4.0,
                     highlights: Vec::new(),
                 });
             }
@@ -993,6 +1208,9 @@ impl WorkspaceApp {
             ranked.extend(rank_palette_section(help_items, &query));
         }
 
+        if !query.trim().is_empty() {
+            sort_palette_results(&mut ranked);
+        }
         ranked.truncate(80);
         ranked
     }
@@ -1110,7 +1328,7 @@ impl WorkspaceApp {
                     icon: tab_kind_icon(&tab.kind),
                     detail: Some(detail),
                     shortcut: None,
-                    value: format!("{} session tab {}", tab.title, tab.id.0),
+                    value: tab.title.clone(),
                     action: PaletteAction::ActivateTab(tab.id),
                     disabled: false,
                 }
@@ -1125,12 +1343,18 @@ impl WorkspaceApp {
             .map(|conn| {
                 let label =
                     command_palette_connection_label(&conn.name, &conn.username, &conn.host);
-                let detail = command_palette_connection_detail(
+                let mut detail = command_palette_connection_detail(
                     &conn.name,
                     &conn.username,
                     &conn.host,
                     conn.port,
                 );
+                for field in conn.group.iter().chain(conn.tags.iter()) {
+                    if !field.is_empty() {
+                        detail.push(' ');
+                        detail.push_str(field);
+                    }
+                }
                 PaletteItem {
                     id: format!("conn:{}", conn.id),
                     label: label,
@@ -1152,7 +1376,7 @@ impl WorkspaceApp {
                     label: profile.name.clone(),
                     section: PaletteSection::Connections,
                     icon: LucideIcon::Terminal,
-                    detail: Some(format!("{shell} {cwd}").trim().to_string()),
+                    detail: Some(format!("{shell} {cwd} {group}").trim().to_string()),
                     shortcut: None,
                     value: format!("{} {shell} {cwd} {group}", profile.name),
                     action: PaletteAction::OpenSavedLocalTerminal(profile.id.clone()),
@@ -1182,14 +1406,18 @@ impl WorkspaceApp {
                 } else {
                     format!("{user}@{hostname}:{port}")
                 };
+                let detail = format!(
+                    "{} {detail}",
+                    self.i18n.t("command_palette.ssh_config_source")
+                );
                 PaletteItem {
                     id: format!("ssh-config:{alias}"),
                     label: alias.clone(),
                     section: PaletteSection::Connections,
                     icon: LucideIcon::FileTerminal,
-                    detail: Some(self.i18n.t("command_palette.ssh_config_source")),
+                    detail: Some(detail.clone()),
                     shortcut: None,
-                    value: format!("{alias} {detail} {hostname} {user} ssh config"),
+                    value: format!("{alias} {detail}"),
                     action: PaletteAction::QuickConnectAlias(alias),
                     disabled: false,
                 }
@@ -1318,6 +1546,14 @@ impl WorkspaceApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ranked_items = self.ranked_command_palette_items(cx);
+        if self.command_palette.read(cx).is_background_task_picker() {
+            self.command_palette.update(cx, |palette, cx| {
+                let index = palette
+                    .selected_index()
+                    .min(ranked_items.len().saturating_sub(1));
+                palette.set_selected_index(index, cx);
+            });
+        }
         let palette: CommandPaletteView = self.command_palette.read(cx).view();
         let selected_connection = ranked_items
             .get(self.command_palette.read(cx).selected_index())
@@ -1326,7 +1562,12 @@ impl WorkspaceApp {
         let preview =
             selected_connection.map(|item| command_palette_connection_preview(&self.tokens, item));
         let viewport = window.viewport_size();
-        let palette_top = f32::from(viewport.height) * COMMAND_PALETTE_TOP_RATIO;
+        let compact = palette.content != PaletteContent::Commands;
+        let palette_top = if compact {
+            self.window_titlebar_height(window) + 4.0
+        } else {
+            f32::from(viewport.height) * COMMAND_PALETTE_TOP_RATIO
+        };
         let preview_height = if preview.is_some() {
             COMMAND_PALETTE_CONNECTION_PREVIEW_HEIGHT
         } else {
@@ -1339,7 +1580,12 @@ impl WorkspaceApp {
             - 48.0)
             .clamp(0.0, COMMAND_PALETTE_LIST_MAX_HEIGHT);
         let mode = palette.mode;
-        let query_placeholder = self.i18n.t(command_palette_placeholder_key(mode));
+        let query_placeholder = self.i18n.t(match palette.content {
+            PaletteContent::TabScopes => "sidebar.tab_scope.search",
+            PaletteContent::QuickBarCategories => "terminal.quick_commands.search_groups",
+            PaletteContent::BackgroundTasks => "sidebar.background_tasks.search",
+            PaletteContent::Commands => command_palette_placeholder_key(mode),
+        });
         let rows = Arc::new(command_palette_virtual_rows(ranked_items));
         let row_count = rows.len();
         let rows_height =
@@ -1348,7 +1594,11 @@ impl WorkspaceApp {
         let entity = cx.entity();
 
         let panel = dialog_content(&self.tokens)
-            .w(px(command_palette_panel_width(f32::from(viewport.width))))
+            .w(px(if compact {
+                400.0_f32.min(f32::from(viewport.width) - 16.0)
+            } else {
+                command_palette_panel_width(f32::from(viewport.width))
+            }))
             .rounded(px(self.tokens.radii.lg))
             .shadow_xl()
             .child(
@@ -1443,7 +1693,11 @@ impl WorkspaceApp {
                                 SelectableTextRole::NonSelectable,
                                 "command-palette-footer",
                                 "hint",
-                                self.i18n.t("command_palette.footer_hint"),
+                                self.i18n.t(if compact {
+                                    "sidebar.tab_scope.hint"
+                                } else {
+                                    "command_palette.footer_hint"
+                                }),
                                 self.tokens.ui.text_muted,
                                 cx,
                             )),
@@ -1511,7 +1765,18 @@ impl WorkspaceApp {
         section: PaletteSection,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label = self.i18n.t(section_label_key(section));
+        let key = if self.command_palette.read(cx).is_quick_bar_category_picker() {
+            "terminal.quick_commands.groups"
+        } else if self.command_palette.read(cx).is_tab_scope_picker() {
+            if section == PaletteSection::Connections {
+                "sidebar.tab_scope.connections"
+            } else {
+                "sidebar.tab_scope.categories"
+            }
+        } else {
+            section_label_key(section)
+        };
+        let label = self.i18n.t(key);
         div()
             .w_full()
             .h(px(COMMAND_PALETTE_VIRTUAL_ROW_HEIGHT))
@@ -1542,7 +1807,12 @@ impl WorkspaceApp {
         let selected = index == self.command_palette.read(cx).selected_index();
         let item = ranked.item.clone();
         let mut label_row = div().flex().flex_1().items_center().min_w_0().child(
-            self.render_highlighted_palette_text(&ranked.item.label, &ranked.highlights, selected),
+            self.render_highlighted_palette_text(
+                &ranked.item.label,
+                &ranked.highlights,
+                selected,
+                false,
+            ),
         );
         if let Some(detail) = ranked.item.detail.as_ref() {
             label_row = label_row.child(
@@ -1553,7 +1823,12 @@ impl WorkspaceApp {
                     .text_size(px(12.0))
                     .line_height(px(16.0))
                     .text_color(rgb(self.tokens.ui.text_muted))
-                    .child(detail.clone()),
+                    .child(self.render_highlighted_palette_text(
+                        detail,
+                        &palette_detail_highlights(detail, self.command_palette.read(cx).query()),
+                        false,
+                        true,
+                    )),
             );
         }
         div()
@@ -1681,31 +1956,49 @@ impl WorkspaceApp {
         text: &str,
         highlights: &[usize],
         selected: bool,
+        muted: bool,
     ) -> AnyElement {
-        let mut label = div()
-            .flex()
-            .items_center()
+        let highlight_set = highlights.iter().copied().collect::<HashSet<_>>();
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        // Search returns character indices; styled text uses UTF-8 byte ranges.
+        for (index, (offset, ch)) in text.char_indices().enumerate() {
+            if highlight_set.contains(&index) {
+                let end = offset + ch.len_utf8();
+                if let Some(previous) = ranges.last_mut()
+                    && previous.end == offset
+                {
+                    previous.end = end;
+                } else {
+                    ranges.push(offset..end);
+                }
+            }
+        }
+        let highlighted = gpui::StyledText::new(text.to_owned()).with_highlights(
+            ranges.into_iter().map(|range| {
+                (
+                    range,
+                    gpui::HighlightStyle {
+                        color: Some(rgb(self.tokens.ui.accent).into()),
+                        font_weight: Some(gpui::FontWeight::SEMIBOLD),
+                        ..Default::default()
+                    },
+                )
+            }),
+        );
+        div()
             .min_w_0()
             .truncate()
-            .text_size(px(14.0))
-            .line_height(px(20.0));
-        let highlight_set = highlights.iter().copied().collect::<HashSet<_>>();
-        for (index, ch) in text.chars().enumerate() {
-            let highlighted = highlight_set.contains(&index);
-            label = label.child(
-                div()
-                    .text_color(if highlighted || selected {
-                        rgb(self.tokens.ui.accent)
-                    } else {
-                        rgb(self.tokens.ui.text)
-                    })
-                    .when(highlighted, |part| {
-                        part.font_weight(gpui::FontWeight::SEMIBOLD)
-                    })
-                    .child(ch.to_string()),
-            );
-        }
-        label.into_any_element()
+            .text_size(px(if muted { 12.0 } else { 14.0 }))
+            .line_height(px(if muted { 16.0 } else { 20.0 }))
+            .text_color(rgb(if selected {
+                self.tokens.ui.accent
+            } else if muted {
+                self.tokens.ui.text_muted
+            } else {
+                self.tokens.ui.text
+            }))
+            .child(highlighted)
+            .into_any_element()
     }
 
     pub(super) fn render_shortcuts_modal(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2253,14 +2546,34 @@ fn rank_palette_section(items: Vec<PaletteItem>, query: &str) -> Vec<RankedItem>
         .filter_map(|item| rank_palette_item(item, query))
         .collect::<Vec<_>>();
     if !query.is_empty() {
-        ranked.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        sort_palette_results(&mut ranked);
     }
     ranked
+}
+
+fn palette_detail_highlights(detail: &str, raw_query: &str) -> Vec<usize> {
+    let (_, query) = parse_command_palette_query(raw_query);
+    let mut highlights = Vec::new();
+    for term in query.split_whitespace() {
+        if let Some(matched) = command_palette_match(detail, detail, term) {
+            if matched.score >= 1.0 {
+                highlights.extend(matched.highlights);
+            }
+        }
+    }
+    highlights.sort_unstable();
+    highlights.dedup();
+    highlights
+}
+
+fn sort_palette_results(ranked: &mut [RankedItem]) {
+    ranked.sort_by(|left, right| {
+        right.score.total_cmp(&left.score).then_with(|| {
+            let left_active = left.item.section == PaletteSection::Sessions;
+            let right_active = right.item.section == PaletteSection::Sessions;
+            right_active.cmp(&left_active)
+        })
+    });
 }
 
 fn rank_palette_item(item: PaletteItem, query: &str) -> Option<RankedItem> {
@@ -2313,6 +2626,8 @@ fn section_label_key(section: PaletteSection) -> &'static str {
         PaletteSection::Commands => "command_palette.section_commands",
         PaletteSection::Sessions => "command_palette.section_sessions",
         PaletteSection::Connections => "command_palette.section_connections",
+        PaletteSection::Transfers => "sftp.queue.title",
+        PaletteSection::Reconnects => "sidebar.background_tasks.reconnecting",
         PaletteSection::Plugins => "command_palette.section_plugins",
         PaletteSection::Help => "command_palette.section_help",
     }
@@ -2808,6 +3123,66 @@ mod panel_layout_tests {
     use super::*;
     use gpui::{Render, ScrollHandle, TestAppContext, size};
 
+    #[gpui::test]
+    fn ssh_config_source_is_searchable_in_the_visible_locale(cx: &mut TestAppContext) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_PALETTE_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // Workspace storage is process-wide; keep the fixture out of the user's profile.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            std::fs::hard_link(&executable, &child).unwrap();
+            std::fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(PathBuf::from(fixture_dir)));
+        let mut settings = SettingsStore::load_from_path(&settings_path).unwrap();
+        settings.settings_mut().ssh_config.auto_load_hosts = false;
+        settings.save().unwrap();
+        cx.executor().allow_parking();
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+            WorkspaceWindowShell::new(workspace, window, cx)
+        });
+        let workspace = shell.read_with(cx, |shell, _| shell.session_entity());
+        let hosts = [oxideterm_connections::SshConfigHost {
+            alias: "prod".into(),
+            hostname: Some("db.example".into()),
+            user: Some("operator".into()),
+            ..Default::default()
+        }];
+        workspace.update(cx, |workspace, _| {
+            workspace.settings_store.settings_mut().ssh_config.auto_load_hosts = true;
+            for (locale, query, detail) in [
+                (oxideterm_i18n::Locale::En, "#prod ssh config", "SSH Config host operator@db.example:22"),
+                (oxideterm_i18n::Locale::ZhCn, "#prod SSH 配置", "SSH 配置主机 operator@db.example:22"),
+            ] {
+                workspace.i18n.set_locale(locale);
+                let (_, query) = parse_command_palette_query(query);
+                let results = rank_palette_section(workspace.command_palette_ssh_config_items(&hosts), &query);
+                assert_eq!(results.iter().map(|result| result.item.id.as_str()).collect::<Vec<_>>(), vec!["ssh-config:prod"]);
+                assert_eq!(results[0].item.detail.as_deref(), Some(detail));
+                assert_eq!(results[0].score, 1.0);
+                assert!(matches!(&results[0].item.action, PaletteAction::QuickConnectAlias(alias) if alias == "prod"));
+            }
+        });
+    }
+
     #[test]
     fn saved_local_profiles_are_searchable_without_running_tabs() {
         let dir = tempfile::tempdir().unwrap();
@@ -2845,6 +3220,49 @@ mod panel_layout_tests {
                 matches!(&results[0].item.action, PaletteAction::OpenSavedLocalTerminal(id) if id == "linux")
             );
             assert_eq!(results[0].item.detail.as_deref(), Some("wsl-ubuntu ~/work"));
+        }
+    }
+
+    #[test]
+    fn search_ranks_across_sections_and_prefers_active_sessions_only_for_ties() {
+        let mut ranked = Vec::new();
+        for (id, label, section) in [
+            ("auxiliary", "demo-worker-off", PaletteSection::Sessions),
+            ("saved", "demo-worker-on", PaletteSection::Connections),
+            ("active", "demo-worker-on", PaletteSection::Sessions),
+        ] {
+            let item = PaletteItem {
+                id: id.into(),
+                label: label.into(),
+                section,
+                icon: LucideIcon::Terminal,
+                detail: Some("zone-on".into()),
+                shortcut: None,
+                value: format!("{label} zone-on"),
+                action: PaletteAction::OpenSavedConnection(id.into()),
+                disabled: false,
+            };
+            ranked.extend(rank_palette_section(vec![item], "demo on"));
+        }
+        sort_palette_results(&mut ranked);
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|result| result.item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active", "saved", "auxiliary"]
+        );
+        assert_eq!(
+            palette_detail_highlights("operator@db.example:22 zone-on", "#demo on"),
+            vec![28, 29]
+        );
+        let rows = command_palette_virtual_rows(ranked.clone());
+        for index in 0..ranked.len() {
+            let row_index = command_palette_scroll_child_index(&ranked, index).unwrap();
+            assert!(
+                matches!(&rows[row_index], CommandPaletteVirtualRow::Item { ranked: row, item_index }
+                if *item_index == index && row.item.id == ranked[index].item.id)
+            );
         }
     }
 

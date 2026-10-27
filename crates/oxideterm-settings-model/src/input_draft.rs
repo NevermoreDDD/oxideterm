@@ -45,6 +45,11 @@ pub fn persisted_settings_input_value(
         SettingsInput::TerminalFontSize => settings.terminal.font_size.to_string(),
         SettingsInput::TerminalFontWeight => settings.terminal.font_weight.to_string(),
         SettingsInput::TerminalScrollback => settings.terminal.scrollback.to_string(),
+        SettingsInput::CommandHistoryRetention => settings
+            .terminal
+            .autosuggest
+            .history_retention_days
+            .to_string(),
         SettingsInput::TerminalLineHeight => compact_decimal(settings.terminal.line_height),
         SettingsInput::TerminalPaddingHorizontal => {
             settings.terminal.padding_horizontal.to_string()
@@ -103,11 +108,7 @@ pub fn persisted_settings_input_value(
             .default_cwd
             .clone()
             .unwrap_or_default(),
-        SettingsInput::LocalGitBashPath => settings
-            .local_terminal
-            .git_bash_path
-            .clone()
-            .unwrap_or_default(),
+        SettingsInput::LocalShellPath(_) => return None,
         SettingsInput::LocalOhMyPoshTheme => settings
             .local_terminal
             .oh_my_posh_theme
@@ -446,6 +447,12 @@ pub fn apply_persisted_settings_input_draft(
         SettingsInput::TerminalScrollback => parse_i64(draft)
             .map(|value| settings.terminal.scrollback = value.clamp(500, 20_000))
             .into(),
+        SettingsInput::CommandHistoryRetention => parse_i64(draft)
+            .map(|value| {
+                settings.terminal.autosuggest.history_retention_days =
+                    value.clamp(0, u32::MAX as i64) as u32
+            })
+            .into(),
         SettingsInput::TerminalLineHeight => parse_f64(draft)
             .map(|value| settings.terminal.line_height = value.clamp(0.8, 2.0))
             .into(),
@@ -505,10 +512,7 @@ pub fn apply_persisted_settings_input_draft(
             settings.local_terminal.default_cwd = non_empty_trimmed(draft);
             SettingsInputDraftApply::Applied
         }
-        SettingsInput::LocalGitBashPath => {
-            settings.local_terminal.git_bash_path = non_empty_trimmed(draft);
-            SettingsInputDraftApply::Applied
-        }
+        SettingsInput::LocalShellPath(_) => SettingsInputDraftApply::Unhandled,
         SettingsInput::LocalOhMyPoshTheme => {
             settings.local_terminal.oh_my_posh_theme = non_empty_trimmed(draft);
             SettingsInputDraftApply::Applied

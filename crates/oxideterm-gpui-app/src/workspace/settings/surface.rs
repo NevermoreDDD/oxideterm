@@ -4,12 +4,6 @@ use crate::workspace::root::init::terminal_preference_overrides;
 
 const SETTINGS_CONNECTION_IMPORTERS_SECTION_INDEX: usize = 5;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SettingsNavSelectionMotion {
-    duration: Duration,
-    spatial: bool,
-}
-
 fn settings_nav_item_index(groups: &[Vec<SettingsTab>], tab: SettingsTab) -> Option<usize> {
     let mut item_index = 0;
     for (group_index, group) in groups.iter().enumerate() {
@@ -26,13 +20,6 @@ fn settings_nav_item_index(groups: &[Vec<SettingsTab>], tab: SettingsTab) -> Opt
     None
 }
 
-fn settings_nav_selection_motion(tokens: &ThemeTokens) -> Option<SettingsNavSelectionMotion> {
-    oxideterm_gpui_ui::segmented_control_motion(tokens).map(|motion| SettingsNavSelectionMotion {
-        duration: motion.duration,
-        spatial: motion.spatial,
-    })
-}
-
 fn settings_nav_vertical_offset(
     scroll_handle: &ScrollHandle,
     source_index: usize,
@@ -44,6 +31,29 @@ fn settings_nav_vertical_offset(
 }
 
 impl WorkspaceApp {
+    pub(in crate::workspace) fn open_appearance_settings(
+        &mut self,
+        scheme: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_workspace.update(cx, |settings, cx| {
+            settings.set_active_tab(SettingsTab::Appearance, cx)
+        });
+        self.appearance_edit_dark = scheme.or(self.appearance_edit_dark);
+        self.close_settings_select();
+        self.focused_settings_input = None;
+        self.settings_slider_drag = None;
+        self.clear_ime_selection();
+        self.sync_settings_section_list_state(cx);
+        self.settings_section_list_state
+            .scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        self.open_settings(window, cx);
+    }
+
     pub(in crate::workspace) fn open_settings(
         &mut self,
         window: &mut Window,
@@ -294,18 +304,25 @@ impl WorkspaceApp {
                     settings.ai.enabled,
                 )
             }
-            (AiSettingsPage::Tools, 1) => self.ai_disabled_settings_card(
+            (AiSettingsPage::Tools, 1) => {
+                let settings = self.settings_store.settings();
+                self.ai_disabled_settings_card(
+                    self.ai_web_search_section(settings, cx),
+                    settings.ai.enabled,
+                )
+            }
+            (AiSettingsPage::Tools, 2) => self.ai_disabled_settings_card(
                 self.render_ai_agent_settings(cx),
                 self.settings_store.settings().ai.enabled,
             ),
-            (AiSettingsPage::Tools, 2) => {
+            (AiSettingsPage::Tools, 3) => {
                 let settings = self.settings_store.settings();
                 self.ai_disabled_settings_card(
                     self.ai_skills_section(settings, cx),
                     settings.ai.enabled,
                 )
             }
-            (AiSettingsPage::Tools, 3) => {
+            (AiSettingsPage::Tools, 4) => {
                 let settings = self.settings_store.settings();
                 self.ai_disabled_settings_card(
                     self.ai_mcp_servers_section(settings, cx),
@@ -482,8 +499,10 @@ impl WorkspaceApp {
                         .appearance
                         .follow_system_appearance
                         .hash(&mut hasher);
+                    settings.appearance.manual_scheme.hash(&mut hasher);
+                    self.appearance_edit_dark.hash(&mut hasher);
                     let dark = self.appearance_edit_scheme().unwrap_or(self.system_dark);
-                    let style = settings.resolved_background(dark);
+                    let style = settings.terminal.background_for_scheme(Some(dark));
                     (style.enabled && style.day_cycle).hash(&mut hasher);
                     if style.day_cycle {
                         (style.image.is_some() || style.effect.is_some()).hash(&mut hasher);
@@ -496,13 +515,13 @@ impl WorkspaceApp {
                 if section == 0 {
                     let dark = self.appearance_edit_scheme().unwrap_or(self.system_dark);
                     for target in [ThemeTarget::Application, ThemeTarget::Terminal] {
-                        is_custom_theme_id(target.resolved_id(settings, dark)).hash(&mut hasher);
+                        is_custom_theme_id(target.scheme_id(settings, dark)).hash(&mut hasher);
                     }
                 } else if section == 3 {
                     // Source and effect capabilities add rows; paint-only adjustments keep scroll anchoring stable.
-                    let style = settings.resolved_background(
-                        self.appearance_edit_scheme().unwrap_or(self.system_dark),
-                    );
+                    let style = settings
+                        .terminal
+                        .background_for_scheme(self.appearance_edit_scheme());
                     style.image.is_some().hash(&mut hasher);
                     style.parallax.hash(&mut hasher);
                     style.camera.is_some().hash(&mut hasher);
@@ -585,6 +604,11 @@ impl WorkspaceApp {
             }
             SettingsTab::Privilege => {
                 self.connection_store
+                    .list_privilege_credentials(SSH_COMMON_PRIVILEGE_SCOPE_ID)
+                    .map(|credentials| credentials.len())
+                    .unwrap_or(0)
+                    .hash(&mut hasher);
+                self.connection_store
                     .totp_credentials()
                     .len()
                     .hash(&mut hasher);
@@ -634,6 +658,8 @@ impl WorkspaceApp {
                 match (route.ai_page, index) {
                     (AiSettingsPage::Providers, 2) => {
                         settings.ai.providers.len().hash(&mut hasher);
+                        settings.ai.web_search.enabled.hash(&mut hasher);
+                        settings.ai.web_search.provider_id.hash(&mut hasher);
                         self.ai_entity
                             .read(cx)
                             .hash_settings_provider_layout(&mut hasher);
@@ -645,41 +671,54 @@ impl WorkspaceApp {
                             .hash_settings_context_layout(&mut hasher);
                     }
                     (AiSettingsPage::Tools, 2) => {
+                        settings.ai.tool_use.disabled_tools.hash(&mut hasher);
                         self.ai_entity
                             .read(cx)
                             .settings_section_expanded(AiSettingsViewSection::ToolUse)
                             .hash(&mut hasher);
                     }
                     (AiSettingsPage::Tools, 3) => {
+                        settings.ai.web_search.enabled.hash(&mut hasher);
+                        settings.ai.web_search.provider_id.hash(&mut hasher);
+                        settings.ai.providers.len().hash(&mut hasher);
+                    }
+                    (AiSettingsPage::Tools, 4) => {
+                        settings.ai.tool_use.enabled.hash(&mut hasher);
                         let ai = self.ai_entity.read(cx);
                         ai.agents.settings_model_picker_open.hash(&mut hasher);
-                        ai.conversation_state()
-                            .active_conversation_id
+                        let options = self.global_agent_options();
+                        options.enabled.hash(&mut hasher);
+                        options
+                            .default_model
+                            .as_ref()
+                            .map(|model| (&model.provider_id, &model.model))
                             .hash(&mut hasher);
-                        if let Some(conversation) = ai.conversation_state().active_conversation() {
-                            conversation.title.hash(&mut hasher);
-                            let options = ai.agent_options(&conversation.id);
-                            options.enabled.hash(&mut hasher);
-                            options
-                                .default_model
-                                .as_ref()
-                                .map(|model| (&model.provider_id, &model.model))
-                                .hash(&mut hasher);
-                        }
                         for provider in ai_provider_views(settings) {
                             provider.id.hash(&mut hasher);
                             provider.enabled.hash(&mut hasher);
                             provider.models.hash(&mut hasher);
                         }
                     }
-                    (AiSettingsPage::Tools, 4) => {
+                    (AiSettingsPage::Tools, 5) => {
+                        let state = self.settings_workspace.read(cx);
+                        state.skill_search_query.hash(&mut hasher);
+                        format!("{:?}", state.skill_scope_filter).hash(&mut hasher);
+                        state.skill_diagnostics_expanded.hash(&mut hasher);
                         let registry = self.skill_registry.read();
                         for skill in registry.records() {
                             skill.id.hash(&mut hasher);
+                            skill.skill_path.hash(&mut hasher);
+                            state
+                                .expanded_skill_paths
+                                .contains(&skill.skill_path)
+                                .hash(&mut hasher);
                             skill.enabled.hash(&mut hasher);
                             skill.content_hash.hash(&mut hasher);
                         }
-                        registry.diagnostics().len().hash(&mut hasher);
+                        for diagnostic in registry.diagnostics() {
+                            diagnostic.path.hash(&mut hasher);
+                            diagnostic.message.hash(&mut hasher);
+                        }
                     }
                     _ => {}
                 }
@@ -988,12 +1027,6 @@ impl WorkspaceApp {
         let active = self.settings_workspace.read(cx).route_snapshot().active_tab == tab;
         let nav_item_index = settings_nav_item_index(navigation_groups, tab);
         let navigation_groups_for_click = navigation_groups.to_vec();
-        let selection_transition = active.then_some(()).and_then(|()| {
-            self.segmented_control_user_transition(
-                selection_motion::SETTINGS_NAVIGATION_ID,
-                nav_item_index?,
-            )
-        });
         let transition_scroll_handle = settings_nav_scroll.clone();
         let selection_surface = active.then(|| {
             let surface = div()
@@ -1005,46 +1038,14 @@ impl WorkspaceApp {
                 .bg(self.settings_panel_background(theme.bg_panel));
             let surface = oxideterm_gpui_ui::theme_card_surface_shadow(surface, &self.tokens);
 
-            let Some((generation, vertical_offset_y)) = selection_transition else {
-                return surface.into_any_element();
-            };
-            let Some(motion) = settings_nav_selection_motion(&self.tokens) else {
-                return surface.into_any_element();
-            };
-
-            let animation_id = (
-                gpui::ElementId::from(selection_motion::SETTINGS_NAVIGATION_ID),
-                format!("selection-{generation}"),
-            );
-            if motion.spatial
-                && let Some(vertical_offset_y) = vertical_offset_y
-            {
-                // The measured item bounds include real group separators and
-                // flex growth, so the indicator crosses groups continuously.
-                return surface
-                    .with_animation(
-                        animation_id,
-                        Animation::new(motion.duration)
-                            .with_easing(oxideterm_gpui_ui::motion::ease_in_out_cubic),
-                        move |surface, progress| {
-                            let offset =
-                                oxideterm_gpui_ui::motion::lerp(vertical_offset_y, 0.0, progress);
-                            // Moving both edges preserves the absolute
-                            // indicator's height throughout the transition.
-                            surface.top(px(offset)).bottom(px(-offset))
-                        },
-                    )
-                    .into_any_element();
+            match nav_item_index {
+                Some(index) => self.render_vertical_selection_surface(
+                    selection_motion::SETTINGS_NAVIGATION_ID,
+                    index,
+                    surface,
+                ),
+                None => surface.into_any_element(),
             }
-
-            surface
-                .with_animation(
-                    animation_id,
-                    Animation::new(motion.duration)
-                        .with_easing(oxideterm_gpui_ui::motion::ease_out_cubic),
-                    |surface, progress| surface.opacity(progress),
-                )
-                .into_any_element()
         });
         div()
             // Keep selection and hover surfaces stable when the settings
@@ -1286,6 +1287,12 @@ impl WorkspaceApp {
         }
         self.i18n
             .set_locale(locale_from_settings(settings.general.language));
+        if previous_settings.terminal.autosuggest != settings.terminal.autosuggest {
+            self.terminal_history_store.configure(
+                settings.terminal.autosuggest.save_history,
+                settings.terminal.autosuggest.history_retention_days,
+            );
+        }
         if previous_settings.general.language != settings.general.language {
             self.refresh_native_plugin_terminal_hooks(cx);
             cx.set_menus(crate::platform::app_menus(settings));
@@ -1300,10 +1307,14 @@ impl WorkspaceApp {
         oxideterm_desktop_presence::set_keep_running_on_close(
             settings.general.minimize_to_tray_on_close,
         );
-        self.appearance_edit_dark = settings
-            .appearance
-            .follow_system_appearance
-            .then(|| self.appearance_edit_dark.unwrap_or(self.system_dark));
+        self.appearance_edit_dark.get_or_insert_with(|| {
+            settings
+                .appearance
+                .active_scheme(self.system_dark)
+                .is_some_and(oxideterm_settings::AppearanceScheme::is_dark)
+        });
+        // A new settings update supersedes an in-flight appearance transition.
+        self.theme_transition_task = None;
         self.tokens = tokens_from_settings(&settings, self.system_dark);
         self.active_background = settings.resolved_background(self.system_dark);
         self.render_policy = compute_render_policy(
@@ -1357,6 +1368,7 @@ impl WorkspaceApp {
             runtime.configure_remote_shell_integration(
                 settings.terminal.remote_shell_integration_mode,
                 settings.terminal.command_bar.current_directory_awareness,
+                settings.terminal.remote_shell_integration_deferred.clone(),
             );
         });
         self.tab_host.update(cx, |tab_host, _cx| {
@@ -1508,6 +1520,7 @@ impl WorkspaceApp {
         // changes into each open surface after the settings store changes.
         self.apply_ide_runtime_settings_to_surfaces(cx);
         self.sync_terminal_command_sender_appearance(cx);
+        self.sync_search_editor_appearance(cx);
         self.sync_active_terminal_metadata_context(cx);
     }
 

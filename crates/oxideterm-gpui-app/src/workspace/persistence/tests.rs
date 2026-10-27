@@ -188,6 +188,68 @@ fn workspace_snapshot_excludes_runtime_secrets_and_keeps_ssh_identity(cx: &mut T
 }
 
 #[gpui::test]
+fn restoring_an_ide_page_preserves_its_node_and_active_tab(cx: &mut TestAppContext) {
+    if !isolated_fixture(cx) {
+        return;
+    }
+    configure_fixture();
+    cx.executor().allow_parking();
+    let (shell, window_cx) = cx.add_window_view(|window, cx| {
+        let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+        WorkspaceWindowShell::new(workspace, window, cx)
+    });
+    let workspace = shell.read_with(window_cx, |shell, _| shell.session_entity());
+    workspace.update_in(window_cx, |workspace, window, cx| {
+        let config = SshConfig::password("fixture.invalid", 22, "fixture", "fixture-password");
+        let node_id = workspace.materialize_ssh_root_node(config, "Fixture".into(), None);
+        let ide_tab = TabId(2);
+        let snapshot = WorkspaceSnapshot {
+            tabs: vec![
+                SavedTab {
+                    id: TabId(1),
+                    kind: TabKind::Settings,
+                    title: "Settings".into(),
+                    root: None,
+                    active_pane: None,
+                    node_id: None,
+                    standalone_id: None,
+                    detached_bounds: None,
+                },
+                SavedTab {
+                    id: ide_tab,
+                    kind: TabKind::Ide,
+                    title: "IDE".into(),
+                    root: None,
+                    active_pane: None,
+                    node_id: Some(node_id.0.clone()),
+                    standalone_id: None,
+                    detached_bounds: None,
+                },
+            ],
+            active_tab: Some(ide_tab),
+            terminals: HashMap::new(),
+            connected_nodes: Vec::new(),
+        };
+        workspace.apply_workspace_snapshot(snapshot, window, cx);
+        assert_eq!(
+            workspace
+                .tabs(cx)
+                .iter()
+                .map(|tab| tab.kind.clone())
+                .collect::<Vec<_>>(),
+            [TabKind::Settings, TabKind::Ide]
+        );
+        let active = workspace.active_tab(cx).unwrap();
+        assert_eq!(active.kind, TabKind::Ide);
+        assert_eq!(
+            workspace.ide_workspace.read(cx).node_for_tab(active.id),
+            Some(&node_id)
+        );
+    });
+    window_cx.update(|window, _| window.remove_window());
+}
+
+#[gpui::test]
 fn corrupt_workspace_snapshot_opens_an_empty_workspace(cx: &mut TestAppContext) {
     if !isolated_fixture(cx) {
         return;

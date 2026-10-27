@@ -1,5 +1,27 @@
 {
   "sidebar": {
+    "background_tasks": {
+      "summary": "バックグラウンドタスク：{{count}}",
+      "search": "バックグラウンドタスクを検索…",
+      "transferring": "転送中",
+      "reconnecting": "再接続中"
+    },
+    "tab_scope": {
+      "show_all": "すべて表示",
+      "count_all": "· {{total}}",
+      "count_filtered": "· {{visible}}/{{total}}",
+      "all_tooltip": "このウィンドウの全 {{total}} 個のタブを表示します。",
+      "filtered_tooltip": "「{{scope}}」のタブのみ表示中（{{visible}}/{{total}}）。他のタブも開いたままです。",
+      "all": "すべてのタブ",
+      "global": "共通ページ",
+      "local": "ローカルターミナル",
+      "connection": "接続",
+      "empty": "この範囲にタブはありません",
+      "search": "タブの範囲を検索…",
+      "categories": "カテゴリ",
+      "connections": "接続",
+      "hint": "↑↓ 選択 · Enter 切り替え · Esc キャンセル"
+    },
     "search": {
       "title": "セッションを検索",
       "placeholder": "セッションを検索…",
@@ -13,6 +35,7 @@
       "connected_first": "接続中を優先"
     },
     "actions": {
+      "enter_zen": "禅モードに入る",
       "expand": "サイドバーを展開",
       "collapse": "サイドバーを折りたたむ",
       "new_local_terminal": "新規ローカルターミナル",
@@ -41,6 +64,7 @@
       "import_tooltip": ".oxideファイルからインポート",
       "export_tooltip": ".oxideファイルにエクスポート",
       "host_tools": "ホストツール",
+      "more_tools": "その他のツール",
       "knowledge": "ナレッジベース",
       "host_monitor": "監視",
       "gpu": "GPU / NPU",
@@ -65,10 +89,13 @@
       "packages": "パッケージ"
     },
     "tooltips": {
+      "switch_to_light": "ライトテーマに切り替え",
+      "switch_to_dark": "ダークテーマに切り替え",
       "settings": "設定",
       "ai_hint": "OxideSens",
       "switch_tree": "ツリービューに切替",
       "switch_focus": "フォーカスビューに切替",
+      "switch_host": "ホストビューに切り替え",
       "new_connection": "新規接続",
       "lock_app": "OxideTerm をロック",
       "setup_app_lock": "アプリロックを設定",

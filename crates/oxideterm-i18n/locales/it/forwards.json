@@ -1,4 +1,18 @@
 {
+  "ssh_tunnel": {
+    "description": "Inoltra le porte tramite un host SSH salvato.",
+    "title": "Tunnel SSH",
+    "name": "Nome del tunnel",
+    "group": "Gruppo",
+    "group_invalid": "Il percorso del gruppo non può contenere segmenti vuoti.",
+    "host": "Host SSH",
+    "choose_host": "Scegli un host SSH salvato",
+    "startup": "Connetti all’avvio dell’applicazione",
+    "missing_host": "L’host SSH salvato non è disponibile.",
+    "name_required": "Inserisci un nome per il tunnel. Nome e gruppo devono occupare una sola riga.",
+    "address_required": "Inserisci indirizzi di ascolto e destinazione validi.",
+    "save_failed": "Impossibile aggiornare il tunnel SSH."
+  },
   "copy_address": "Copia indirizzo",
   "copied": "Copiato!",
   "forwards": {
@@ -9,13 +23,13 @@
       "vscode": "VS Code (8080)"
     },
     "table": {
-      "title": "Inoltri Attivi",
+      "title": "Inoltro porte",
       "type": "Tipo",
       "local_address": "Indirizzo Locale",
       "remote_address": "Indirizzo Remoto",
       "status": "Stato",
       "actions": "Azioni",
-      "no_forwards": "Nessun inoltro porta attivo"
+      "no_forwards": "Nessuna regola di inoltro porte"
     },
     "type": {
       "local": "locale",
@@ -50,6 +64,7 @@
       "cancel": "Annulla",
       "type": "Tipo",
       "create_forward": "Crea Inoltro",
+      "save_and_start": "Salva e avvia",
       "creating": "Creazione...",
       "save_changes": "Salva Modifiche",
       "saving": "Salvataggio...",
@@ -101,7 +116,7 @@
       "alreadyForwarded": "Inoltrata"
     },
     "messages": {
-      "node_not_ready": "Apri un terminale SSH attivo per questo nodo prima di gestire gli inoltri.",
+      "node_not_ready": "Impossibile avviare la connessione SSH. Connettiti a questo server e riprova.",
       "connection_not_ready": "La connessione SSH non è ancora pronta.",
       "created": "Inoltro creato",
       "updated": "Inoltro aggiornato",

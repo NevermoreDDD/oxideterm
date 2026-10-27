@@ -15,6 +15,14 @@ pub fn preflight_export(
 
     for id in connection_ids {
         let Some(conn) = store.get(id) else {
+            if let Some(profile) = store
+                .plugin_profiles()
+                .iter()
+                .find(|profile| &profile.id == id)
+            {
+                result.connections_with_passwords +=
+                    usize::from(profile.credential_refs.values().any(Option::is_some));
+            }
             continue;
         };
         collect_managed_key_id(&conn.auth, &mut managed_key_ids);
@@ -163,8 +171,18 @@ fn export_connections_to_oxide_inner(
         );
 
     let mut encrypted_connections = Vec::new();
+    let mut plugin_profiles = Vec::new();
     let mut managed_key_ids = HashSet::new();
     for id in connection_ids {
+        if let Some(profile) = store
+            .plugin_profiles()
+            .iter()
+            .find(|profile| &profile.id == id)
+        {
+            profile.validate()?;
+            plugin_profiles.push(profile.portable());
+            continue;
+        }
         let conn = store
             .get(id)
             .ok_or_else(|| OxideFileError::InvalidFormat(format!("Connection {id} not found")))?;
@@ -189,20 +207,52 @@ fn export_connections_to_oxide_inner(
     }
     report_progress("collecting_portable_secrets");
 
-    let credential_selection = crate::CredentialSyncSelection {
+    let mut credential_selection = crate::CredentialSyncSelection {
         connection_ids: connection_ids.iter().cloned().collect(),
         ..Default::default()
     };
-    let selected_totp = store.totp_credentials().iter()
+    // Only TOTP seeds referenced by the privilege copies that actually appear
+    // in this archive should travel; excluded shared credentials must not leak
+    // their verification-code credential.
+    for connection in &encrypted_connections {
+        for credential in &connection.privilege_credentials {
+            if credential.response_mode.uses_totp()
+                && let Some(totp_credential_id) = credential.totp_credential_id.as_deref()
+            {
+                credential_selection
+                    .totp_ids
+                    .insert(totp_credential_id.to_string());
+            }
+        }
+    }
+    let selected_totp = store
+        .totp_credentials()
+        .iter()
         .filter(|p| store.totp_selected(&p.id, &credential_selection))
         .collect::<Vec<_>>();
     let totp_credentials = selected_totp.iter().map(|p| p.portable()).collect();
     let mut portable_secrets = options.portable_secrets.clone();
     if options.include_passwords {
+        let selected_plugins = crate::CredentialSyncSelection {
+            plugin_connection_ids: plugin_profiles.iter().map(|p| p.id.clone()).collect(),
+            ..Default::default()
+        };
+        for secret in store.export_profile_credentials(&selected_plugins, None)? {
+            if !portable_secrets
+                .iter()
+                .any(|existing| existing.id == secret.id && existing.kind == secret.kind)
+            {
+                portable_secrets.push(secret);
+            }
+        }
         for credential in selected_totp {
             let already_exported = portable_secrets.iter().any(|secret| {
-                crate::is_profile_credential(secret) && serde_json::from_str::<crate::CredentialTarget>(&secret.id)
-                    .is_ok_and(|target| target.owner == crate::CredentialOwner::Totp(credential.id.clone()))
+                crate::is_profile_credential(secret)
+                    && serde_json::from_str::<crate::CredentialTarget>(&secret.id).is_ok_and(
+                        |target| {
+                            target.owner == crate::CredentialOwner::Totp(credential.id.clone())
+                        },
+                    )
             });
             if !already_exported && let Some(secret) = store.export_totp_secret(credential)? {
                 portable_secrets.push(secret);
@@ -224,6 +274,7 @@ fn export_connections_to_oxide_inner(
     let remote_desktop_profiles_count =
         count_remote_desktop_profiles_for_export(options.remote_desktop_profiles_json.as_deref());
     let has_extra_payload = options.app_settings_json.is_some()
+        || !plugin_profiles.is_empty()
         || options.quick_commands_json.is_some()
         || options.serial_profiles_json.is_some()
         || options.telnet_profiles_json.is_some()
@@ -233,6 +284,7 @@ fn export_connections_to_oxide_inner(
         || !options.plugin_settings.is_empty()
         || !portable_secrets.is_empty();
     let mut payload = EncryptedPayload {
+        plugin_profiles,
         totp_credentials,
         version: if has_extra_payload { 2 } else { 1 },
         connections: encrypted_connections,
@@ -254,11 +306,17 @@ fn export_connections_to_oxide_inner(
         exported_at: Utc::now(),
         exported_by: format!("OxideTerm v{}", env!("CARGO_PKG_VERSION")),
         description: options.description,
-        num_connections: payload.connections.len(),
+        num_connections: payload.connections.len() + payload.plugin_profiles.len(),
         connection_names: payload
             .connections
             .iter()
             .map(|conn| conn.name.clone())
+            .chain(
+                payload
+                    .plugin_profiles
+                    .iter()
+                    .map(|profile| profile.name.clone()),
+            )
             .collect(),
         has_app_settings: payload.app_settings_json.as_ref().map(|_| true),
         has_quick_commands: payload.quick_commands_json.as_ref().map(|_| true),
@@ -410,25 +468,36 @@ fn export_privilege_credentials(
         return Ok(Vec::new());
     }
 
-    conn.privilege_credentials
-        .iter()
-        .map(|credential| {
-            let secret = if credential.keychain_id.is_some() {
-                store
-                    .get_privilege_credential_secret(&conn.id, &credential.id)
-                    .ok()
-                    .map(SecretString::into_zeroizing)
-            } else {
-                None
-            };
+    store.export_connection_privilege_records(conn)?
+        .into_iter()
+        .map(|record| {
+            let credential = record.metadata;
             Ok(EncryptedPrivilegeCredential {
-                id: credential.id.clone(),
+                // A connection archive carries a scoped copy, never a new global default on import.
+                id: if credential.connection_id == crate::SSH_COMMON_PRIVILEGE_SCOPE_ID {
+                    format!("ssh-common:{}", credential.id)
+                } else {
+                    credential.id.clone()
+                },
                 connection_id: conn.id.clone(),
                 label: credential.label.clone(),
-                kind: credential.kind,
+                prompt_type: credential.prompt_type,
+                response_mode: credential.response_mode,
                 username_hint: credential.username_hint.clone(),
                 prompt_patterns: credential.prompt_patterns.clone(),
-                secret,
+                host_patterns: Vec::new(),
+                second_factor_patterns: if credential.response_mode.waits_for_totp() {
+                    credential.second_factor_patterns.clone()
+                } else {
+                    Vec::new()
+                },
+                second_factor_user_hint: if credential.response_mode.waits_for_totp() {
+                    credential.second_factor_user_hint.clone()
+                } else {
+                    None
+                },
+                totp_credential_id: credential.totp_credential_id.clone(),
+                secret: record.secret.map(SecretString::into_zeroizing),
                 enabled: credential.enabled,
                 require_click_to_send: credential.require_click_to_send,
                 created_at: credential.created_at,
@@ -650,6 +719,7 @@ fn export_forward(forward: &OxideForwardRecord) -> EncryptedForward {
         target_port: forward.target_port,
         description: forward.description.clone(),
         auto_start: forward.auto_start,
+        tunnel: forward.tunnel.clone(),
     }
 }
 

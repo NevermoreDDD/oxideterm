@@ -257,6 +257,21 @@
     "shortcut_count": "件のショートカット"
   },
   "plugin": {
+    "connections": {
+      "name": "名前",
+      "group": "グループ",
+      "cancel": "キャンセル",
+      "save": "保存",
+      "save_connect": "保存して接続",
+      "failed": "操作に失敗しました。接続設定とプラグインの権限を確認してください。",
+      "disconnect": "切断",
+      "connecting": "接続中…",
+      "connected": "接続済み",
+      "disconnected": "切断済み",
+      "unavailable": "接続用プラグインが利用できません。有効にするかインストールしてください。",
+      "password_unchanged": "空欄にすると保存済みの値を維持します",
+      "clear_credentials": "保存済みの認証情報を削除"
+    },
     "install_queued": "待機中 · {{position}} 番目",
     "installing_named": "{{name}} をインストール中",
     "install_queue_count": "{{count}} 件が待機中",
@@ -296,6 +311,7 @@
     "native_sidebar_empty_description": "現在の native 状態はプラグインタブで確認できます。",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "現在のパスワードは、この同期領域で使用したものと一致しません。元のパスワードを入力して保存してから、パスワードを変更してください。忘れた場合は、新しい名前空間を指定して、この端末の設定をアップロードしてください。",
         "protocol_upgrade_required": "同期サーバーを新しいクラウド同期プロトコルに対応したバージョンに更新してから、再度同期してください。",
         "password_change_pending": "パスワードの変更が未完了です。前回入力した新しいパスワードで再試行してください。",
         "change_password": "同期パスワードを変更",
@@ -484,7 +500,7 @@
         "auto_upload_interval": "自動アップロード間隔（分）",
         "default_conflict_strategy": "デフォルトのコンフリクト解決方法",
         "sync_connections": "接続を同期",
-        "sync_forwards": "保存済みフォワードを同期",
+        "sync_forwards": "ポート転送と SSH トンネルを同期",
         "sync_quick_commands": "クイックコマンドを同期",
         "sync_serial_profiles": "シリアルプロファイルを同期",
         "sync_telnet_profiles": "Telnet プロファイルを同期",
@@ -860,6 +876,7 @@
         "redacted": "非表示"
       },
       "diff_fields": {
+        "plugin_configuration": "接続設定",
         "name": "名前",
         "group": "グループ",
         "host": "ホスト",
@@ -1141,6 +1158,8 @@
     "continue_button": "OxideTerm 2 を開始"
   },
   "onboarding": {
+    "more_features": "その他の機能を見る",
+    "less_features": "その他の機能を閉じる",
     "step_welcome": "ようこそ",
     "step_appearance": "外観",
     "step_workflow": "接続と操作",
@@ -1318,8 +1337,8 @@
     "external_import_desc": "SSH 設定や対応するサードパーティ端末マネージャーから、プレビューと重複処理付きでホストをインポートします。"
   },
   "zen_mode": {
-    "hint": "Zen モード — ⌘⇧Z で終了",
-    "hint_other": "Zen モード — Ctrl+Shift+Z で終了"
+    "hint": "Zen モード — {{shortcut}} で終了",
+    "hint_unbound": "Zen モード — コマンドパレットから終了できます"
   },
   "tabbar": {
     "drag_to_dock": "ドラッグしてドッキング",

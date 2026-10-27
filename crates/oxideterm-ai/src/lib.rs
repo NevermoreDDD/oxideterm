@@ -5,7 +5,13 @@ mod application_tools;
 mod chat;
 mod context_sanitizer;
 mod context_window;
+mod images;
 mod key_store;
+pub use images::{
+    AI_IMAGE_MAX_ATTACHMENTS, AI_IMAGE_MAX_BYTES, AI_IMAGE_MAX_PIXELS, AI_IMAGE_REQUEST_BYTES,
+    AiImageAttachment, AiImageInput, AiImageTokenEstimate, estimate_image_tokens, message_images,
+    model_image_input, prepare_image_attachment, prepare_image_history, set_message_images,
+};
 mod mcp;
 mod orchestrator;
 mod persistence;
@@ -27,6 +33,7 @@ mod target_projection;
 mod tool_protocol;
 mod tool_result_protocol;
 mod types;
+pub mod web;
 
 pub use acp::{
     AcpAgentRuntime, AcpAuthMethod, AcpAuthMethodKind, AcpClientEvent, AcpClientEventSender,

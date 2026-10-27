@@ -116,18 +116,13 @@ async fn request_agent_forwarding_for_shell(
     validate_agent_forwarding_response(response)
 }
 
-fn validate_x11_forwarding_response(response: Option<ChannelMsg>) -> Result<(), SshTransportError> {
+fn validate_x11_forwarding_response(
+    response: Option<ChannelMsg>,
+) -> Result<(), X11ForwardingFailure> {
     match response {
         Some(ChannelMsg::Success) => Ok(()),
-        Some(ChannelMsg::Failure) => Err(SshTransportError::Channel(
-            "SSH server rejected X11 forwarding".to_string(),
-        )),
-        Some(_) => Err(SshTransportError::Channel(
-            "SSH server returned an unexpected response while enabling X11 forwarding".to_string(),
-        )),
-        None => Err(SshTransportError::Channel(
-            "SSH channel closed while enabling X11 forwarding".to_string(),
-        )),
+        Some(ChannelMsg::Failure) => Err(X11ForwardingFailure::ServerRejected),
+        Some(_) | None => Err(X11ForwardingFailure::ChannelUnavailable),
     }
 }
 
@@ -166,7 +161,7 @@ mod x11_request_response_tests {
 async fn request_x11_forwarding_for_shell(
     channel: &mut russh::Channel<client::Msg>,
     request: &X11SshRequest,
-) -> Result<(), SshTransportError> {
+) -> Result<(), X11ForwardingFailure> {
     channel
         .request_x11(
             true,
@@ -176,14 +171,10 @@ async fn request_x11_forwarding_for_shell(
             request.screen_number,
         )
         .await
-        .map_err(|error| SshTransportError::Channel(error.to_string()))?;
+        .map_err(|_| X11ForwardingFailure::ChannelUnavailable)?;
     let response = timeout(X11_FORWARDING_RESPONSE_TIMEOUT, channel.wait())
         .await
-        .map_err(|_| {
-            SshTransportError::Channel(
-                "SSH server did not respond to the X11 forwarding request".to_string(),
-            )
-        })?;
+        .map_err(|_| X11ForwardingFailure::RequestTimedOut)?;
     validate_x11_forwarding_response(response)
 }
 
@@ -223,7 +214,11 @@ async fn open_interactive_shell_channel(
     x11_route_id: &str,
     x11_connection_owner: Option<X11ConnectionOwner>,
 ) -> Result<
-    (russh::Channel<client::Msg>, Option<X11ForwardRouteGuard>),
+    (
+        russh::Channel<client::Msg>,
+        Option<X11ForwardRouteGuard>,
+        Option<X11ForwardingStatus>,
+    ),
     (&'static str, SshTransportError),
 > {
     let mut x11_audit = x11_forwarding.as_ref().map(|_| {
@@ -236,10 +231,12 @@ async fn open_interactive_shell_channel(
     });
     // Resolve device-local X11 state before allocating a remote session. X11 is
     // optional, so local preparation failures must not block the regular shell.
+    let mut x11_status = None;
     let prepared_x11 = match x11_forwarding {
         Some(policy) => match prepare_x11_material(policy).await {
             Ok(prepared) => Some(prepared),
-            Err(_error) => {
+            Err(failure) => {
+                x11_status = Some(X11ForwardingStatus::Unavailable(failure));
                 if let Some(audit) = x11_audit.take() {
                     audit.finish(
                         oxideterm_audit::AuditOutcome::Failed,
@@ -251,6 +248,7 @@ async fn open_interactive_shell_channel(
                 // Keep this log fixed because preparation errors can contain
                 // device-local display or xauth details.
                 tracing::warn!(
+                    reason = ?failure,
                     "X11 forwarding is unavailable; continuing with a regular SSH shell"
                 );
                 None
@@ -280,10 +278,8 @@ async fn open_interactive_shell_channel(
             prepared,
             x11_connection_owner,
         );
-        if request_x11_forwarding_for_shell(&mut channel, &request)
-            .await
-            .is_err()
-        {
+        if let Err(failure) = request_x11_forwarding_for_shell(&mut channel, &request).await {
+            x11_status = Some(X11ForwardingStatus::Unavailable(failure));
             if let Some(audit) = x11_audit.take() {
                 audit.finish(
                     oxideterm_audit::AuditOutcome::Failed,
@@ -297,10 +293,11 @@ async fn open_interactive_shell_channel(
             // later Agent forwarding requests.
             drop(request);
             drop(guard);
-            tracing::warn!("X11 forwarding is unavailable; continuing with a regular SSH shell");
+            tracing::warn!(reason = ?failure, "X11 forwarding is unavailable; continuing with a regular SSH shell");
             let _ = channel.close().await;
             channel = open_pty_channel(pooled, cols, rows, pty_modes).await?;
         } else {
+            x11_status = Some(X11ForwardingStatus::Accepted);
             if let Some(audit) = x11_audit.take() {
                 audit.finish(
                     oxideterm_audit::AuditOutcome::Succeeded,
@@ -313,19 +310,18 @@ async fn open_interactive_shell_channel(
         }
     }
     if agent_forwarding {
-        if let Err(error) = request_agent_forwarding_for_shell(&mut channel).await {
-            // A rejected request leaves no usable shell channel. Close it
-            // explicitly so pooled transports do not retain a failed channel.
-            let _ = channel.close().await;
-            return Err(("request-agent-forwarding", error));
+        // OpenSSH accepts Agent forwarding once per physical connection. Serialize
+        // first-time requests so concurrently opened PTYs also reuse that acceptance.
+        let _request = pooled.agent_forwarding_request.lock().await;
+        if !pooled.agent_forwarding_accepted.load(Ordering::Acquire) {
+            if let Err(error) = request_agent_forwarding_for_shell(&mut channel).await {
+                let _ = channel.close().await;
+                return Err(("request-agent-forwarding", error));
+            }
+            pooled.agent_forwarding_accepted.store(true, Ordering::Release);
         }
-        // No later forwarding setup can fail after the connection-wide Agent
-        // admission flag becomes visible to server-opened channels.
-        pooled
-            .agent_forwarding_accepted
-            .store(true, Ordering::Release);
     }
-    Ok((channel, x11_route_guard))
+    Ok((channel, x11_route_guard, x11_status))
 }
 
 async fn open_plain_shell(
@@ -336,8 +332,15 @@ async fn open_plain_shell(
     x11_forwarding: Option<X11ForwardPolicy>,
     x11_route_id: &str,
     x11_connection_owner: Option<X11ConnectionOwner>,
-) -> Result<(russh::Channel<client::Msg>, Option<X11ForwardRouteGuard>), SshTransportError> {
-    let (channel, x11_route_guard) = open_interactive_shell_channel(
+) -> Result<
+    (
+        russh::Channel<client::Msg>,
+        Option<X11ForwardRouteGuard>,
+        Option<X11ForwardingStatus>,
+    ),
+    SshTransportError,
+> {
+    let (channel, x11_route_guard, x11_status) = open_interactive_shell_channel(
         pooled,
         cols,
         rows,
@@ -367,7 +370,7 @@ async fn open_plain_shell(
         let _ = channel.close().await;
         return Err(SshTransportError::Channel(error.to_string()));
     }
-    Ok((channel, x11_route_guard))
+    Ok((channel, x11_route_guard, x11_status))
 }
 
 fn begin_connection_audit(
@@ -1588,6 +1591,8 @@ impl SshTransportClient {
             )
         };
         let shell_started = Arc::new(AtomicBool::new(false));
+        let x11_status = Arc::new(parking_lot::Mutex::new(None));
+        let task_x11_status = x11_status.clone();
         let task_shell_started = shell_started.clone();
         let mut deferred_request_config = deferred_pty.then_some(request_config);
 
@@ -1608,7 +1613,9 @@ impl SshTransportClient {
                     }
                 }
             };
-            let (mut channel, _x11_route_guard) = if let Some(opened_shell) = opened_shell {
+            let (mut channel, _x11_route_guard, forwarding_status) = if let Some(opened_shell) =
+                opened_shell
+            {
                 opened_shell
             } else {
                 let (pty_cols, pty_rows) = tokio::select! {
@@ -1681,7 +1688,13 @@ impl SshTransportClient {
                     }
                 }
             };
+            // Share the result with this terminal only, using its existing activity wake.
+            *task_x11_status.lock() = forwarding_status;
             task_shell_started.store(true, Ordering::Release);
+            let callback = output_tx.activity_callback.read().clone();
+            if let Some(callback) = callback {
+                callback();
+            }
             if let (Some(registry), Some(connection_id)) = (
                 visible_terminal_registry.as_ref(),
                 visible_terminal_connection_id.as_deref(),
@@ -1728,6 +1741,8 @@ impl SshTransportClient {
                         let Some(command) = command else { cancelled = true; break };
                         match command {
                             SshTransportCommand::Data(data) => {
+                                // PTY data may contain shell-agent file contents as well as credentials.
+                                let data = zeroize::Zeroizing::new(data);
                                 output_batcher.note_interaction();
                                 if let Err(error) = channel.data(data.as_slice()).await {
                                     mark_transport_lost(format!(
@@ -1789,6 +1804,7 @@ impl SshTransportClient {
             output_rx,
             auth_banners,
             shell_started,
+            x11_status,
             ssh_connection,
             registry_release,
         })

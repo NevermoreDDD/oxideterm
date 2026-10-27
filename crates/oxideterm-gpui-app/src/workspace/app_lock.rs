@@ -728,48 +728,33 @@ impl WorkspaceApp {
 
         self.plain_settings_card(vec![
             self.card_title("settings_view.general.app_lock_title"),
-            div()
-                .w_full()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap(px(16.0))
-                .child(
+            oxideterm_gpui_settings_view::settings_row(
+                &self.tokens,
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(Self::render_lucide_icon(
+                        LucideIcon::Lock,
+                        16.0,
+                        rgb(self.tokens.ui.text),
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(self.tokens.metrics.ui_text_sm))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(self.i18n.t("settings_view.general.app_lock_label")),
+                    )
+                    .child(self.text_badge(status_label, status_color))
+                    .into_any_element(),
+                Some(
                     div()
-                        .flex_1()
-                        .min_w(px(240.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(Self::render_lucide_icon(
-                                    LucideIcon::Lock,
-                                    16.0,
-                                    rgb(self.tokens.ui.text),
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(px(self.tokens.metrics.ui_text_sm))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .child(self.i18n.t("settings_view.general.app_lock_label")),
-                                )
-                                .child(self.text_badge(status_label, status_color)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(self.tokens.metrics.ui_text_xs))
-                                .text_color(rgb(self.tokens.ui.text_muted))
-                                .child(self.i18n.t("settings_view.general.app_lock_description")),
-                        ),
-                )
-                .child(actions)
-                .into_any_element(),
+                        .child(self.i18n.t("settings_view.general.app_lock_description"))
+                        .into_any_element(),
+                ),
+                actions.into_any_element(),
+            ),
             self.general_checkbox_row(
                 "settings_view.general.app_lock_show_sidebar_icon",
                 "settings_view.general.app_lock_show_sidebar_icon_hint",
@@ -950,6 +935,11 @@ impl WorkspaceApp {
         let titlebar_visible = self.window_titlebar_visible(window);
         let blocked = self.app_lock.retry_blocked();
         let can_submit = !self.app_lock.pending && !blocked;
+        let description_key = if self.knowledge_workspace.read(cx).app_quit_pending() {
+            "menu.unlock_to_finish_quit"
+        } else {
+            "settings_view.general.app_lock_locked_description"
+        };
         let card = oxideterm_gpui_ui::theme_card_surface_shadow(
             div()
                 .w(px(APP_LOCK_SCREEN_CARD_WIDTH))
@@ -986,14 +976,12 @@ impl WorkspaceApp {
                 )
                 .child(
                     div()
+                        .debug_selector(move || description_key.into())
                         .max_w(px(APP_LOCK_SCREEN_DESCRIPTION_WIDTH))
                         .text_center()
                         .text_size(px(self.tokens.metrics.ui_text_sm))
                         .text_color(rgb(self.tokens.ui.text_muted))
-                        .child(
-                            self.i18n
-                                .t("settings_view.general.app_lock_locked_description"),
-                        ),
+                        .child(self.i18n.t(description_key)),
                 )
                 .child(
                     div()
@@ -1079,7 +1067,14 @@ impl WorkspaceApp {
             .track_focus(&self.focus_handle)
             .key_context("Workspace")
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.handle_app_lock_key(event, window, cx);
+                if this.tab_host.read(cx).close_confirm() == Some(&TabCloseConfirm::ApplicationQuit)
+                {
+                    this.handle_tab_close_confirm_key(event, window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else {
+                    this.handle_app_lock_key(event, window, cx);
+                }
             }))
             .when(titlebar_visible, |root| {
                 root.child(self.render_title_bar(window, cx))
@@ -1093,6 +1088,10 @@ impl WorkspaceApp {
                     .justify_center()
                     .p(px(24.0))
                     .child(card),
+            )
+            .when(
+                self.tab_host.read(cx).close_confirm() == Some(&TabCloseConfirm::ApplicationQuit),
+                |root| root.child(self.render_tab_close_confirm_dialog(cx)),
             )
             .child(WorkspaceImeElement::new(
                 cx.entity(),

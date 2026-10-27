@@ -1,5 +1,6 @@
 {
   "ide": {
+    "file_binary": "Ce fichier est binaire et ne peut pas être ouvert dans l’éditeur de texte.",
     "file_too_large": "Le fichier dépasse la limite d’édition de 100 MiB de l’IDE.",
     "file_encoding": "Encodage du fichier",
     "file_line_ending": "Fins de ligne",
@@ -43,6 +44,7 @@
     "search_truncated": "Résultats tronqués. Affinez votre recherche pour des correspondances plus précises.",
     "search_results_count": "{{count}} résultats dans {{files}} fichiers",
     "find_placeholder": "Rechercher",
+    "insert_newline": "Insérer un saut de ligne",
     "replace_placeholder": "Remplacer",
     "find_next": "Match suivant (Enter)",
     "find_previous": "Match précédent (Shift+Enter)",

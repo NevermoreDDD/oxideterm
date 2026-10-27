@@ -290,6 +290,7 @@ impl CloudSyncPageRenderer {
     ) -> AnyElement {
         let theme = self.tokens.ui;
         let focused = self.input.focused_input == Some(input);
+        let target = WorkspaceImeTarget::Settings(input);
         let input_control = {
             let cloud_sync = self.cloud_sync.read(cx);
             let value = if focused {
@@ -299,7 +300,7 @@ impl CloudSyncPageRenderer {
                 // masked by the input primitive and never copied into the renderer.
                 cloud_sync_form_input_value_ref(&cloud_sync.view.form, input).unwrap_or_default()
             };
-            text_input(
+            oxideterm_gpui_ui::text_input::text_input_with_viewport(
                 &self.tokens,
                 TextInputView {
                     value,
@@ -311,12 +312,13 @@ impl CloudSyncPageRenderer {
                     selected_range: self.input.selected_range.clone(),
                     marked_text: self.input.marked_text.as_deref(),
                 },
+                &self.input_anchors.viewport(target.anchor_id()),
+                self.input.active_offset,
             )
             .w_full()
             .min_w(px(0.0))
             .cursor(CursorStyle::IBeam)
         };
-        let target = WorkspaceImeTarget::Settings(input);
         let click_cloud_sync = self.cloud_sync.clone();
         let move_cloud_sync = self.cloud_sync.clone();
         let anchor_cloud_sync = self.cloud_sync.clone();
@@ -1023,24 +1025,21 @@ impl WorkspaceApp {
             .settings
             .clone();
         let destination_changed = !settings.same_destination(&current);
-        let has_replica =
-            match oxideterm_cloud_sync::operation::CloudSyncOperationService::has_local_replica(
-                self.settings_store.path(),
-                &current,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    self.finish_cloud_sync_error("sync", error.to_string(), cx);
-                    return false;
-                }
-            };
-        let changing_password = {
+        let mut provider = CloudSyncKeychainSecretProvider::new(
+            self.cloud_sync
+                .read(cx)
+                .controller
+                .store
+                .state()
+                .secret_hints
+                .clone(),
+        );
+        let changing_password = (|| -> anyhow::Result<bool> {
             let cloud_sync = self.cloud_sync.read(cx);
             let state = cloud_sync.controller.store.state();
-            !settings.local_file_mode
+            let password_touched = !settings.local_file_mode
                 && !destination_changed
                 && cloud_sync.view.form.sync_password_touched
-                && (has_replica || state.remote_exists)
                 && state
                     .secret_hints
                     .get(
@@ -1051,7 +1050,25 @@ impl WorkspaceApp {
                             .unwrap_or(secret_keys::SYNC_PASSWORD),
                     )
                     .copied()
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+            if !password_touched {
+                return Ok(false);
+            }
+            // Restoring the bound password is a settings repair, not another rotation.
+            let requires_rotation = oxideterm_cloud_sync::operation::CloudSyncOperationService::local_sync_password_requires_rotation(
+                self.settings_store.path(),
+                &current,
+                &mut provider,
+                cloud_sync.view.form.sync_password.trim(),
+            )?;
+            Ok(requires_rotation.unwrap_or(state.remote_exists))
+        })();
+        let changing_password = match changing_password {
+            Ok(value) => value,
+            Err(error) => {
+                self.finish_cloud_sync_error("sync", error.to_string(), cx);
+                return false;
+            }
         };
         if changing_password {
             self.cloud_sync.update(cx, |cloud_sync, cx| {
@@ -1062,15 +1079,6 @@ impl WorkspaceApp {
             });
             return false;
         }
-        let mut provider = CloudSyncKeychainSecretProvider::new(
-            self.cloud_sync
-                .read(cx)
-                .controller
-                .store
-                .state()
-                .secret_hints
-                .clone(),
-        );
         let mut secret_handoff = self.cloud_sync.update(cx, |cloud_sync, _cx| {
             cloud_sync.view.form.take_secret_handoff()
         });

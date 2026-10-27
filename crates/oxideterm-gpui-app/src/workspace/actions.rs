@@ -1,7 +1,12 @@
 use super::ime::WorkspaceImeTarget;
 use super::tabs::TabCloseConfirmKeyAction;
 use super::*;
-use oxideterm_gpui_ui::text_input::{text_caret, text_input_value_segments_with_color};
+use gpui::EntityInputHandler;
+use oxideterm_gpui_editor::{EditorContextMenuLabels, TextEditorView};
+use oxideterm_gpui_ui::search_bar::{
+    search_action_button, search_input_height, search_mode_button, search_mode_group, search_panel,
+    search_row,
+};
 use oxideterm_quick_commands::{
     PreparedQuickCommand, QuickCommand, QuickCommandContextValues, QuickCommandRisk,
     QuickCommandTargetContext, QuickCommandTargetProtocol,
@@ -160,19 +165,6 @@ impl TerminalSearchState {
         self.focused == Some(pane_id) && self.blur()
     }
 
-    pub(super) fn replace_query(
-        &mut self,
-        pane_id: PaneId,
-        range: Option<std::ops::Range<usize>>,
-        text: &str,
-    ) -> bool {
-        let Some(search) = self.panes.get_mut(&pane_id).filter(|search| search.visible) else {
-            return false;
-        };
-        oxideterm_editor_core::utf16::replace_utf16(&mut search.query, range, text);
-        true
-    }
-
     pub(super) fn remove(&mut self, pane_id: PaneId) {
         self.panes.remove(&pane_id);
         if self.focused == Some(pane_id) {
@@ -185,14 +177,20 @@ impl TerminalSearchState {
 pub(super) struct SearchBarState {
     pub(super) visible: bool,
     pub(super) query: String,
+    pub(super) options: oxideterm_terminal::TerminalSearchOptions,
+    editor: Option<Entity<TextEditorView>>,
+    _editor_subscription: Option<Subscription>,
+    editor_version: u64,
     pub(super) active_match: Option<usize>,
     pub(super) match_count: usize,
+    invalid_regex: bool,
 }
 
 impl SearchBarState {
     pub(super) fn sync_from_terminal(&mut self, status: TerminalSearchStatus) {
         self.active_match = status.active_match;
         self.match_count = status.match_count;
+        self.invalid_regex = status.invalid_regex;
     }
 
     fn clear_match_state(&mut self) {
@@ -213,13 +211,166 @@ fn terminal_tab_capture_keystroke(keystroke: &gpui::Keystroke) -> bool {
 mod terminal_search_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[gpui::test]
+    fn terminal_search_accepts_multiline_paste_without_inserting_newlines(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let executable = std::env::current_exe().unwrap();
+        let fixture_key = "OXIDETERM_SEARCH_INPUT_TEST_DIR";
+        let Some(fixture_dir) = std::env::var_os(fixture_key) else {
+            // Workspace storage is process-wide; isolate it in a portable child.
+            let directory = tempfile::tempdir_in(executable.parent().unwrap()).unwrap();
+            let child = directory.path().join(executable.file_name().unwrap());
+            std::fs::hard_link(&executable, &child).unwrap();
+            std::fs::write(directory.path().join("portable"), []).unwrap();
+            let output = std::process::Command::new(child)
+                .arg(cx.test_function_name().unwrap())
+                .arg("--nocapture")
+                .env(fixture_key, directory.path())
+                .env_remove("APPIMAGE")
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let settings_path = default_settings_path();
+        assert!(settings_path.starts_with(PathBuf::from(fixture_dir)));
+        let mut settings = SettingsStore::load_from_path(settings_path).unwrap();
+        settings.settings_mut().ssh_config.auto_load_hosts = false;
+        settings.settings_mut().onboarding_completed = true;
+        settings.save().unwrap();
+        cx.update(|cx| {
+            cx.bind_keys(crate::platform::app_key_bindings(settings.settings()));
+            crate::keybindings::install_context_keybindings(
+                &settings.settings().keybindings.overrides,
+                cx,
+            );
+        });
+        cx.executor().allow_parking();
+        let pane_id = PaneId(100);
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| WorkspaceApp::new(window, cx, None, None).unwrap());
+            workspace.update(cx, |workspace, cx| {
+                let pane = cx.new(|cx| {
+                    TerminalPane::new_local_with_config_and_preferences(
+                        oxideterm_terminal::LocalPtyConfig {
+                            shell: Some(oxideterm_terminal::ShellInfo::new(
+                                "test-cat", "cat", "/bin/cat",
+                            )),
+                            load_profile: false,
+                            ..Default::default()
+                        },
+                        Default::default(),
+                        window,
+                        cx,
+                    )
+                    .unwrap()
+                });
+                let session = oxideterm_workspace::TerminalSessionId(100);
+                workspace.tab_host.update(cx, |host, cx| {
+                    host.register_terminal_pane(pane_id, session, pane, window.window_handle(), cx);
+                    host.insert_and_select_main_tab(Tab {
+                        id: TabId(100),
+                        kind: TabKind::LocalTerminal,
+                        title: "Terminal".into(),
+                        title_source: TabTitleSource::Static,
+                        root_pane: Some(oxideterm_workspace::PaneNode::leaf(pane_id, session)),
+                        active_pane_id: Some(pane_id),
+                    });
+                });
+            });
+            crate::workspace::window_shell::WorkspaceWindowShell::new(workspace, window, cx)
+        });
+        let workspace = shell.read_with(cx, |shell, _| shell.session_entity());
+        cx.simulate_resize(gpui::size(px(1000.0), px(650.0)));
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_search_for_pane(pane_id, window, cx)
+            });
+            window.draw(cx).clear(cx);
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("α\r\nβ".into()));
+        });
+        let modifier = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        cx.simulate_keystrokes(&format!("{modifier}-v"));
+        cx.simulate_keystrokes(&format!("{modifier}-enter"));
+        cx.simulate_input("γ");
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            let search = &workspace.search.panes[&pane_id];
+            assert_eq!(search.query, "α\nβγ");
+            assert_eq!(
+                search.editor.as_ref().unwrap().read(cx).buffer().text(),
+                "α\nβγ"
+            );
+            assert_eq!(workspace.active_ime_target(cx), None);
+        });
+        cx.simulate_keystrokes("enter");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.search.panes[&pane_id].query, "α\nβγ")
+        });
+        cx.simulate_keystrokes("escape");
+        workspace.read_with(cx, |workspace, _| {
+            assert!(!workspace.search.panes[&pane_id].visible)
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_search_for_pane(pane_id, window, cx)
+            });
+        });
+        cx.simulate_input("替换");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.search.panes[&pane_id].query, "替换");
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.detach_tab_to_window(TabId(100), None, window, cx);
+            });
+        });
+        let detached = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .tab_host
+                .read(cx)
+                .detached_window_handle(TabId(100))
+                .unwrap()
+        });
+        let mut detached_cx = gpui::VisualTestContext::from_window(detached, cx);
+        detached_cx.run_until_parked();
+        detached_cx.update(|window, cx| {
+            // Detached content mounts on the first platform frame.
+            window.simulate_next_frame(cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_search_for_pane(pane_id, window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        detached_cx.simulate_keystrokes("tab");
+        detached_cx.update(|window, cx| {
+            let workspace = workspace.read(cx);
+            let pane = &workspace.tab_host.read(cx).panes()[&pane_id];
+            assert!(pane.read(cx).focus_handle(cx).is_focused(window));
+            assert!(workspace.search.panes[&pane_id].visible);
+            assert_eq!(workspace.search.focused, None);
+        });
+    }
+
     #[test]
     fn pane_searches_keep_their_queries_and_matches_across_focus_and_close() {
         let mut searches = TerminalSearchState::default();
         let first = PaneId(10);
         let second = PaneId(20);
         searches.open(first);
-        searches.replace_query(first, None, "错误🦀");
+        searches.panes.get_mut(&first).unwrap().query = "错误日志".into();
         searches
             .panes
             .get_mut(&first)
@@ -228,12 +379,13 @@ mod terminal_search_tests {
                 query: Some("错误🦀".into()),
                 active_match: Some(2),
                 match_count: 4,
+                invalid_regex: false,
             });
         searches.blur();
         assert!(searches.panes[&first].visible);
         assert_eq!(searches.focused, None);
         searches.open(second);
-        searches.replace_query(second, None, "warning");
+        searches.panes.get_mut(&second).unwrap().query = "warning".into();
         searches
             .panes
             .get_mut(&second)
@@ -242,6 +394,7 @@ mod terminal_search_tests {
                 query: Some("warning".into()),
                 active_match: Some(0),
                 match_count: 1,
+                invalid_regex: false,
             });
         searches.open(first);
         assert_eq!(
@@ -250,10 +403,8 @@ mod terminal_search_tests {
                 searches.panes[&first].active_match,
                 searches.panes[&first].match_count
             ),
-            ("错误🦀", Some(2), 4)
+            ("错误日志", Some(2), 4)
         );
-        searches.replace_query(first, Some(2..4), "日志");
-        assert_eq!(searches.panes[&first].query, "错误日志");
         assert_eq!(
             (
                 &*searches.panes[&second].query,
@@ -263,7 +414,6 @@ mod terminal_search_tests {
             ("warning", Some(0), 1)
         );
         searches.close(first);
-        assert!(!searches.replace_query(first, None, "late input"));
         searches.open(first);
         assert_eq!(searches.panes[&first].query, "错误日志");
         searches.remove(first);
@@ -437,10 +587,157 @@ impl WorkspaceApp {
         self.blur_terminal_quick_commands_input(cx);
         self.focus_search_pane(pane_id, cx);
         self.search.open(pane_id);
-        window.focus(&self.focus_handle, cx);
+        self.ensure_search_editor(pane_id, cx);
+        self.focus_search_editor(pane_id, window, cx);
+        if let Some(editor) = self
+            .search
+            .panes
+            .get(&pane_id)
+            .and_then(|search| search.editor.clone())
+        {
+            editor.update(cx, |editor, cx| editor.select_all(cx));
+        }
         self.update_search_query_for_pane(pane_id, false, cx);
-        self.select_all_active_text_input(cx);
         cx.notify();
+    }
+
+    fn ensure_search_editor(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        let Some(search) = self.search.panes.get(&pane_id) else {
+            return;
+        };
+        if search.editor.is_some() {
+            return;
+        }
+        let text = search.query.clone();
+        let tokens = self.tokens;
+        let placeholder = self.i18n.t("search.placeholder");
+        let labels = self.search_editor_context_labels();
+        let editor = TextEditorView::new_search_input(&text, &tokens, placeholder, labels, cx);
+        let version = editor.read(cx).buffer().version();
+        let subscription = cx.observe(&editor, move |this, editor, cx| {
+            let version = editor.read(cx).buffer().version();
+            let Some(search) = this.search.panes.get_mut(&pane_id) else {
+                return;
+            };
+            if search.editor_version == version {
+                return;
+            }
+            search.editor_version = version;
+            let text = editor.read(cx).buffer().text();
+            if search.query == text {
+                return;
+            }
+            search.query = text;
+            this.update_search_query_for_pane(pane_id, true, cx);
+        });
+        if let Some(search) = self.search.panes.get_mut(&pane_id) {
+            search.editor = Some(editor);
+            search.editor_version = version;
+            search._editor_subscription = Some(subscription);
+        }
+    }
+
+    fn search_editor_context_labels(&self) -> EditorContextMenuLabels {
+        EditorContextMenuLabels {
+            copy: self.i18n.t("menu.copy"),
+            cut: self.i18n.t("fileManager.cut"),
+            paste: self.i18n.t("menu.paste"),
+            select_all: self.i18n.t("fileManager.selectAll"),
+        }
+    }
+
+    fn focus_search_editor(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_search_pane(pane_id, cx);
+        if let Some(editor) = self
+            .search
+            .panes
+            .get(&pane_id)
+            .and_then(|search| search.editor.as_ref())
+        {
+            window.focus(&editor.read(cx).focus_handle(cx), cx);
+        }
+    }
+
+    pub(super) fn search_editor_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search.panes.values().any(|search| {
+            search.visible
+                && search
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    pub(super) fn handle_search_editor_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((pane_id, editor)) = self.search.panes.iter().find_map(|(pane_id, search)| {
+            search
+                .visible
+                .then_some(search.editor.as_ref())
+                .flatten()
+                .filter(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
+                .map(|editor| (*pane_id, editor.clone()))
+        }) else {
+            return false;
+        };
+        if editor.update(cx, |editor, cx| {
+            editor.marked_text_range(window, cx).is_some()
+        }) {
+            return false;
+        }
+        if crate::keybindings::keystroke_matches_action(
+            &event.keystroke,
+            "terminal.search",
+            &self.settings_store.settings().keybindings.overrides,
+        ) {
+            editor.update(cx, |editor, cx| editor.select_all(cx));
+            return true;
+        }
+        match event.keystroke.key.as_str() {
+            "enter" => self.search_next_for_pane(pane_id, !event.keystroke.modifiers.shift, cx),
+            "escape" | "tab" => {
+                if event.keystroke.key == "escape" {
+                    self.hide_search(pane_id, cx);
+                } else {
+                    self.search.blur();
+                }
+                if let Some(pane) = self.tab_host.read(cx).panes().get(&pane_id).cloned() {
+                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub(super) fn sync_search_editor_appearance(&self, cx: &mut Context<Self>) {
+        let tokens = self.tokens;
+        for search in self.search.panes.values() {
+            if let Some(editor) = &search.editor {
+                editor.update(cx, |editor, cx| {
+                    editor.apply_runtime_settings(
+                        &tokens,
+                        tokens.metrics.font_family.to_string(),
+                        tokens.metrics.ui_text_sm,
+                        1.5,
+                        false,
+                        false,
+                        cx,
+                    );
+                    editor.set_placeholder(Some(self.i18n.t("search.placeholder")), cx);
+                    editor.set_context_menu_labels(self.search_editor_context_labels());
+                });
+            }
+        }
     }
 
     pub(super) fn hide_search(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
@@ -470,6 +767,9 @@ impl WorkspaceApp {
         let Some(search) = self.search.panes.get_mut(&pane_id) else {
             return;
         };
+        if !search.visible {
+            return;
+        }
         let query = (!search.query.is_empty()).then(|| search.query.clone());
         if reset_match {
             search.active_match = query.as_ref().map(|_| 0);
@@ -480,7 +780,12 @@ impl WorkspaceApp {
                 status
             } else {
                 pane.update(cx, |pane, cx| {
-                    pane.set_search_query(query, search.active_match, cx)
+                    pane.set_search_query_with_options(
+                        query,
+                        search.options,
+                        search.active_match,
+                        cx,
+                    )
                 })
             };
             search.sync_from_terminal(status);
@@ -571,8 +876,23 @@ impl WorkspaceApp {
             self.context_sidebar_rendered = false;
             self.clear_ai_sidebar_keyboard_focus(cx);
             const ZEN_HINT_TTL: Duration = Duration::from_millis(2500);
+            let label = tabs::effective_shortcut_label(
+                "app.zenMode",
+                &self.settings_store.settings().keybindings.overrides,
+            )
+            .map_or_else(
+                || self.i18n.t("zen_mode.hint_unbound"),
+                |shortcut| {
+                    self.i18n
+                        .t("zen_mode.hint")
+                        .replace("{{shortcut}}", &shortcut)
+                },
+            );
             self.apply_workspace_overlay_intent(
-                WorkspaceOverlayIntent::ShowZenHint { ttl: ZEN_HINT_TTL },
+                WorkspaceOverlayIntent::ShowZenHint {
+                    ttl: ZEN_HINT_TTL,
+                    label,
+                },
                 cx,
             );
         } else {
@@ -921,6 +1241,9 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active_window_modal_owner(cx).is_some() {
+            return;
+        }
         if matches!(
             self.active_ime_target_for_window(window.window_handle().window_id(), cx),
             Some(WorkspaceImeTarget::AuditPolicy(_))
@@ -952,8 +1275,13 @@ impl WorkspaceApp {
             cx.stop_propagation();
             return;
         }
+        if self.handle_context_tools_menu_key(&event.keystroke.key, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
 
-        if self.terminal_command_sender_editor_focused(window, cx)
+        if self.search_editor_focused(window, cx)
+            || self.terminal_command_sender_editor_focused(window, cx)
             || self.quick_command_text_editor_focused(window, cx)
         {
             // Child editor handlers own the bubble path while focused.
@@ -1178,6 +1506,11 @@ impl WorkspaceApp {
         }
 
         if self.sftp_view().read(cx).focused_input().is_some()
+            || (self.sftp_focused_surface == sftp::SftpSurfaceId::Sidebar
+                && self.focus_handle.is_focused(window)
+                && !self.sidebar_collapsed
+                && self.effective_sidebar_panel_section() == SidebarSection::Sessions
+                && self.embedded_sftp_target(cx).is_some())
             || self
                 .active_content_tab(cx)
                 .is_some_and(|tab| tab.kind == TabKind::Sftp)
@@ -1265,6 +1598,12 @@ impl WorkspaceApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // An inline IDE keeps the terminal tab identity while owning its content.
+        // Unhandled text must reach the IDE input handler, never the hidden PTY.
+        if self.active_ide_surface(cx).is_some() {
+            return false;
+        }
+
         let terminal_active = self.active_tab(cx).is_some_and(|tab| {
             matches!(
                 tab.kind,
@@ -2098,6 +2437,21 @@ impl WorkspaceApp {
         };
         if pane.is_tmux_control_mode() {
             protocol = QuickCommandTargetProtocol::Tmux;
+        }
+        if let Some(node) = self
+            .session_id_for_pane(pane_id, cx)
+            .and_then(|session_id| {
+                self.workspace_runtime
+                    .read(cx)
+                    .ssh_terminal_node_id(session_id)
+            })
+            .and_then(|node_id| self.ssh_nodes.get(&node_id))
+        {
+            // Temporary SSH sessions have endpoint metadata even before the shell reports a cwd.
+            values.host = Some(Zeroizing::new(node.endpoint.host.clone()));
+            values.username = Some(Zeroizing::new(node.endpoint.username.clone()));
+            values.port = Some(node.endpoint.port);
+            values.connection = Some(Zeroizing::new(node.title.clone()));
         }
         if let Some(saved) = entry
             .as_ref()
@@ -3044,37 +3398,25 @@ impl WorkspaceApp {
     }
 
     pub(super) fn render_search_bar(&self, pane_id: PaneId, cx: &mut Context<Self>) -> AnyElement {
-        const SEARCH_PANEL_BG_ALPHA: u32 = 0xf5; // Tauri bg-theme-bg-elevated translated to native opacity.
-        const SEARCH_PANEL_BORDER_ALPHA: u32 = 0xcc; // Tauri border-theme-border.
-
         let theme = self.tokens.ui;
         let Some(search) = self.search.panes.get(&pane_id) else {
             return div().into_any_element();
         };
-        let focused = self.focused_search_pane(cx) == Some(pane_id);
-        let target = WorkspaceImeTarget::Search(pane_id);
-        let has_query = !search.query.is_empty();
-        let marked_text = self.marked_text_for_target(target, cx);
-        let selected_range = focused
-            .then(|| self.ime_selected_range_for_target(target, cx))
-            .flatten();
-        let input_range = selected_range.filter(|_| has_query && marked_text.is_none());
-        let selection_range = input_range.clone().filter(|range| range.start < range.end);
-        let caret_offset = input_range
-            .as_ref()
-            .filter(|range| range.start == range.end)
-            .map(|range| range.start);
-        let shows_selection = selection_range.is_some();
-        let shows_positioned_caret = caret_offset.is_some() && !shows_selection;
-        let query = if has_query {
-            search.query.clone()
-        } else {
-            self.i18n.t("search.placeholder")
+        let Some(editor) = search.editor.clone() else {
+            return div().into_any_element();
         };
+        let input_height = search_input_height(
+            editor.read(cx).buffer().line_count() as usize,
+            editor.read(cx).line_height(),
+        );
+        let has_query = !search.query.is_empty();
         let match_count = search.match_count;
         let active_match = search.active_match.filter(|index| *index < match_count);
         let navigation_disabled = !has_query || match_count == 0;
-        let result_label = if !has_query {
+        let invalid_pattern = search.invalid_regex;
+        let result_label = if invalid_pattern {
+            self.i18n.t("search.invalid_regex")
+        } else if !has_query {
             String::new()
         } else if match_count == 0 {
             self.i18n.t("search.no_results")
@@ -3082,31 +3424,11 @@ impl WorkspaceApp {
             format!("{}/{}", active_match.unwrap_or(0) + 1, match_count)
         };
 
-        div()
+        search_panel(&self.tokens)
             .id(("terminal-search", pane_id.0))
-            .absolute()
-            .top(px(12.0))
-            .right(px(12.0))
-            .w(px(420.0))
-            .max_w(relative(0.92))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .rounded(px(self.tokens.radii.md))
-            .border_1()
-            .border_color(rgba((theme.border << 8) | SEARCH_PANEL_BORDER_ALPHA))
-            .bg(rgba((theme.bg_elevated << 8) | SEARCH_PANEL_BG_ALPHA))
-            .shadow_lg()
-            .text_size(px(13.0))
-            .text_color(rgb(theme.text))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                div()
-                    .h(px(44.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(12.0))
+                search_row()
                     .border_b_1()
                     .border_color(rgba((theme.border << 8) | 0x99))
                     .child(Self::render_lucide_icon(
@@ -3115,69 +3437,73 @@ impl WorkspaceApp {
                         rgb(theme.text_muted),
                     ))
                     .child(
-                        self.text_input_with_workspace_ime(
-                            target,
-                            div()
-                                .h(px(28.0))
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .flex()
-                                .items_center()
-                                .overflow_hidden()
-                                .rounded(px(self.tokens.radii.sm))
-                                .px(px(2.0))
-                                .cursor_text()
-                                .text_color(if has_query {
-                                    rgb(theme.text)
-                                } else {
-                                    rgb(theme.text_muted)
-                                })
-                                .when(focused && !has_query && marked_text.is_none(), |input| {
-                                    input
-                                        .child(text_caret(&self.tokens, self.input_caret.visible()))
-                                })
-                                .child(if has_query {
-                                    text_input_value_segments_with_color(
-                                        &self.tokens,
-                                        &query,
-                                        false,
-                                        selection_range,
-                                        caret_offset,
-                                        self.input_caret.visible(),
-                                        Some(theme.text),
-                                    )
-                                    .into_any_element()
-                                } else {
-                                    div().child(query).into_any_element()
-                                })
-                                .when_some(marked_text, |input, marked| {
-                                    input.child(
-                                        div()
-                                            .underline()
-                                            .text_color(rgb(theme.text))
-                                            .child(marked.to_string()),
-                                    )
-                                })
-                                .when(
-                                    focused
-                                        && has_query
-                                        && !shows_selection
-                                        && !shows_positioned_caret,
-                                    |input| {
-                                        input.child(text_caret(
-                                            &self.tokens,
-                                            self.input_caret.visible(),
-                                        ))
-                                    },
-                                ),
-                            move |this, cx| this.focus_search_pane(pane_id, cx),
-                            cx,
-                        ),
+                        div()
+                            .id(("terminal-search-input", pane_id.0))
+                            .aria_label(self.i18n.t("search.placeholder"))
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .max_w_full()
+                            .h(px(input_height))
+                            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                                this.focus_search_pane(pane_id, cx);
+                            }))
+                            .child(editor),
                     )
+                    .child({
+                        let mut row = search_mode_group();
+                        for (index, text, key, selected) in [
+                            (
+                                0usize,
+                                "Aa",
+                                "search.match_case",
+                                search.options.case_sensitive,
+                            ),
+                            (1, ".*", "search.use_regex", search.options.regex),
+                        ] {
+                            let tokens = self.tokens;
+                            let label = self.i18n.t(key);
+                            row = row.child(
+                                search_mode_button(&tokens, text, selected)
+                                    .id(("terminal-search-mode", index))
+                                    .aria_label(label.clone())
+                                    .tooltip(move |_, cx| {
+                                        oxideterm_gpui_ui::tooltip::tooltip_view(
+                                            tokens,
+                                            label.clone(),
+                                            None,
+                                            cx,
+                                        )
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            if let Some(search) =
+                                                this.search.panes.get_mut(&pane_id)
+                                            {
+                                                match index {
+                                                    0 => {
+                                                        search.options.case_sensitive =
+                                                            !search.options.case_sensitive
+                                                    }
+                                                    _ => {
+                                                        search.options.regex = !search.options.regex
+                                                    }
+                                                }
+                                            }
+                                            this.focus_search_editor(pane_id, window, cx);
+                                            this.update_search_query_for_pane(pane_id, true, cx);
+                                            cx.stop_propagation();
+                                        }),
+                                    ),
+                            );
+                        }
+                        row
+                    })
                     .when(has_query, |row| {
                         row.child(
                             div()
                                 .flex_none()
+                                .max_w_full()
                                 .min_w(px(48.0))
                                 .text_size(px(12.0))
                                 .text_color(rgb(theme.text_muted))
@@ -3185,98 +3511,60 @@ impl WorkspaceApp {
                         )
                     })
                     .child(
-                        div()
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(self.tokens.radii.md))
-                            .cursor_pointer()
-                            .hover(move |style| {
-                                if navigation_disabled {
-                                    style
-                                } else {
-                                    style.bg(rgb(theme.bg_hover))
-                                }
-                            })
-                            .child(Self::render_lucide_icon(
-                                LucideIcon::ArrowUp,
-                                14.0,
-                                if navigation_disabled {
-                                    rgba((theme.text_muted << 8) | 0x66)
-                                } else {
-                                    rgb(theme.text_muted)
-                                },
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _event, _window, cx| {
-                                    this.search_next_for_pane(pane_id, false, cx);
-                                    cx.stop_propagation();
-                                }),
-                            ),
+                        search_action_button(
+                            &self.tokens,
+                            ("terminal-search-arrow-up", pane_id.0),
+                            "lucide/arrow-up.svg",
+                            self.i18n.t("ide.find_previous"),
+                            navigation_disabled,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.search_next_for_pane(pane_id, false, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
                     )
                     .child(
-                        div()
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(self.tokens.radii.md))
-                            .cursor_pointer()
-                            .hover(move |style| {
-                                if navigation_disabled {
-                                    style
-                                } else {
-                                    style.bg(rgb(theme.bg_hover))
-                                }
-                            })
-                            .child(Self::render_lucide_icon(
-                                LucideIcon::ArrowDown,
-                                14.0,
-                                if navigation_disabled {
-                                    rgba((theme.text_muted << 8) | 0x66)
-                                } else {
-                                    rgb(theme.text_muted)
-                                },
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _event, _window, cx| {
-                                    this.search_next_for_pane(pane_id, true, cx);
-                                    cx.stop_propagation();
-                                }),
-                            ),
+                        search_action_button(
+                            &self.tokens,
+                            ("terminal-search-arrow-down", pane_id.0),
+                            "lucide/arrow-down.svg",
+                            self.i18n.t("ide.find_next"),
+                            navigation_disabled,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                this.search_next_for_pane(pane_id, true, cx);
+                                cx.stop_propagation();
+                            }),
+                        ),
                     )
                     .child(
-                        div()
-                            .size(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(self.tokens.radii.md))
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(rgb(theme.bg_hover)))
-                            .child(Self::render_lucide_icon(
-                                LucideIcon::X,
-                                14.0,
-                                rgb(theme.text_muted),
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _event, window, cx| {
-                                    let restore_focus = this.search.focused == Some(pane_id)
-                                        || this.active_pane_id(cx) == Some(pane_id);
-                                    this.hide_search(pane_id, cx);
-                                    if restore_focus
-                                        && let Some(pane) =
-                                            this.tab_host.read(cx).panes().get(&pane_id).cloned()
-                                    {
-                                        pane.update(cx, |pane, cx| pane.focus(window, cx));
-                                    }
-                                    cx.stop_propagation();
-                                }),
-                            ),
+                        search_action_button(
+                            &self.tokens,
+                            ("terminal-search-x", pane_id.0),
+                            "lucide/x.svg",
+                            self.i18n.t("ide.close_search"),
+                            false,
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, window, cx| {
+                                let restore_focus = this.search.focused == Some(pane_id)
+                                    || this.active_pane_id(cx) == Some(pane_id);
+                                this.hide_search(pane_id, cx);
+                                if restore_focus
+                                    && let Some(pane) =
+                                        this.tab_host.read(cx).panes().get(&pane_id).cloned()
+                                {
+                                    pane.update(cx, |pane, cx| pane.focus(window, cx));
+                                }
+                                cx.stop_propagation();
+                            }),
+                        ),
                     ),
             )
             .child(

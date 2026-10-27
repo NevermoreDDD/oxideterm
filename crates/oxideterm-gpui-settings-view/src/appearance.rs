@@ -11,7 +11,6 @@ use gpui::{
     AnyElement, Div, IntoElement, ObjectFit, ParentElement, SharedString, Styled, div, img,
     prelude::*, px, relative, rgb, rgba,
 };
-use oxideterm_gpui_ui::text_input::{TextInputView, text_input};
 use oxideterm_i18n::I18n;
 use oxideterm_settings::PersistedSettings;
 use oxideterm_theme::{AppUiColors, TerminalTheme, ThemeTokens};
@@ -70,7 +69,7 @@ pub fn settings_appearance_card_shell(
         card,
         tokens,
         background_active,
-        SETTINGS_BG_ACTIVE_SURFACE_ALPHA,
+        oxideterm_gpui_ui::theme_glass_card_background_alpha(tokens),
     )
     .into_any_element()
 }
@@ -121,20 +120,36 @@ pub fn settings_appearance_row(
     hint_key: &str,
     control: AnyElement,
 ) -> AnyElement {
-    // Rows are pure label/hint/control layout; callers decide which control
-    // handles focus, mutation, or async work.
+    settings_row(
+        tokens,
+        div().child(i18n.t(label_key)).into_any_element(),
+        (!hint_key.is_empty()).then(|| div().child(i18n.t(hint_key)).into_any_element()),
+        control,
+    )
+}
+
+/// Shared row geometry accepts plain or selectable copy without owning input state.
+pub fn settings_row(
+    tokens: &ThemeTokens,
+    label: AnyElement,
+    hint: Option<AnyElement>,
+    control: AnyElement,
+) -> AnyElement {
+    const LABEL_MIN_WIDTH: f32 = 180.0;
     div()
         .w_full()
         .min_w(px(0.0))
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_center()
         .justify_between()
         .gap(px(tokens.metrics.settings_row_gap))
         .child(
             div()
                 .flex_1()
-                .min_w(px(0.0))
+                .min_w(px(LABEL_MIN_WIDTH))
+                .flex_basis(px(LABEL_MIN_WIDTH))
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
@@ -143,14 +158,16 @@ pub fn settings_appearance_row(
                         .text_size(px(tokens.metrics.ui_text_sm))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(rgb(tokens.ui.text))
-                        .child(i18n.t(label_key)),
+                        .child(label),
                 )
-                .child(
-                    div()
-                        .text_size(px(tokens.metrics.ui_text_xs))
-                        .text_color(rgb(tokens.ui.text_muted))
-                        .child(i18n.t(hint_key)),
-                ),
+                .when_some(hint, |label, hint| {
+                    label.child(
+                        div()
+                            .text_size(px(tokens.metrics.ui_text_xs))
+                            .text_color(rgb(tokens.ui.text_muted))
+                            .child(hint),
+                    )
+                }),
         )
         .child(control)
         .into_any_element()
@@ -859,13 +876,13 @@ pub fn settings_theme_editor_duplicate_row(label: AnyElement, select: AnyElement
 
 pub fn settings_theme_editor_text_input(
     tokens: &ThemeTokens,
-    view: TextInputView,
+    control: Div,
     kind: ThemeEditorTextInputKind,
     mono_font_family: SharedString,
 ) -> Div {
     // This builds only the visual text-input primitive. Mouse/IME handlers and
     // anchor probes are attached by the app around the returned control.
-    let control = text_input(tokens, view)
+    let control = control
         .h(px(SETTINGS_THEME_EDITOR_INPUT_HEIGHT))
         .cursor(gpui::CursorStyle::IBeam);
     match kind {
@@ -1293,4 +1310,81 @@ fn settings_theme_editor_preview_badge(
         })
         .child(label)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn settings_rows_keep_control_width_and_wrap_below_copy(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        let tokens = oxideterm_theme::default_tokens();
+        for (width, control_width, show_hint, stacked) in [
+            (640.0, 200.0, true, false),
+            (360.0, 200.0, true, true),
+            (260.0, 80.0, true, true),
+            (640.0, 360.0, true, false),
+            (360.0, 200.0, false, true),
+        ] {
+            window.draw(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(width), px(200.0)),
+                |_, _| {
+                    settings_row(
+                        &tokens,
+                        div()
+                            .w_full()
+                            .h(px(20.0))
+                            .bg(rgb(0xff0000))
+                            .into_any_element(),
+                        show_hint.then(|| {
+                            div()
+                                .w_full()
+                                .h(px(40.0))
+                                .bg(rgb(0x00ff00))
+                                .into_any_element()
+                        }),
+                        div()
+                            .w(px(control_width))
+                            .h(px(32.0))
+                            .bg(rgb(0x0000ff))
+                            .into_any_element(),
+                    )
+                },
+            );
+            window.update(|window, _| {
+                let quads = window.painted_quads();
+                let bounds = |color| {
+                    quads
+                        .iter()
+                        .find(|quad| quad.background == rgb(color).into())
+                        .unwrap()
+                        .bounds
+                };
+                let label = bounds(0xff0000);
+                let control = bounds(0x0000ff);
+                let scale = window.scale_factor();
+                assert_eq!(control.size.width.0 / scale, control_width);
+                assert!(control.right().0 / scale <= width);
+                if show_hint {
+                    let hint = bounds(0x00ff00);
+                    assert_eq!(hint.left(), label.left());
+                    assert_eq!((hint.top().0 - label.bottom().0) / scale, 4.0);
+                }
+                if stacked {
+                    let copy_bottom = if show_hint {
+                        bounds(0x00ff00).bottom()
+                    } else {
+                        label.bottom()
+                    };
+                    assert_eq!(control.left(), label.left());
+                    assert_eq!((control.top().0 - copy_bottom.0) / scale, 24.0);
+                } else {
+                    assert_eq!(control.right().0 / scale, width);
+                    assert!(control.left() >= label.right());
+                }
+            });
+        }
+    }
 }

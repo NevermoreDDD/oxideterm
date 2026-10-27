@@ -36,7 +36,7 @@ When editing a credential, leave the secret empty to keep its saved value. Remov
 
 ## Mosh connections
 
-Mosh is useful for a terminal that must continue across brief network changes. The remote host needs `mosh-server` installed and a reachable UDP port; OxideTerm provides the local client itself.
+Mosh is useful for a terminal that must continue across brief network changes. First install and enable **Mosh** in **Plugin Manager → Marketplace** on this device. The plugin supplies the local transport; the remote host still needs `mosh-server` installed and a reachable UDP port.
 
 1. Open New Connection and choose **Mosh**. Enter the host, username, SSH port, and authentication used to start the remote session.
 2. In **Mosh Settings**, leave **mosh-server executable** as `mosh-server`, or set its remote path if it is not on the server's command search path.
@@ -103,9 +103,19 @@ Resource snapshots can become stale independently of the terminal tab. Refresh t
 
 ## Graphics And VNC
 
+For RDP display-layout support, use host 2.2.5 or later with RDP plugin 0.2.0 or later. Single-monitor mode can follow the viewer size or use a fixed resolution. All-monitor mode follows the active physical displays; resizing the window changes local fitting rather than overwriting the remote topology. Display changes and reconnect refresh the layout.
+
+For RDP or VNC, open **Plugin Manager → Marketplace**, install and enable the corresponding **RDP** or **VNC** plugin, then choose that protocol in **New Connection**. Saved profiles remain in Session Manager; each device needs its own plugin installation, including when the profile arrives through cloud sync. Missing or disabled plugins are shown in the connection form.
+
 Graphics/VNC sessions are visual app surfaces backed either by a saved RDP/VNC profile or by a connected node's graphics runtime. They are useful when a remote workflow needs a desktop or graphical application rather than terminal output.
 
 The viewer state is separate from terminal scrollback. If a profile-backed viewer disconnects, reconnect its provider/helper; if a node-launched viewer disconnects, reconnect or restart it from the node context. Do not duplicate a saved SSH profile just to repair a viewer.
+
+## Telnet Line Endings
+
+Telnet exposes separate transmit and receive line-ending controls in the connection form and terminal control bar. Use transmit settings when Enter does not submit correctly, and receive settings when output lines are laid out incorrectly; these are separate from Backspace key mapping. Changes apply to the live terminal and are saved back to its associated Telnet profile when it has one.
+
+Telnet does not encrypt traffic. Use it only on an appropriate trusted network or protected route; choose SSH where encrypted remote login is available.
 
 ## Serial Terminals
 
@@ -125,6 +135,20 @@ Use `Save serial profile` and `Profile name` when the same device settings shoul
 
 Serial terminals do not provide SFTP, port forwarding, ProxyJump, SSH host-key verification, SSH Agent, remote IDE, or SSH connection-pool behavior. Serial split panes are disabled because a serial device is normally an exclusive writer.
 
+## Privilege Credentials
+
+In Settings → Credentials, use **SSH common** to save sudo, su, or custom-prompt credentials for your SSH sessions. Connection-specific matches take priority; local terminals have a separate scope.
+
+SSH-common credentials can also define **host patterns** such as `hktkosl*` or `i-*`. The field starts with `*`, which matches every host. Matching supports `*` and `?`, is case-insensitive, and uses the active terminal's SSH host. The helper first keeps only enabled credentials that match the current prompt, then applies this order: connection-specific credential, then a host-matched SSH-common credential, then an SSH-common credential whose patterns are empty or only `*`. A disabled or non-matching connection-specific credential does not hide a matching shared credential.
+
+Enable **Fill automatically and press Enter** to send a matching password without pressing Enter first. It applies only when exactly one credential matches. For SSH common, use a specific host pattern when you do not want the automation to apply to every host; the default `*` matches all hosts.
+
+**Prompt type** and **Response mode** are independent. Prompt type tells the helper whether it is answering a sudo prompt, an su prompt, or a custom prompt fragment. Response mode selects **Password only**, **Password, then TOTP prompt**, or **Password + TOTP in one response**. Separate mode uses **Second-stage prompt patterns** plus an optional **Second-stage user hint** to identify the verification-code prompt; combined mode sends the password and code together and does not use the second-stage fields. Both TOTP modes require an existing verification-code credential for the seed. After the password is filled, the helper sends one code automatically when auto-fill is enabled, otherwise it shows an inline hint for Enter. A repeated second-factor prompt falls back to manual input.
+
+When a password prompt has one matching credential, press Enter at the inline hint to fill it. With several matches, Enter opens a chooser showing each credential's name, type, and source. Use arrow keys and Enter, click an entry, or press Esc to cancel. Starting manual input or changing the terminal closes the chooser.
+
+Full connection sync includes the common scope when sensitive-credential sync is enabled; selecting only some connections leaves that shared scope unchanged. An encrypted connection export with passwords includes scoped copies of common credentials whose host patterns match the exported connection, plus only the verification-code credentials those copies reference. Importing that package attaches the copies to the imported connections without creating a global default.
+
 ## Port Forwards
 
 Use the forwarding UI to create and manage local, remote, and dynamic forwards.
@@ -136,6 +160,20 @@ Forward types:
 - Dynamic: a SOCKS-style tunnel.
 
 Attach forwards to the owning connection so their lifecycle is clear. Enable auto-start only for forwards that should start whenever the connection opens. When testing a new forward, confirm both the forwarding row and the owning connection are healthy.
+
+## Standalone SSH Tunnels
+
+Use a standalone tunnel when you need a forwarded port without opening a terminal.
+
+1. Open **New Connection → Advanced Connections → SSH Tunnel**.
+2. Enter a name and optional group, then select the saved SSH host that will carry the tunnel.
+3. Choose **Local**, **Remote**, or **Dynamic (SOCKS5)**. Set the bind address and port; local and remote forwards also need a destination host and port.
+4. Choose **Save** for later use, or **Save and Start** to connect now.
+5. Enable **Connect on application startup** only if this tunnel should connect whenever OxideTerm starts. Authentication may still require your input.
+
+Manage saved tunnels from **Session Manager** and inspect running rules in **Port Forwarding**. A tunnel retains its own SSH connection usage, so closing an unrelated terminal does not stop it. Stop the tunnel explicitly when it is no longer needed. Exiting OxideTerm stops its tunnels; they do not run as an independent background service.
+
+Tunnel profiles participate in cloud sync and encrypted `.oxide` import/export. Running connections are not synchronized. After moving a profile to another device, check the associated SSH host, authentication, and local bind port before starting it.
 
 ## Validation And Export
 

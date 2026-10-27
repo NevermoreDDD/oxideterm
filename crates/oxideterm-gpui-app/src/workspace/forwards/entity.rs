@@ -35,7 +35,7 @@ pub(in crate::workspace) enum ForwardingDeliveryIntent {
         restored: u32,
         detail: String,
         job_id: String,
-        created_forwards: Vec<(String, String)>,
+        created_forwards: Vec<(Arc<ForwardingManager>, String)>,
         bindings: Vec<(String, String, ConnectionConsumer)>,
     },
     Runtime(ForwardEvent),
@@ -239,6 +239,10 @@ impl ForwardingWorkspaceEntity {
         );
     }
 
+    pub(in crate::workspace) fn operation_pending(&self) -> bool {
+        self.view.pending
+    }
+
     pub(super) fn request_port_scan(
         &mut self,
         node_id: NodeId,
@@ -293,10 +297,6 @@ impl ForwardingWorkspaceEntity {
         self.tab_nodes
             .iter()
             .find_map(|(tab_id, mapped_node_id)| (mapped_node_id == node_id).then_some(*tab_id))
-    }
-
-    pub(in crate::workspace) fn tab_matches_node(&self, tab_id: TabId, node_id: &NodeId) -> bool {
-        self.tab_nodes.get(&tab_id) == Some(node_id)
     }
 
     pub(in crate::workspace) fn map_tab_to_node(

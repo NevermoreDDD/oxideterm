@@ -257,6 +257,21 @@
     "shortcut_count": "atajos"
   },
   "plugin": {
+    "connections": {
+      "name": "Nombre",
+      "group": "Grupo",
+      "cancel": "Cancelar",
+      "save": "Guardar",
+      "save_connect": "Guardar y conectar",
+      "failed": "No se pudo completar la operación. Revisa la configuración de conexión y los permisos del complemento.",
+      "disconnect": "Desconectar",
+      "connecting": "Conectando…",
+      "connected": "Conectado",
+      "disconnected": "Desconectado",
+      "unavailable": "El complemento de conexión no está disponible. Actívalo o instálalo para conectar.",
+      "password_unchanged": "Deja el campo vacío para conservar el valor guardado",
+      "clear_credentials": "Borrar las credenciales guardadas"
+    },
     "install_queued": "En espera · posición {{position}}",
     "installing_named": "Instalando {{name}}",
     "install_queue_count": "{{count}} en espera",
@@ -296,6 +311,7 @@
     "native_sidebar_empty_description": "Abre la pestaña de plugins para ver el estado native actual.",
     "cloud_sync": {
       "causal": {
+        "password_mismatch": "La contraseña actual no coincide con la de este espacio de sincronización. Introduce y guarda la contraseña original antes de cambiarla. Si la has olvidado, utiliza un espacio de nombres nuevo y sube la configuración de este dispositivo.",
         "protocol_upgrade_required": "Actualiza el servidor de sincronización a una versión compatible con el nuevo protocolo de sincronización en la nube y vuelve a sincronizar.",
         "password_change_pending": "Hay un cambio de contraseña pendiente. Reinténtalo con la misma contraseña nueva.",
         "change_password": "Cambiar contraseña de sincronización",
@@ -484,7 +500,7 @@
         "auto_upload_interval": "Intervalo de subida automática (minutos)",
         "default_conflict_strategy": "Estrategia de conflicto predeterminada",
         "sync_connections": "Sincronizar conexiones",
-        "sync_forwards": "Sincronizar reenvíos guardados",
+        "sync_forwards": "Sincronizar reenvíos de puertos y túneles SSH",
         "sync_quick_commands": "Sincronizar comandos rápidos",
         "sync_serial_profiles": "Sincronizar perfiles serie",
         "sync_telnet_profiles": "Sincronizar perfiles Telnet",
@@ -860,6 +876,7 @@
         "redacted": "oculto"
       },
       "diff_fields": {
+        "plugin_configuration": "Configuración de conexión",
         "name": "Nombre",
         "group": "Grupo",
         "host": "Host",
@@ -1047,6 +1064,8 @@
     "terminal_shortcut_pending": "Atajo de terminal del plugin esperando el runtime"
   },
   "onboarding": {
+    "more_features": "Ver más funciones",
+    "less_features": "Ver menos funciones",
     "step_welcome": "Bienvenida",
     "step_appearance": "Apariencia",
     "step_workflow": "Conexiones y uso",
@@ -1318,8 +1337,8 @@
     "continue_button": "Continuar a OxideTerm 2"
   },
   "zen_mode": {
-    "hint": "Modo Zen — Pulsa ⌘⇧Z para salir",
-    "hint_other": "Modo Zen — Pulsa Ctrl+Shift+Z para salir"
+    "hint": "Modo Zen — Pulsa {{shortcut}} para salir",
+    "hint_unbound": "Modo Zen — Sal desde la paleta de comandos"
   },
   "tabbar": {
     "drag_to_dock": "Arrastrar para acoplar",
