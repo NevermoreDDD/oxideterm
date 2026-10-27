@@ -12,7 +12,6 @@ section as the detailed changelog attached to the corresponding GitHub Release.
 #### 🗂️ fork 工作区与便携版
 
 - 自动保存标签、分屏比例、活动页面、独立窗口位置和连接身份，重新打开时恢复布局并通过现有连接配置重连；工作区快照不保存密码或终端输出。
-- Windows 便携包预装选定的语言、主机工具和远程桌面插件，解压后可直接使用。
 - fork 当前提供稳定更新源；以前选择 Beta 的用户会使用 fork 的稳定更新源，不再请求不存在的 Beta 清单。
 
 #### 🪟 官方上游：工作区与终端
@@ -65,7 +64,6 @@ This is the community fork of OxideTerm maintained by NevermoreDDD. It includes 
 #### 🗂️ Fork workspace and portable builds
 
 - Automatically saves tabs, split ratios, active pages, detached-window placement, and connection identities. Reopening restores the layout and reconnects using existing connection settings; snapshots do not contain passwords or terminal output.
-- Windows portable archives bundle selected language, host-tool, and remote-desktop plugins for use after extraction.
 - The fork currently provides a stable update feed. Existing Beta selections use the fork's stable feed instead of requesting an unavailable Beta manifest.
 
 #### 🪟 Official upstream: workspace and terminal
