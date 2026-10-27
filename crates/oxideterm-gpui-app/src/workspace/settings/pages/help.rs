@@ -55,7 +55,10 @@ impl WorkspaceApp {
     pub(in crate::workspace) fn help_version_card(&self, cx: &mut Context<Self>) -> AnyElement {
         let is_portable = self.resolved_help_portable_mode(cx);
         let channel_label = update_channel_label(
-            self.settings_store.settings().general.update_channel,
+            oxideterm_update::endpoint_for_channel(
+                self.settings_store.settings().general.update_channel,
+            )
+            .channel,
             &self.i18n,
         );
         let version_rows = div()
@@ -312,14 +315,8 @@ impl WorkspaceApp {
 
         self.setting_row(
             "settings_view.help.update_channel",
-            "settings_view.help.update_channel_hint",
-            self.settings_select_control(
-                SettingsSelect::UpdateChannel,
-                channel_label,
-                false,
-                Some(self.tokens.metrics.settings_select_width),
-                cx,
-            ),
+            "",
+            self.help_pill_badge(channel_label, self.tokens.ui.text),
             cx,
         )
     }

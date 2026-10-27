@@ -753,7 +753,6 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
             0,
             "settings_view.help.version_info",
             &[
-                "settings_view.help.update_channel_hint",
                 "settings_view.help.check_update",
                 "settings_view.help.release_notes",
                 "settings_view.help.channel_stable",

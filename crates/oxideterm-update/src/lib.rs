@@ -20,9 +20,7 @@ mod state;
 mod version;
 mod windows_update_helper;
 
-pub use channel::{
-    BETA_UPDATE_ENDPOINT, STABLE_UPDATE_ENDPOINT, UpdateEndpoint, endpoint_for_channel,
-};
+pub use channel::{STABLE_UPDATE_ENDPOINT, UpdateEndpoint, endpoint_for_channel};
 pub use download::{
     DownloadProgress, NativeUpdateClient, NativeUpdateDownload, NativeUpdateError,
     NativeUpdateRequest, NativeUpdateStatus, prune_resumable_update_cache,
